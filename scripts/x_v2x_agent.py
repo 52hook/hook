@@ -84,8 +84,8 @@ class Xagent(BasicAgent):
         # 构建 NMPC 基础
         self._model.solver_basis(
             Q=np.diag([8.0, 8.0, 6.0, 1.5, 2.5]),      # [x, y, yaw, vx, vy]
-            R=np.diag([1.0, 2.5]),                      # [a, δ]
-            Rd=np.diag([10.0, 2500.0])                    # [Δa, Δδ]
+            R=np.diag([0.8, 2.5]),                      # [a, δ]
+            Rd=np.diag([60.0, 2500.0])                    # [Δa, Δδ]
         )
         self.Q_origin = copy.deepcopy(self._model.Q)
         self._log_data = []
@@ -98,6 +98,9 @@ class Xagent(BasicAgent):
 
         # 是否启用多边形 + 对偶硬约束
         self._use_dual = use_dual
+        # --- 额外的加速度平滑缓存，用来消掉高频锯齿 ---
+        self._a_hist = deque([0.0] * 8, maxlen=8)   # 最近 5 个 a_cmd
+
 
     # ======================================================================
     #   1) 只保留“与我相关”的车辆（前方 / 交叉口 / 环岛）
@@ -202,12 +205,10 @@ class Xagent(BasicAgent):
     # ======================================================================
     #   2) 额外的“前车安全层”：只做防倒车 + 限制低速急刹
     # ======================================================================
-    def _front_ttc_brake(self, current_state, acc_cmd, steer_cmd):
+    def _front_ttc_brake(self, current_state, acc_cmd, steer_cmd, emergency=False):
         """
-        现在只保留“防倒车 + 低速不要一下子刹死”的保护，不再做二次 TTC 急刹。
-
-        - 防止在 v≈0 时给负加速度，被当成倒车指令；
-        - 在车速较低时，限制一下过大的负加速度，减小顿挫。
+        现在只保留“防倒车 + 低速不要一下子轻微刹车”的保护。
+        在 emergency=True 时，不再限制低速负加速度，让 MPC 自己决定急刹。
         """
         v_ego = max(self._model.get_v(), 0.0)
 
@@ -215,12 +216,12 @@ class Xagent(BasicAgent):
         if v_ego < 0.5 and acc_cmd < 0.0:
             acc_cmd = 0.0
 
-        # 2) 低速阶段：限制一下过大的急刹（可按需要再调）
-        if v_ego < 3.0 and acc_cmd < -1.5:
+        # 2) 低速阶段：只有在非紧急工况时才限制急刹
+        if (not emergency) and v_ego < 3.0 and acc_cmd < -1.5:
             acc_cmd = -1.5
 
-        # 其它情况不再改动，加速度完全由 MPC + APF/TTC 决定
         return acc_cmd, steer_cmd
+
 
     # --- helper: clamp-safe access to waypoints_queue ---
     def _wq(self, idx):
@@ -522,25 +523,52 @@ class Xagent(BasicAgent):
             min_long_dist=min_long
         )
 
-        # === 按航向把障碍拆成“纵向前车”和“交叉/汇入交通” ===
-        obs_long, obs_cross = [], []
-        obs_long_infer, obs_cross_infer = [], []
+        # === 按航向把障碍拆成“纵向前车 / 交叉来车 / 对向直行车” ===
+        obs_long, obs_cross, obs_opp = [], [], []
+        obs_long_infer, obs_cross_infer, obs_opp_infer = [], [], []
+
+        ego_x = float(current_state[0])
+        ego_y = float(current_state[1])
         ego_yaw = float(current_state[2])
+        c_ego = math.cos(-ego_yaw)
+        s_ego = math.sin(-ego_yaw)
+
+        opp_min_dist = None  # 最近的对向直行车距离
 
         if obs is not None and len(obs) > 0:
             for k, ob in enumerate(obs):
                 ox, oy, oyaw = float(ob[0]), float(ob[1]), float(ob[2])
+
                 yaw_diff = oyaw - ego_yaw
                 yaw_diff = math.atan2(math.sin(yaw_diff), math.cos(yaw_diff))
+                abs_yaw = abs(yaw_diff)
 
-                # 50°~130° 视为交叉/横向车
-                if math.radians(50.0) <= abs(yaw_diff) <= math.radians(130.0):
+                dx = ox - ego_x
+                dy = oy - ego_y
+                rel_x = c_ego * dx - s_ego * dy   # 自车坐标系：前方为 +x
+                rel_y = s_ego * dx + c_ego * dy   # 左侧为 +y
+                d = math.hypot(rel_x, rel_y)
+
+                # ① 对向直行车：航向差接近 180°，在前方且横向距离不大
+                if (abs_yaw > math.radians(140.0)
+                        and rel_x > 0.0
+                        and abs(rel_y) < 4.0
+                        and d < 40.0):
+                    obs_opp.append(ob)
+                    obs_opp_infer.append(obs_infer[k])
+                    if (opp_min_dist is None) or (d < opp_min_dist):
+                        opp_min_dist = d
+                # ② 交叉 / 汇入交通：50°~130°
+                elif math.radians(50.0) <= abs_yaw <= math.radians(130.0):
                     obs_cross.append(ob)
                     obs_cross_infer.append(obs_infer[k])
+                # ③ 同向前车 / 慢车
                 else:
-                    # 同向 / 对向 前车
                     obs_long.append(ob)
                     obs_long_infer.append(obs_infer[k])
+
+        # 是否进入“对向来车减速让行模式”：最近对向车 < 25 m
+        yield_for_opp = (opp_min_dist is not None and opp_min_dist < 25.0)
 
         # === 下面是原来的 debug 画框，不变 ===
         # 先把预测轨迹从 numpy 转成 python list 方便 casadi 使用
@@ -548,9 +576,10 @@ class Xagent(BasicAgent):
         for i in range(len(obs_infer)):
             obs_infer[i] = obs_infer[i].tolist()
 
-        # 前向车辆 / 交叉车辆的预测也一并转成 list
+        # 前向 / 交叉 / 对向车辆的预测也一并转成 list
         obs_long_infer = [np.asarray(o).tolist() for o in obs_long_infer]
         obs_cross_infer = [np.asarray(o).tolist() for o in obs_cross_infer]
+        obs_opp_infer = [np.asarray(o).tolist() for o in obs_opp_infer]
 
         temp_obs = copy.copy(obs)
         if len(temp_obs) > 0:
@@ -576,6 +605,26 @@ class Xagent(BasicAgent):
         for i in range(len(pedes_infer)):
             pedes_infer[i] = pedes_infer[i].tolist()
         temp_pedes = copy.copy(pedes)
+    
+
+        # === 基于“对向直行车”的简单减速让行速度规划 ===
+        # 注意：这里只改 ref_traj 的速度分量，不动几何路径
+        if yield_for_opp:
+            v_now = max(cur_v, 0.0)
+            v_stop = 0.5          # 希望在冲突区域附近基本停下（>0 防止数值问题）
+            t_brake = 3.0         # 期望大约 3 s 内从 v_now 减到 v_stop
+
+            for i in range(self._model.horizon):
+                ti = i * self._dt
+                alpha_brake = min(ti / t_brake, 1.0)
+                v_des_i = v_now + (v_stop - v_now) * alpha_brake
+                if v_des_i < 0.0:
+                    v_des_i = 0.0
+
+                # 只允许把参考速度往下压，不能调高
+                if v_des_i < ref_traj[3, i]:
+                    ref_traj[3, i] = v_des_i
+        
         if len(temp_pedes) > 0:
             for i in range(len(temp_pedes)):
                 bb = carla.BoundingBox(
@@ -711,28 +760,42 @@ class Xagent(BasicAgent):
 
         # ----- APF 障碍 / 行人 / TTC -----
 
-        # 1) 车辆 APF：把前向车辆和交叉车辆分开
-        #    - obs_long_infer：前向 / 同向 / 对向车，主要碰撞对象
-        #    - obs_cross_infer：横向 / 斜向驶来的车，只给较小斥力
+        # 1) 车辆 APF：前向 / 交叉 / 对向直行车分开处理
+        #    - obs_long_infer：同向前车，主要跟车对象
+        #    - obs_opp_infer ：对向直行车，主要靠减速让行，横向斥力较弱
+        #    - obs_cross_infer：横向 / 斜向驶来的车，只给中等斥力
         obs_ratio_front = 150
-        obs_ratio_cross = 60   # 交叉车权重更小
+        obs_ratio_cross = 60
+        obs_ratio_opp = 40      # 对向车默认斥力更弱
 
         if is_roundabout_like:
             # 在环岛 / 紧弯里整体再软一点
             obs_ratio_front = 80
             obs_ratio_cross = 40
+            obs_ratio_opp = 30
 
-        # 前向车辆（排在 obs_long_infer 里）
+        # 如果已经进入“对向来车减速让行模式”，进一步弱化横向斥力
+        if yield_for_opp:
+            obs_ratio_opp = 10
+
+        # 前向车辆
         if len(obs_long_infer) > 0:
             self._model.solver_add_soft_obs(
                 obs_long_infer, ratio=obs_ratio_front, carla=True
             )
 
-        # 横向 / 交叉车辆：只给弱一些的斥力，避免远处右转车把主车推到对向车道
+        # 对向直行车辆：只给很弱的 APF，避免把车强行推到右侧
+        if len(obs_opp_infer) > 0:
+            self._model.solver_add_soft_obs(
+                obs_opp_infer, ratio=obs_ratio_opp, carla=True
+            )
+
+        # 横向 / 交叉车辆：比前向稍弱
         if len(obs_cross_infer) > 0:
             self._model.solver_add_soft_obs(
                 obs_cross_infer, ratio=obs_ratio_cross, carla=True
             )
+
 
         # 2) 行人 APF 保持不变（还是优先绕行人）
         if len(pedes) > 0:
@@ -753,17 +816,22 @@ class Xagent(BasicAgent):
             if ttc_val > 1e-3:
                 print("---------------the apf for ttc is attached-----------------")
         # 只把前向车辆作为主 APF，交叉车的 APF 记一半权重
+        # 前向车 APF + 对向 / 交叉车 APF（对向/交叉只记一半权重）
         apf_obs += self._model.soft_obs_apf(obs_long, ref_traj)
+        if len(obs_opp) > 0:
+            apf_obs += 0.5 * self._model.soft_obs_apf(obs_opp, ref_traj)
         if len(obs_cross) > 0:
             apf_obs += 0.5 * self._model.soft_obs_apf(obs_cross, ref_traj)
+
         apf_pede += self._model.soft_obs_apf(pedes, ref_traj, pede=True)
 
         # ========== 4.5 椭圆硬约束兜底：只对最近几辆前向车辆 ==========
         if hasattr(self._model, "set_ellip_backup_obstacles"):
-            # 兜底硬约束只对“前向车辆”生效，避免远处横向车把主车推到对向
-            if len(obs_long_infer) > 0:
-                # 只挑最近 2 辆前向车
-                ellip_obs = obs_long_infer[:2]
+            # 兜底硬约束对“前向 + 对向直行车”都生效
+            front_like = obs_long_infer + obs_opp_infer
+            if len(front_like) > 0:
+                # 只挑最近 2 辆
+                ellip_obs = front_like[:2]
                 self._model.set_ellip_backup_obstacles(
                     ellip_obs,
                     a=4.5,   # 椭圆长半轴，可按车长调整
@@ -771,8 +839,8 @@ class Xagent(BasicAgent):
                     margin=0.1  # 安全裕度
                 )
             else:
-                # 周围没有前向车时清空兜底集合
                 self._model.set_ellip_backup_obstacles([])
+
 
 
 
@@ -799,54 +867,68 @@ class Xagent(BasicAgent):
         raw_a = float(self._a_opt[0])
         raw_delta = float(self._delta_opt[0])
 
-        # ---------- 6.0 根据当前环境自适应调整 steering 滤波强度 ----------
+        # ---------- 6.0 环境判定，用于调节滤波强度 ----------
         no_front_threat = (apf_obs < 1e-3 and apf_pede < 1e-3 and apf_ttc < 1e-3)
         almost_straight = (k_window_max < 0.008)   # 前方几乎直线
-        # 新增：弯道 / 环岛但前方还是安全
-        curved_but_safe = (not almost_straight) and (k_window_max < 0.04) and no_front_threat
+        safe_and_straight = no_front_threat and almost_straight
 
-        alpha_a = 0.35
+        # ---------- 6.0.1 额外：检测“危险工况”（需要优先跟随 MPC 急刹） ----------
+        danger = (apf_ttc > 0.15) or (apf_obs > 0.25) or (apf_pede > 0.20)
 
-        if almost_straight and no_front_threat:
-            # 出口直线且无威胁：方向盘最“重”
+        # === 6.1 纵向 a：按危险/安全分两种平滑策略 ===
+        if danger:
+            # 紧急避碰 / 跟车距离很近：
+            #   - 基本不做平滑，只靠后面的 jerk 限制防抖
+            #   - jerk 限制放得比较宽，方便急刹
+            self._a_hist.clear()
+            self._a_cmd = raw_a
+            max_da = 0.9          # 后面 jerk 限制使用（允许较大的变化）
+        else:
+            # 普通巡航工况：重点是“好看 + 舒适”
+            if safe_and_straight:
+                # 完全安全 + 直路：加速度变化尽量平
+                alpha_a = 0.15      # 更信上一拍输出
+                max_da = 0.25
+            else:
+                # 有些弯 / 轻微障碍：稍微灵一点
+                alpha_a = 0.25
+                max_da = 0.30
+
+            # 一阶低通
+            a_lpf = alpha_a * raw_a + (1.0 - alpha_a) * self._a_cmd
+
+            # 8 点移动平均，抹掉高频锯齿
+            self._a_hist.append(a_lpf)
+            self._a_cmd = float(sum(self._a_hist) / len(self._a_hist))
+
+
+
+        # === 6.2 横向 δ：沿用你原来的自适应逻辑 ===
+        if safe_and_straight:
             alpha_delta = 0.30
             max_delta_step = 0.05
-        elif curved_but_safe:
-            # 环岛 / 大弯，但前方没有车、人、TTC 压力：
-            #   比“有威胁”时更平滑一些，抑制环岛里来回抖
-            alpha_delta = 0.45
-            max_delta_step = 0.10
         else:
-            # 有前车/行人/小 TTC 或者曲率很大：保持原来的灵敏度
-            alpha_delta = 0.6
+            alpha_delta = 0.60
             max_delta_step = 0.18
 
-
-        # --- 加速度：一阶低通 ---
-        self._a_cmd = alpha_a * raw_a + (1.0 - alpha_a) * self._a_cmd
-
-        # --- 转向：自适应一阶低通 + 转速限制 ---
         delta_lp = alpha_delta * raw_delta + (1.0 - alpha_delta) * self._delta_cmd
         delta_step = np.clip(delta_lp - self._delta_cmd,
                              -max_delta_step, max_delta_step)
         self._delta_cmd = self._delta_cmd + delta_step
 
+        v_ref = ref_traj[3, 0]
+        v_err = cur_v - v_ref
 
-
-        # ====== 6.1 纵向加速度“死区”：误差小 + 无 TTC 压力 就把小油门归零 ======
-        v_ref = ref_traj[3, 0]          # 这一拍参考速度
-        v_err = cur_v - v_ref           # cur_v 上面已经算过：self._model.get_v()
-
-        if abs(v_err) < 0.3 and abs(self._a_cmd) < 0.2 and apf_ttc < 1e-3:
+        # 只有在“完全安全”且非危险时才用加速度死区
+        if (not danger) and abs(v_err) < 0.4 and abs(self._a_cmd) < 0.25 and apf_ttc < 1e-3:
             self._a_cmd = 0.0
 
-        # ====== 6.2 前车安全层：仅防倒车 / 低速急刹 ======
+        # 把 danger 作为 emergency 传给前车安全层，危险时不再限制急刹
         safe_acc, safe_delta = self._front_ttc_brake(
-            current_state, self._a_cmd, self._delta_cmd
+            current_state, self._a_cmd, self._delta_cmd, emergency=danger
         )
 
-        # ---- 6.3 先做全局饱和，再做 jerk 限制（加速度）----
-        max_da = 0.35   # 每 0.1s 最多改 0.35 m/s^2，大约 3.5 m/s^3
+ 
         safe_acc = float(np.clip(safe_acc, -3.0, 3.0))
 
         da = safe_acc - self._a_cmd_last
