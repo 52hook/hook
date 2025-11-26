@@ -1,0 +1,963 @@
+
+import os
+import sys
+
+try:
+    sys.path.append(os.path.join(
+        os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))), 'official'))
+    sys.path.append(os.path.join(
+        os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))), 'utils'))
+except IndexError:
+    pass
+
+import copy
+import carla
+import math
+import time
+import numpy as np
+import utils.interpolate as itp
+import utils.carla_utils as ca_u
+from enum import Enum
+from collections import deque
+from official.basic_agent import BasicAgent
+from official.misc import get_trafficlight_trigger_location, is_within_distance
+from official.global_route_planner import GlobalRoutePlanner as GlobalRoutePlanner
+
+# polygon helpers (CARLA actors -> convex polygon half-spaces)
+from utils.geometry_poly import actors_to_Ab
+
+
+class RoadOption(Enum):
+    """
+    RoadOption represents the possible topological configurations when moving
+    from a segment of lane to other.
+    """
+    VOID = -1
+    LEFT = 1
+    RIGHT = 2
+    STRAIGHT = 3
+    LANEFOLLOW = 4
+    CHANGELANELEFT = 5
+    CHANGELANERIGHT = 6
+
+
+class Xagent(BasicAgent):
+    def __init__(self, env, model, dt=0.1, use_dual=True) -> None:
+        """
+        env   : simulation environment (provides ego_vehicle, get_obs, get_pedes)
+        model : Vehicle model (vehicle_obs.Vehicle)
+        dt    : controller step time
+        use_dual : 是否启用“多边形 + 对偶硬约束”
+                   True  -> UDMC-X (你的改进版)
+                   False -> 原始 UDMC（仅 APF / 椭圆约束）
+        """
+        self._env = env
+        self._vehicle = env.ego_vehicle
+        self._model = model
+
+        self._world = self._vehicle.get_world()
+        self._map = self._world.get_map()
+
+        self._last_acc_cmd = 0.0
+        self._last_delta_cmd = 0.0
+
+
+        self._base_min_distance = 5.0
+        self._waypoints_queue = deque(maxlen=100000)
+        self._d_dist = 0.4
+        self._sample_resolution = 2.0
+        # state of lane_change
+        self._a_opt = np.array([0.0] * self._model.horizon)
+        self._delta_opt = np.array([0.0] * self._model.horizon)
+        self._dt = dt
+
+        self._a_cmd = 0.0
+        self._delta_cmd = 0.0
+        self._a_cmd_last = 0.0
+
+        self._next_states = None
+        self._last_traffic_light = None
+        self._last_traffic_waypoint = None
+
+        # 构建 NMPC 基础
+        self._model.solver_basis(
+            Q=np.diag([8.0, 8.0, 6.0, 1.5, 2.5]),      # [x, y, yaw, vx, vy]
+            R=np.diag([1.0, 2.5]),                      # [a, δ]
+            Rd=np.diag([10.0, 2500.0])                    # [Δa, Δδ]
+        )
+        self.Q_origin = copy.deepcopy(self._model.Q)
+        self._log_data = []
+        self._simu_time = 0
+
+        self._global_planner = GlobalRoutePlanner(self._map, self._sample_resolution)
+
+        self.dist_move = 0.2
+        self.dist_step = 1.5
+
+        # 是否启用多边形 + 对偶硬约束
+        self._use_dual = use_dual
+
+    # ======================================================================
+    #   1) 只保留“与我相关”的车辆（前方 / 交叉口 / 环岛）
+    # ======================================================================
+    def _filter_front_same_lane_obs(self,
+                                    current_state,
+                                    obs,
+                                    heights,
+                                    obs_infer,
+                                    max_lat_dist=2.0,
+                                    min_long_dist=-2.0):
+        """
+        过滤“明显在后方 / 另一条车道”的车辆，
+        但保留交叉路口、环岛等场景里横向/斜向驶来的车。
+
+        current_state: [x, y, yaw, vx, vy, omega]  右手系
+        obs         : (N,3) -> [x, y, yaw]  右手系
+        heights     : list 长度 N
+        obs_infer   : (N, T, 3) 或等价结构
+        """
+        if obs is None:
+            return obs, heights, obs_infer
+
+        obs_np = np.asarray(obs)
+        if obs_np.size == 0:
+            return obs_np, heights, obs_infer
+
+        obs_infer_np = np.asarray(obs_infer, dtype=object)
+
+        ego_x = float(current_state[0])
+        ego_y = float(current_state[1])
+        ego_yaw = float(current_state[2])
+
+        # 世界 -> 自车坐标系（+x 前方, +y 左侧）
+        c = math.cos(-ego_yaw)
+        s = math.sin(-ego_yaw)
+
+        keep_idx = []
+
+        for i, ob in enumerate(obs_np):
+            ox, oy, oyaw = float(ob[0]), float(ob[1]), float(ob[2])
+
+            dx = ox - ego_x
+            dy = oy - ego_y
+            # 世界 -> 自车坐标系（+x 前方, +y 左侧）
+            rel_x = c * dx - s * dy
+            rel_y = s * dx + c * dy
+
+            dist = math.hypot(rel_x, rel_y)
+            if dist > 60.0:
+                continue
+
+            yaw_diff = oyaw - ego_yaw
+            yaw_diff = math.atan2(math.sin(yaw_diff), math.cos(yaw_diff))
+            abs_yaw_diff = abs(yaw_diff)
+
+            # === ① 明确处理“正对向直行车”（航向差 ~ 180°） ===
+            #     - 在前方（rel_x > -5）
+            #     - 横向上在两条对向车道带内（|rel_y| < 4m）
+            if abs_yaw_diff > math.radians(150.0):
+                if rel_x < -5.0:
+                    continue
+                if abs(rel_y) > 4.0:
+                    continue
+                keep_idx.append(i)
+                continue  # 已经决定保留，跳过后面的判断
+
+            # === ② 交叉 / 汇入交通：60°~120°，保留 ===
+            if math.radians(60.0) <= abs_yaw_diff <= math.radians(120.0):
+                # 避免明显在身后侧方的车
+                if rel_x < -8.0:
+                    continue
+                keep_idx.append(i)
+            else:
+                # === ③ 同向 / 近似同向 ===
+                # 用“在前方 + 车道附近”过滤掉无关的对向车、后车
+                if rel_x < min_long_dist:
+                    continue
+                if abs(rel_y) > max_lat_dist:
+                    continue
+                keep_idx.append(i)
+
+
+        if len(keep_idx) == 0:
+            if obs_np.ndim == 2:
+                empty_obs = np.zeros((0, obs_np.shape[1]))
+            else:
+                empty_obs = np.zeros((0, 3))
+
+            empty_infer = np.zeros((0,) + obs_infer_np.shape[1:],
+                                   dtype=obs_infer_np.dtype)
+            return empty_obs, [], empty_infer
+
+        keep_idx = np.asarray(keep_idx, dtype=int)
+
+        obs_filtered = obs_np[keep_idx]
+        heights_filtered = [heights[int(k)] for k in keep_idx]
+        obs_infer_filtered = obs_infer_np[keep_idx]
+
+        return obs_filtered, heights_filtered, obs_infer_filtered
+
+    # ======================================================================
+    #   2) 额外的“前车安全层”：只做防倒车 + 限制低速急刹
+    # ======================================================================
+    def _front_ttc_brake(self, current_state, acc_cmd, steer_cmd):
+        """
+        现在只保留“防倒车 + 低速不要一下子刹死”的保护，不再做二次 TTC 急刹。
+
+        - 防止在 v≈0 时给负加速度，被当成倒车指令；
+        - 在车速较低时，限制一下过大的负加速度，减小顿挫。
+        """
+        v_ego = max(self._model.get_v(), 0.0)
+
+        # 1) 极低速阶段：完全禁止负加速度，避免“莫名倒车”
+        if v_ego < 0.5 and acc_cmd < 0.0:
+            acc_cmd = 0.0
+
+        # 2) 低速阶段：限制一下过大的急刹（可按需要再调）
+        if v_ego < 3.0 and acc_cmd < -1.5:
+            acc_cmd = -1.5
+
+        # 其它情况不再改动，加速度完全由 MPC + APF/TTC 决定
+        return acc_cmd, steer_cmd
+
+    # --- helper: clamp-safe access to waypoints_queue ---
+    def _wq(self, idx):
+        n = len(self._waypoints_queue)
+        if n == 0:
+            raise Exception("No waypoints to follow")
+        if idx < 0:
+            idx = 0
+        elif idx >= n:
+            idx = n - 1
+        return self._waypoints_queue[idx]
+
+    def plan_route(self, start_location, end_location):
+        self._route = self.trace_route(start_location.location, end_location.location)
+        for i in self._route:
+            self._waypoints_queue.append(i)
+
+    def calc_ref_trajectory_in_T_step(self, node, ref_path, sp):
+        """
+        calc referent trajectory in T steps: [x, y, v, yaw]
+        using the current velocity, calc the T points along the reference path
+        :param node: current information
+        :param ref_path: reference path: [x, y, yaw]
+        :param sp: speed profile (designed speed strategy)
+        :return: reference trajectory
+        """
+        T = self._model.horizon
+        z_ref = np.zeros((4, T + 1))
+        length = ref_path.length
+        ind, _ = ref_path.nearest_index(node)
+
+        z_ref[0, 0] = ref_path.cx[ind]
+        z_ref[1, 0] = ref_path.cy[ind]
+        z_ref[2, 0] = sp[ind]
+        z_ref[3, 0] = ref_path.cyaw[ind]
+
+        dist_move = copy.copy(self.dist_move)
+
+        for i in range(1, T + 1):
+            dist_move += self.dist_step * abs(self._model.get_v()) * self._dt
+            ind_move = int(round(dist_move / self._d_dist))
+            index = min(ind + ind_move, length - 1)
+
+            z_ref[0, i] = ref_path.cx[index]
+            z_ref[1, i] = ref_path.cy[index]
+            z_ref[2, i] = sp[index]
+            z_ref[3, i] = ref_path.cyaw[index]
+
+        return z_ref, ind
+
+    def rotate(self, x, y, theta, ratio=1.75):
+        return np.array([(x * np.cos(theta) - y * np.sin(theta)) * ratio,
+                         (x * np.sin(theta) + y * np.cos(theta)) * ratio])
+
+    def lat_dis_wp_ev(self, wp, ev):
+        """
+        calculate the lateral distance between the waypoint and the ego vehicle
+        """
+        wp_loc = np.array([wp.transform.location.x, wp.transform.location.y])
+        ev_loc = np.array([ev.get_location().x, ev.get_location().y])
+        wp_yaw = wp.transform.rotation.yaw
+        wp_loc = self.rotate(wp_loc[0], wp_loc[1], np.deg2rad(wp_yaw))
+        ev_loc = self.rotate(ev_loc[0], ev_loc[1], np.deg2rad(wp_yaw))
+        return np.abs(wp_loc[1] - ev_loc[1])
+
+    def run_step(self, lv=None):
+        self._simu_time += self._dt
+        state, height = self._model.get_state_carla()  # car's state and height
+        current_state = np.array(
+            ca_u.carla_vector_to_rh_vector(state[0:2], state[2], state[3:]))
+
+        veh_location = self._vehicle.get_location()
+        vehicle_speed = self._model.get_v()
+        self._min_distance = self._base_min_distance + 0.5 * vehicle_speed
+
+        # ========== 1. 处理全局路径 / 参考轨迹 ==========
+        if len(self._waypoints_queue) == 0:
+            raise Exception("No waypoints to follow")
+        else:
+            carla_wp, _ = np.array(self._waypoints_queue).T
+            waypoints = []
+            v = math.sqrt(current_state[3] ** 2 + current_state[4] ** 2)
+            waypoints.append(
+                [current_state[0], current_state[1], v, current_state[2]])
+            cnt = 0
+
+            # delete the same waypoints to solve the problem of spline interpolation(NaN)
+            last_state = None
+            for wp in carla_wp:
+                if cnt > 30:
+                    break
+                cnt += 1
+                t = wp.transform
+                ref_state = ca_u.carla_vector_to_rh_vector(
+                    [t.location.x, t.location.y], t.rotation.yaw)
+                if last_state is not None:
+                    if np.sqrt(ref_state[0] ** 2 + ref_state[1] ** 2) - last_state < 0.005:
+                        continue
+                waypoints.append(
+                    [ref_state[0], ref_state[1],
+                     self._model.target_v, ref_state[2]])
+                last_state = np.sqrt(ref_state[0] ** 2 + ref_state[1] ** 2)
+
+            waypoints = np.array(waypoints).T
+
+        # purge obsolete waypoints
+        num_waypoint_removed = 0
+        for waypoint, _ in self._waypoints_queue:
+            if len(self._waypoints_queue) - num_waypoint_removed == 1:
+                min_distance = 1  # Don't remove the last waypoint until very close
+            else:
+                min_distance = self._min_distance
+
+            if veh_location.distance(waypoint.transform.location) < min_distance:
+                num_waypoint_removed += 1
+            else:
+                break
+
+        if num_waypoint_removed > 0:
+            for _ in range(num_waypoint_removed):
+                self._waypoints_queue.popleft()
+
+        # interpolate reference path
+        cx, cy, cyaw, ck, s = itp.calc_spline_course_carla(
+            waypoints[0], waypoints[1], waypoints[3][0], ds=self._d_dist)
+        sp = itp.calc_speed_profile(cx, cy, cyaw, self._model.target_v)
+
+        ref_path = itp.PATH(cx, cy, cyaw, ck)
+        z_ref, target_ind = self.calc_ref_trajectory_in_T_step(
+            [current_state[0], current_state[1], v, current_state[2]],
+            ref_path, sp)
+        ref_traj = np.array(
+            [z_ref[0], z_ref[1], z_ref[3], z_ref[2],
+             [0] * len(z_ref[0]), [0] * len(z_ref[0])])[:, :self._model.horizon]
+
+        # 初始化 / 更新预测状态序列
+        if self._next_states is None:
+            self._next_states = np.zeros(
+                (self._model.n_states, self._model.horizon + 1)).T
+
+        cur_v = self._model.get_v()
+        self._next_states[:, 3] = cur_v
+        current_state[3:] = self._next_states[0][3:]
+        u0 = np.array([self._a_opt, self._delta_opt]).reshape(-1, 2).T
+
+        # ========== 2. 多边形 + 对偶硬约束（仅最近少量车辆） ==========
+        if self._use_dual:
+            obs_Am_list = []
+            obs_bm_list = []
+
+            actors_all = self._world.get_actors()
+            vehicles = list(actors_all.filter('vehicle.*'))
+            others = [a for a in vehicles if a.id != self._vehicle.id]
+
+            others_sorted = sorted(
+                others,
+                key=lambda a: veh_location.distance(a.get_location())
+            )
+
+            max_dual_veh = 4
+            max_range = 32.0
+            others_for_dual = []
+            min_obs_dist = None
+            for a in others_sorted:
+                d = veh_location.distance(a.get_location())
+                if d <= max_range:
+                    others_for_dual.append(a)
+                    if (min_obs_dist is None) or (d < min_obs_dist):
+                        min_obs_dist = d
+                if len(others_for_dual) >= max_dual_veh:
+                    break
+
+            # 只有最近障碍物 < 25m 时，这一拍才用 QP 预规划
+            use_qp_this_step = (min_obs_dist is not None) and (min_obs_dist < 25.0)
+
+            if len(others_for_dual) > 0:
+                ego_xy_carla = (float(veh_location.x), float(veh_location.y))
+                obs_Am_list, obs_bm_list = actors_to_Ab(
+                    others_for_dual,
+                    ego_xy=ego_xy_carla,
+                    max_range=max_range,
+                    include_types=('vehicle.',),   # 行人只用 APF
+                    inflate_vehicle=0.6,
+                    inflate_walker=0.45,
+                    max_obs=max_dual_veh,
+                    y_flip=True
+                )
+
+            if len(obs_Am_list) > 0 and hasattr(self._model, "enable_dual_collision"):
+                # 启用 TDR-OBCA 风格多边形对偶硬约束
+                bb_ego = self._vehicle.bounding_box
+                ego_L = 2.0 * float(bb_ego.extent.x)
+                ego_W = 2.0 * float(bb_ego.extent.y)
+
+                ego_L_enlarge = ego_L + 0.6
+                ego_W_enlarge = ego_W + 0.4
+
+                self._model.enable_dual_collision(
+                    obs_Am_list, obs_bm_list,
+                    car_box=(ego_L_enlarge, ego_W_enlarge),
+                    alpha_e=2.5,
+                    beta_s=250.0   # slack 惩罚
+                )
+
+                # ====== 2.5 调用 QP 预规划：把 (X,U) 写入 warm-start 缓存 ======
+                if use_qp_this_step and hasattr(self._model, "obca_qp_preplan"):
+                    ok = False
+                    try:
+                        # ref_traj: 6×N, 取 [x,y,yaw,v]
+                        ref4 = ref_traj[0:4, :]
+
+                        ok = self._model.obca_qp_preplan(
+                            ref4,
+                            current_state,
+                            obs_Am_list=obs_Am_list,
+                            obs_bm_list=obs_bm_list,
+                            u_prev=u0
+                        )
+                        if not ok:
+                            print("[Xagent] obca_qp_preplan returned False, skip QP warm-start.")
+                    except Exception as e:
+                        print(f"[Xagent] obca_qp_preplan failed: {e}")
+                        ok = False
+
+                    # ==== QP 结果与全局路径的“转向方向”一致性检查（阈值放宽）====
+                    try:
+                        if ok and getattr(self._model, "_qp_ws_X", None) is not None:
+                            X_qp = np.asarray(self._model._qp_ws_X, dtype=float)  # (N+1, 6)
+                            if X_qp.shape[0] >= 2 and X_qp.shape[1] >= 3:
+                                yaw_qp0 = X_qp[0, 2]
+                                yaw_qp1 = X_qp[1, 2]
+                                d_yaw_qp = yaw_qp1 - yaw_qp0
+
+                                yaw_ref0 = ref_traj[2, 0]
+                                yaw_ref1 = ref_traj[2, 1]
+                                d_yaw_ref = yaw_ref1 - yaw_ref0
+
+                                bad = False
+
+                                # 情况 A：参考几乎直行，但 QP 第一拍就 >20° 转向
+                                if (abs(d_yaw_ref) < np.deg2rad(5.0) and
+                                        abs(d_yaw_qp) > np.deg2rad(20.0)):
+                                    bad = True
+
+                                # 情况 B：参考往左/右，QP 却反向大转（>30°）
+                                if (d_yaw_qp * d_yaw_ref < 0.0 and
+                                    abs(d_yaw_qp) > np.deg2rad(30.0) and
+                                    abs(d_yaw_ref) > np.deg2rad(5.0)):
+                                    bad = True
+
+                                if bad:
+                                    print("[Xagent] QP warm-start heading conflicts with global path, drop it.",
+                                          f"d_yaw_qp={d_yaw_qp:.3f}, d_yaw_ref={d_yaw_ref:.3f}")
+                                    self._model._qp_ws_valid = False
+                    except Exception as e:
+                        print("[Xagent] QP heading check failed:", e)
+
+                else:
+                    # 这一拍不用 QP，当作没有热启动
+                    if hasattr(self._model, "_qp_ws_valid"):
+                        self._model._qp_ws_valid = False
+            else:
+                # 根本没有障碍 / 没启用 dual，确保不残留上一拍的 QP 热启动
+                if hasattr(self._model, "_qp_ws_valid"):
+                    self._model._qp_ws_valid = False
+
+                        
+        # ========== 3. 环境感知：APF 用的障碍 / 行人 ==========
+        obs, heights, obs_infer = self._env.get_obs(current_state)
+
+        # === 根据前方一段路径的“最大曲率”判断：是否进入环岛 / 紧弯区域 ===
+        try:
+            k_abs = np.abs(ck)
+            idx0 = max(int(target_ind), 0)
+            idx1 = min(len(k_abs), idx0 + 20)
+            if idx0 < idx1:
+                k_window_max = float(np.max(k_abs[idx0:idx1]))
+            else:
+                k_window_max = float(k_abs[idx0])
+        except Exception:
+            k_window_max = 0.0
+
+        # 默认：直路 / 小弯
+        max_lat = 2.0
+        min_long = -2.0
+
+        # 如果“前方一小段路”的最大曲率较大，认为是环岛或很紧的弯道
+        if k_window_max > 0.015:
+            max_lat = 3.5     # 横向 3.5 m 内都算相关车辆
+            min_long = -4.0   # 后方多看一点
+            is_roundabout_like = True
+        else:
+            is_roundabout_like = False
+
+        # 先做“本车道 / 前方”过滤
+        obs, heights, obs_infer = self._filter_front_same_lane_obs(
+            current_state, obs, heights, obs_infer,
+            max_lat_dist=max_lat,
+            min_long_dist=min_long
+        )
+
+        # === 按航向把障碍拆成“纵向前车”和“交叉/汇入交通” ===
+        obs_long, obs_cross = [], []
+        obs_long_infer, obs_cross_infer = [], []
+        ego_yaw = float(current_state[2])
+
+        if obs is not None and len(obs) > 0:
+            for k, ob in enumerate(obs):
+                ox, oy, oyaw = float(ob[0]), float(ob[1]), float(ob[2])
+                yaw_diff = oyaw - ego_yaw
+                yaw_diff = math.atan2(math.sin(yaw_diff), math.cos(yaw_diff))
+
+                # 50°~130° 视为交叉/横向车
+                if math.radians(50.0) <= abs(yaw_diff) <= math.radians(130.0):
+                    obs_cross.append(ob)
+                    obs_cross_infer.append(obs_infer[k])
+                else:
+                    # 同向 / 对向 前车
+                    obs_long.append(ob)
+                    obs_long_infer.append(obs_infer[k])
+
+        # === 下面是原来的 debug 画框，不变 ===
+        # 先把预测轨迹从 numpy 转成 python list 方便 casadi 使用
+        obs_infer = list(obs_infer)
+        for i in range(len(obs_infer)):
+            obs_infer[i] = obs_infer[i].tolist()
+
+        # 前向车辆 / 交叉车辆的预测也一并转成 list
+        obs_long_infer = [np.asarray(o).tolist() for o in obs_long_infer]
+        obs_cross_infer = [np.asarray(o).tolist() for o in obs_cross_infer]
+
+        temp_obs = copy.copy(obs)
+        if len(temp_obs) > 0:
+            for i in range(len(temp_obs)):
+                centers = self._model.get_obs_centers(temp_obs[i], carla=True)
+                bb = carla.BoundingBox(
+                    carla.Location(x=temp_obs[i][0], y=-temp_obs[i][1], z=heights[i] + 1.0),
+                    carla.Vector3D(2, 1, 0.8))
+                self._world.debug.draw_box(
+                    bb,
+                    carla.Rotation(yaw=np.degrees(-temp_obs[i][2])),
+                    thickness=0.03, life_time=2 * self._dt)
+                for j in range(len(obs_infer[i])):
+                    self._world.debug.draw_point(
+                        carla.Location(x=obs_infer[i][j][0], y=-obs_infer[i][j][1],
+                                       z=heights[i] + 1.5),
+                        size=0.06, life_time=2 * self._dt)
+
+                    
+        # === 行人感知 + debug 可视化（保持原来的逻辑） ===
+        pedes, pede_heights, pedes_infer = self._env.get_pedes(current_state)
+        pedes_infer = list(pedes_infer)
+        for i in range(len(pedes_infer)):
+            pedes_infer[i] = pedes_infer[i].tolist()
+        temp_pedes = copy.copy(pedes)
+        if len(temp_pedes) > 0:
+            for i in range(len(temp_pedes)):
+                bb = carla.BoundingBox(
+                    carla.Location(x=temp_pedes[i][0], y=-temp_pedes[i][1], z=pede_heights[i]),
+                    carla.Vector3D(0.6, 0.6, 1.8))
+                self._world.debug.draw_box(
+                    bb,
+                    carla.Rotation(yaw=np.degrees(-temp_pedes[i][2])),
+                    thickness=0.03, life_time=2 * self._dt)
+                for j in range(len(pedes_infer[i])):
+                    self._world.debug.draw_point(
+                        carla.Location(x=pedes_infer[i][j][0], y=-pedes_infer[i][j][1],
+                                       z=pede_heights[i] + 1.5),
+                        size=0.06, life_time=2 * self._dt)
+
+        # APF diagnostics
+        apf_obs = apf_pede = apf_nc_road = apf_c_road = apf_traffic = apf_ttc = 0
+
+        # ========== 4. 构建代价函数和约束（在 model 内部） ==========
+        self._model.solver_add_cost()
+
+        # ----- 车道线相关约束 / 代价 -----
+        lane_location = self._vehicle.get_location()
+        lane_location.z += 2
+        wp = self._map.get_waypoint(lane_location, project_to_road=True)
+
+        wp_yaw = -np.radians(wp.transform.rotation.yaw)
+        wp_y = np.sin(-wp_yaw) * wp.transform.location.x + np.cos(-wp_yaw) * -wp.transform.location.y
+        left_bound = wp_y + 1.75
+        right_bound = wp_y - 1.75
+
+        lcrossable_list = [carla.LaneMarkingType.Broken,
+                           carla.LaneMarkingType.BrokenBroken,
+                           carla.LaneMarkingType.SolidBroken]
+        rcrossable_list = [carla.LaneMarkingType.Broken,
+                           carla.LaneMarkingType.BrokenBroken,
+                           carla.LaneMarkingType.BrokenSolid]
+        lncrossable_list = [carla.LaneMarkingType.Solid,
+                            carla.LaneMarkingType.BrokenSolid,
+                            carla.LaneMarkingType.SolidSolid]
+        rncrossable_list = [carla.LaneMarkingType.Solid,
+                            carla.LaneMarkingType.SolidBroken,
+                            carla.LaneMarkingType.SolidSolid]
+        self._model.Q = self.Q_origin
+
+        # ========= 计算自车到左右车道线的距离 =========
+        ego_loc = veh_location
+        ego_y_lane = (math.sin(-wp_yaw) * ego_loc.x +
+                      math.cos(-wp_yaw) * -ego_loc.y)
+
+        dist_left = left_bound - ego_y_lane      # >0 在左、=0 在线上
+        dist_right = ego_y_lane - right_bound    # >0 在右、=0 在线上
+
+        # 非可跨实线：阈值小一点；可跨虚线：阈值放宽一点
+        th_nc = 0.7     # non-crossable line
+        th_c = 1.1      # crossable line
+
+        close_left_nc = (dist_left < th_nc)
+        close_right_nc = (dist_right < th_nc)
+        close_left_c = (dist_left < th_c)
+        close_right_c = (dist_right < th_c)
+
+        # 在环岛 / 紧弯里稍微放宽一点，但仍然用“距离”做开关
+        if is_roundabout_like:
+            th_nc_round = 0.8
+            th_c_round = 1.3
+            close_left_nc = (dist_left < th_nc_round)
+            close_right_nc = (dist_right < th_nc_round)
+            close_left_c = (dist_left < th_c_round)
+            close_right_c = (dist_right < th_c_round)
+
+        # ==== 这里开始和你原来的逻辑类似，只是多了 close_* 判断 ====
+        wq0 = self._wq(0)
+        wq1 = self._wq(1)
+        wq3 = self._wq(3)
+
+        # ------------ 左车道线 ------------
+        if wq0[1].value == 2 or wq3[1].value == 2:
+            # 相邻左车道存在且比较近
+            if self.lat_dis_wp_ev(wq1[0], self._env.ego_vehicle) < 1.7:
+                if close_left_nc:
+                    self._model.solver_add_nc_road_pf([[left_bound, 1]], wp_yaw, carla=True)
+                    apf_nc_road += self._model.nc_road_pf([[left_bound, 1]], ref_traj, wp_yaw)
+            elif wp.left_lane_marking.type in lcrossable_list:
+                if close_left_c:
+                    self._model.solver_add_c_road_pf([left_bound], wp_yaw, carla=True)
+                    apf_c_road += self._model.c_road_pf([left_bound], ref_traj, wp_yaw)
+            elif wp.left_lane_marking.type in lncrossable_list:
+                if close_left_nc:
+                    self._model.solver_add_nc_road_pf([[left_bound, 1]], wp_yaw, carla=True)
+                    apf_nc_road += self._model.nc_road_pf([[left_bound, 1]], ref_traj, wp_yaw)
+        elif wp.left_lane_marking.type in lcrossable_list:
+            if close_left_c:
+                self._model.solver_add_c_road_pf([left_bound], wp_yaw, carla=True)
+                apf_c_road += self._model.c_road_pf([left_bound], ref_traj, wp_yaw)
+        elif wp.left_lane_marking.type in lncrossable_list:
+            if close_left_nc:
+                self._model.solver_add_nc_road_pf([[left_bound, 1]], wp_yaw, carla=True)
+                apf_nc_road += self._model.nc_road_pf([[left_bound, 1]], ref_traj, wp_yaw)
+
+        # ------------ 右车道线 ------------
+        if wq0[1].value == 1 or wq3[1].value == 1:
+            if self.lat_dis_wp_ev(wq0[0], self._env.ego_vehicle) < 1.70:
+                if close_right_nc:
+                    self._model.solver_add_nc_road_pf([[right_bound, -1]], wp_yaw, carla=True)
+                    apf_nc_road += self._model.nc_road_pf([[right_bound, -1]], ref_traj, wp_yaw)
+            elif wp.right_lane_marking.type in rcrossable_list:
+                if close_right_c:
+                    self._model.solver_add_c_road_pf([right_bound], wp_yaw, carla=True)
+                    apf_c_road += self._model.c_road_pf([right_bound], ref_traj, wp_yaw)
+            elif wp.right_lane_marking.type in rncrossable_list:
+                if close_right_nc:
+                    self._model.solver_add_nc_road_pf([[right_bound, -1]], wp_yaw, carla=True)
+                    apf_nc_road += self._model.nc_road_pf([[right_bound, -1]], ref_traj, wp_yaw)
+        elif wp.right_lane_marking.type in rcrossable_list:
+            if close_right_c:
+                self._model.solver_add_c_road_pf([right_bound], wp_yaw, carla=True)
+                apf_c_road += self._model.c_road_pf([right_bound], ref_traj, wp_yaw)
+        elif wp.right_lane_marking.type in rncrossable_list:
+            if close_right_nc:
+                self._model.solver_add_nc_road_pf([[right_bound, -1]], wp_yaw, carla=True)
+                apf_nc_road += self._model.nc_road_pf([[right_bound, -1]], ref_traj, wp_yaw)
+
+        # ----- 红灯约束 -----
+        tl_bool, tl_waypoint = self.check_traffic_light()
+        if tl_bool:
+            tl_x = (np.cos(-wp_yaw) * tl_waypoint.transform.location.x -
+                    np.sin(-wp_yaw) * -tl_waypoint.transform.location.y)
+            self._model.solver_add_single_tr_lgt_pf_carla(wp_y, wp_yaw, tl_x)
+            apf_traffic += self._model.traffic_pf(ref_traj, wp_y, wp_yaw, tl_x)
+
+
+
+        # ----- APF 障碍 / 行人 / TTC -----
+
+        # 1) 车辆 APF：把前向车辆和交叉车辆分开
+        #    - obs_long_infer：前向 / 同向 / 对向车，主要碰撞对象
+        #    - obs_cross_infer：横向 / 斜向驶来的车，只给较小斥力
+        obs_ratio_front = 150
+        obs_ratio_cross = 60   # 交叉车权重更小
+
+        if is_roundabout_like:
+            # 在环岛 / 紧弯里整体再软一点
+            obs_ratio_front = 80
+            obs_ratio_cross = 40
+
+        # 前向车辆（排在 obs_long_infer 里）
+        if len(obs_long_infer) > 0:
+            self._model.solver_add_soft_obs(
+                obs_long_infer, ratio=obs_ratio_front, carla=True
+            )
+
+        # 横向 / 交叉车辆：只给弱一些的斥力，避免远处右转车把主车推到对向车道
+        if len(obs_cross_infer) > 0:
+            self._model.solver_add_soft_obs(
+                obs_cross_infer, ratio=obs_ratio_cross, carla=True
+            )
+
+        # 2) 行人 APF 保持不变（还是优先绕行人）
+        if len(pedes) > 0:
+            self._model.solver_add_soft_obs(
+                pedes_infer, ratio=600, carla=True, pede=True
+            )
+
+
+        # 3) TTC 势场：直路上启用，环岛里只做监控不进优化
+        if lv is not None:
+            if not is_roundabout_like:
+                self._model.solver_add_soft_ttc(lv, ratio=80)
+                ttc_val = self._model.soft_ttc_apf(lv, ref_traj, ratio=300)
+            else:
+                ttc_val = self._model.soft_ttc_apf(lv, ref_traj, ratio=150)
+
+            apf_ttc += ttc_val
+            if ttc_val > 1e-3:
+                print("---------------the apf for ttc is attached-----------------")
+        # 只把前向车辆作为主 APF，交叉车的 APF 记一半权重
+        apf_obs += self._model.soft_obs_apf(obs_long, ref_traj)
+        if len(obs_cross) > 0:
+            apf_obs += 0.5 * self._model.soft_obs_apf(obs_cross, ref_traj)
+        apf_pede += self._model.soft_obs_apf(pedes, ref_traj, pede=True)
+
+        # ========== 4.5 椭圆硬约束兜底：只对最近几辆前向车辆 ==========
+        if hasattr(self._model, "set_ellip_backup_obstacles"):
+            # 兜底硬约束只对“前向车辆”生效，避免远处横向车把主车推到对向
+            if len(obs_long_infer) > 0:
+                # 只挑最近 2 辆前向车
+                ellip_obs = obs_long_infer[:2]
+                self._model.set_ellip_backup_obstacles(
+                    ellip_obs,
+                    a=4.5,   # 椭圆长半轴，可按车长调整
+                    b=2.0,   # 椭圆短半轴，可按车宽调整
+                    margin=0.1  # 安全裕度
+                )
+            else:
+                # 周围没有前向车时清空兜底集合
+                self._model.set_ellip_backup_obstacles([])
+
+
+
+        # ========== 5. 构建 NLP 约束边界并求解 ==========
+        self._model.solver_add_bounds()
+
+        tick = time.time()
+        state = self._model.solve_MPC(
+            ref_traj.T, current_state, self._next_states, u0)
+
+        time_2 = time.time() - tick
+        self._env.computing_times.append(time_2)
+
+        ca_u.draw_planned_trj(self._world, ref_traj[:2, :].T, height + 0.5)
+        ca_u.draw_planned_trj(self._world, state[2][:, :2], height + 0.5,
+                              color=(0, 233, 222))
+
+        self._next_states = state[2]
+
+        self._a_opt = state[0]
+        self._delta_opt = state[1]
+
+        # ====== 6. 对 a / δ 做一阶低通滤波 + 安全防倒车 ======
+        raw_a = float(self._a_opt[0])
+        raw_delta = float(self._delta_opt[0])
+
+        # ---------- 6.0 根据当前环境自适应调整 steering 滤波强度 ----------
+        no_front_threat = (apf_obs < 1e-3 and apf_pede < 1e-3 and apf_ttc < 1e-3)
+        almost_straight = (k_window_max < 0.008)   # 前方几乎直线
+        # 新增：弯道 / 环岛但前方还是安全
+        curved_but_safe = (not almost_straight) and (k_window_max < 0.04) and no_front_threat
+
+        alpha_a = 0.35
+
+        if almost_straight and no_front_threat:
+            # 出口直线且无威胁：方向盘最“重”
+            alpha_delta = 0.30
+            max_delta_step = 0.05
+        elif curved_but_safe:
+            # 环岛 / 大弯，但前方没有车、人、TTC 压力：
+            #   比“有威胁”时更平滑一些，抑制环岛里来回抖
+            alpha_delta = 0.45
+            max_delta_step = 0.10
+        else:
+            # 有前车/行人/小 TTC 或者曲率很大：保持原来的灵敏度
+            alpha_delta = 0.6
+            max_delta_step = 0.18
+
+
+        # --- 加速度：一阶低通 ---
+        self._a_cmd = alpha_a * raw_a + (1.0 - alpha_a) * self._a_cmd
+
+        # --- 转向：自适应一阶低通 + 转速限制 ---
+        delta_lp = alpha_delta * raw_delta + (1.0 - alpha_delta) * self._delta_cmd
+        delta_step = np.clip(delta_lp - self._delta_cmd,
+                             -max_delta_step, max_delta_step)
+        self._delta_cmd = self._delta_cmd + delta_step
+
+
+
+        # ====== 6.1 纵向加速度“死区”：误差小 + 无 TTC 压力 就把小油门归零 ======
+        v_ref = ref_traj[3, 0]          # 这一拍参考速度
+        v_err = cur_v - v_ref           # cur_v 上面已经算过：self._model.get_v()
+
+        if abs(v_err) < 0.3 and abs(self._a_cmd) < 0.2 and apf_ttc < 1e-3:
+            self._a_cmd = 0.0
+
+        # ====== 6.2 前车安全层：仅防倒车 / 低速急刹 ======
+        safe_acc, safe_delta = self._front_ttc_brake(
+            current_state, self._a_cmd, self._delta_cmd
+        )
+
+        # ---- 6.3 先做全局饱和，再做 jerk 限制（加速度）----
+        max_da = 0.35   # 每 0.1s 最多改 0.35 m/s^2，大约 3.5 m/s^3
+        safe_acc = float(np.clip(safe_acc, -3.0, 3.0))
+
+        da = safe_acc - self._a_cmd_last
+        da = float(np.clip(da, -max_da, max_da))
+        self._a_cmd = self._a_cmd_last + da
+        self._a_cmd_last = self._a_cmd
+
+        # 转向只做幅值饱和（之前已经经过 LPF + rate limit）
+        self._delta_cmd = float(np.clip(safe_delta, -0.7, 0.7))
+
+
+        # 用“滤波 + 死区 + 安全层”后的指令推进内部模型
+        next_state = self._model.predict(current_state,
+                                         (self._a_cmd, self._delta_cmd))
+        self._model.set_state(next_state)
+
+
+
+        dist_error = math.hypot(
+            next_state[0] - ref_traj[0, 1],
+            next_state[1] - ref_traj[1, 1] - self.dist_move)
+        yaw_error = abs(next_state[2] - ref_traj[2, 1])
+        vel_error = abs(state[2][0][3] - ref_traj[3, 0])
+        acc = self._a_cmd
+        steer = self._delta_cmd
+
+        cost_time = state[-1]
+
+        self._log_data.append([
+            self._simu_time, dist_error, yaw_error, vel_error,
+            acc, steer, apf_obs, apf_ttc, apf_pede,
+            apf_nc_road, apf_c_road, apf_traffic, cost_time
+        ])
+
+        return self._a_cmd, self._delta_cmd, (next_state, height + 0.05)
+
+    def trace_route(self, start_location, end_location):
+        return self._global_planner.trace_route(start_location, end_location)
+
+    def check_traffic_light(self, traffic_distance=15.0):
+        if self._last_traffic_light:
+            if self._last_traffic_light.state != carla.TrafficLightState.Red:
+                self._last_traffic_light = None
+                self._last_traffic_waypoint = None
+            else:
+                return (True, self._last_traffic_waypoint)
+
+        traffic_light, object_waypoint = self.get_traffic_light(
+            traffic_distance, 'opposite')
+        if traffic_light:
+            self._last_traffic_light = traffic_light
+            self._last_traffic_waypoint = object_waypoint
+            return (True, object_waypoint)
+        else:
+            return (False, None)
+
+    def get_traffic_light(self, traffic_distance=5.0, type='closest'):
+        """
+        Get the red traffic light with different types
+        Parameters:
+            lights_list: list of traffic lights
+            traffic_distance: the distance to the traffic light
+            type: 'closest' or 'opposite'
+        """
+        lights_list = self._world.get_actors().filter('*traffic_light*')
+
+        ego_vehicle_location = self._vehicle.get_location()
+        ego_vehicle_waypoint = self._map.get_waypoint(ego_vehicle_location)
+
+        if type == 'closest':
+            min_dist = 100000
+            closest_light = None
+            closest_waypoint = None
+
+        for traffic_light in lights_list:
+            if type == 'opposite':
+                object_location = get_trafficlight_trigger_location(traffic_light)
+                object_waypoint = self._map.get_waypoint(object_location)
+
+                if object_waypoint.road_id != ego_vehicle_waypoint.road_id:
+                    continue
+
+                ve_dir = ego_vehicle_waypoint.transform.get_forward_vector()
+                wp_dir = object_waypoint.transform.get_forward_vector()
+                dot_ve_wp = (ve_dir.x * wp_dir.x +
+                             ve_dir.y * wp_dir.y +
+                             ve_dir.z * wp_dir.z)
+
+                if traffic_light.state != carla.TrafficLightState.Red:
+                    continue
+
+                if dot_ve_wp < 0:
+                    continue
+
+                if is_within_distance(object_waypoint.transform,
+                                      self._vehicle.get_transform(),
+                                      traffic_distance, [0, 90]):
+                    return traffic_light, object_waypoint
+            elif type == 'closest':
+                if traffic_light.state != carla.TrafficLightState.Red:
+                    continue
+
+                object_location = get_trafficlight_trigger_location(traffic_light)
+                object_waypoint = self._map.get_waypoint(object_location)
+
+                if object_location.distance(ego_vehicle_location) < min_dist:
+                    min_dist = object_location.distance(ego_vehicle_location)
+                    closest_light = traffic_light
+                    closest_waypoint = object_waypoint
+
+        if type == 'closest':
+            return closest_light, closest_waypoint
+        else:
+            return None, None
