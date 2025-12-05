@@ -343,13 +343,22 @@ for _ in range(10000):
                 # count the number of TTC <= 1.5
                 count_ttc_less_15 = len([ttc for ttc in TTC_list if ttc <= 1.5])
                 f.write('Risk time of TTC < 1.5: '+str(count_ttc_less_15*simu_step)+'\n')
-                f.write('TTC Rate: '+str(TTC_cnt/cnt)+'\n')
+                if cnt > 0:
+                    f.write('TTC Rate: ' + str(TTC_cnt / cnt) + '\n')
+                else:
+                    f.write('TTC Rate: 0.0\n')
                 f.write('THW: '+str(np.mean(THW_list))+'\n')
                 f.write('SD of THW: '+str(np.std(THW_list))+'\n')
                 # count the number of THW <= 2.0
                 count_thw_less_20 = len([thw for thw in THW_list if thw <= 2.0])
                 f.write('Risk time of THW < 2.0: '+str(count_thw_less_20*simu_step)+'\n')
-                f.write('THW Rate: '+str(THW_cnt/cnt)+'\n')
+                if cnt > 0:
+                    f.write('TTC Rate: ' + str(TTC_cnt / cnt) + '\n')
+                    f.write('THW Rate: ' + str(THW_cnt / cnt) + '\n')
+                else:
+                    f.write('TTC Rate: 0.0\n')
+                    f.write('THW Rate: 0.0\n')
+
                 f.write('Time to pass: '+str(cnt*simu_step)+'\n')
                 if env.inferMethod == 'gpr':
                     infer_times = np.array(env.gpr_infer_times)

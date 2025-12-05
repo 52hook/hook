@@ -5,7 +5,7 @@ from matplotlib import pyplot as plt
 import time
 
 # Load the data
-data = np.load('data_w_real_steer_70_train.npy')
+data = np.load('data_w_real_steer_70.npy')
 X = data[:, :-2]
 # X[1,:] = -X[1,:] # flip y axis
 U = data[:, -2:]

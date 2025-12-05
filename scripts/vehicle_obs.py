@@ -6,14 +6,17 @@ import numpy as np
 from scipy.optimize import minimize
 import copy
 import casadi as ca
+from dataclasses import dataclass
+
 
 # estimated parameters by SLSQP with steering transformation of 70 deg
-kf = -102129.8307648713
-kr = -89999.99208226385
-lf = 1.2868463998073212
-lr = 1.6031536001974758
-m = 1699.9998612883219
-Iz = 2699.993738447328
+
+kf = -94161.49486554295
+kr = -90090.21771955036
+lf = 0.3071509095803222
+lr = 2.602849090419678
+m = 1532.1666565042958
+Iz = 2068.3332755799215
 
 dt = None
 Lk = lf * kf - lr * kr
@@ -21,9 +24,50 @@ Lk = lf * kf - lr * kr
 n_input = 2  # acc, steering
 
 
+@dataclass
+class RuleWeights:
+    """Configurable weights for rule-based potential fields (APF layer).
+
+    Attributes
+    ----------
+    soft_obs_vehicle : float
+        Weight scaling for soft APF of surrounding vehicles.
+    soft_obs_pedestrian : float
+        Weight scaling for soft APF of pedestrians.
+    soft_ttc : float
+        Weight scaling for time-to-collision (TTC) following APF.
+    crossable_lane : float
+        Base weight for crossable (dashed) lane boundaries.
+    noncrossable_lane : float
+        Base weight for non-crossable (solid) lane boundaries.
+    traffic_longitudinal : float
+        Weight for longitudinal distance to stop line / traffic light.
+    traffic_lateral : float
+        Weight for lateral keeping when approaching traffic light.
+    nc_line_over_penalty : float
+        Hard penalty when crossing a non-crossable line.
+    """
+
+    # 障碍物势场（车辆 / 行人）
+    soft_obs_vehicle: float = 1.0
+    soft_obs_pedestrian: float = 1.0
+    soft_ttc: float = 1.0
+
+    # 车道线规则
+    crossable_lane: float = 5.0
+    noncrossable_lane: float = 35.0
+
+    # 红绿灯 / 停止线区域势场
+    traffic_longitudinal: float = 200.0
+    traffic_lateral: float = 1000.0
+
+    # 压实线的硬惩罚
+    nc_line_over_penalty: float = 1500.0
+
+
 class Vehicle:
     def __init__(self, state=None, actor=None, horizon=10, target_v=18,
-                 carla=True, delta_t=0.05, max_iter=200):
+                 carla=True, delta_t=0.05, max_iter=200, rule_weights=None):
         """
         state: x=0.0, y=0.0, yaw=0.0, v=0.0, direct=1.0
         """
@@ -62,6 +106,15 @@ class Vehicle:
         self.acc_ubound = 3.0
         self.target_v = target_v / 3.6
 
+        # === Rule-layer weight configuration (APF for rules/safety/comfort) ===
+        if rule_weights is None:
+            rule_weights = RuleWeights()
+        self.rule_weights = rule_weights
+
+        # traffic-light related weights (used in solver_add_single_tr_lgt_pf* / traffic_pf)
+        self.w_tr_long = self.rule_weights.traffic_longitudinal
+        self.w_tr_lat = self.rule_weights.traffic_lateral
+
         # === Hybrid (APF soft + dual hard) switches/holders ===
         self.dual_enabled = False
         self.alpha_e = 1.0
@@ -74,15 +127,13 @@ class Vehicle:
         self.obs_edges_count = []
         self.num_obs = 0
 
-
-                # === 额外：椭圆硬约束兜底（可选） ===
+        # === 额外：椭圆硬约束兜底（可选） ===
         # 外面通过 set_ellip_backup_obstacles() 配置
         self._ellip_obs_infer = None   # 形如 [[ [x,y,yaw], ... ],  ... ]
         self._ellip_a = 4.5            # 椭圆长半轴（米），近似车长 + 安全裕度
         self._ellip_b = 2.0            # 椭圆短半轴（米），近似车宽 + 安全裕度
         self._ellip_margin = 0.1       # 再往外扩一点，（1+margin)^2 就是约束右边界
         self._ellip_constraints = 0    # 实际生成了多少个椭圆约束，用来配 lbg/ubg
-
 
         # === Warm-start caches ===
         self._u_cache = None
@@ -242,8 +293,9 @@ class Vehicle:
         )
 
         self.Da = 1
-        self.ac_r = 5          # 可跨车道线（虚线）权重先保持 5
-        self.anc_r = 35        # 不可跨车道线（实线）权重，从 50 降到 35
+        # lane-boundary related APF weights come from rule configuration
+        self.ac_r = self.rule_weights.crossable_lane      # 可跨车道线（虚线）权重
+        self.anc_r = self.rule_weights.noncrossable_lane  # 不可跨车道线（实线）权重
 
     def solver_add_cost(self):
         self.obj = 0
@@ -278,7 +330,6 @@ class Vehicle:
             x_next_ = self.f(self.X[:, i], self.U[:, i])
             # dynamics constraint
             self.g.append(self.X[:, i+1] - x_next_)
-
 
         # === Hybrid add-ons: terminal soft constraint and slack penalty ===
         if getattr(self, 'dual_enabled', False) and self.num_obs > 0:
@@ -318,6 +369,12 @@ class Vehicle:
                 for _ in range(self.horizon - len(ob_)):
                     ob_.append(ob_[-1])
 
+        # Effective weight after applying global rule-layer scaling
+        if pede:
+            ratio_eff = ratio * self.rule_weights.soft_obs_pedestrian
+        else:
+            ratio_eff = ratio * self.rule_weights.soft_obs_vehicle
+
         for ob_ in obs_infer:  # for each obstacle
             for i in range(self.horizon):  # for each time step
                 ob_center = self.get_obs_center(ob_[i], carla=carla)
@@ -327,30 +384,30 @@ class Vehicle:
                     else:
                         dist = self.dist_point_to_ellipsoid(self_center, ob_center, ob_[i][2], a=0.5, b=0.5)
                     # decrease the weight when i is getting larger
-                    self.obj += 12 * ((1 / dist - 0.5) ** expn) * ratio / (i + 1)
+                    self.obj += 12 * ((1 / dist - 0.5) ** expn) * ratio_eff / (i + 1)
 
     def soft_obs_apf(self, obs, ref_traj, ratio=500, expn=1, carla=False, pede=False):
-        obs_apf = 0
+        obs_apf = 0.0
+
+        # Effective weight after applying global rule-layer scaling
+        if pede:
+            ratio_eff = ratio * self.rule_weights.soft_obs_pedestrian
+        else:
+            ratio_eff = ratio * self.rule_weights.soft_obs_vehicle
+
         for ob_ in obs:
             # version for double-circle obstacle
             obc = self.get_obs_centers(ob_, carla)
             for obc_ in obc:
                 for selfc in self.get_obs_centers(ref_traj[:, 0], carla):
                     dist = (selfc[0] - obc_[0]) ** 2 + (selfc[1] - obc_[1]) ** 2
-                    obs_apf += (1 / dist) ** expn * ratio
-        return obs_apf
+                    obs_apf += (1 / dist) ** expn * ratio_eff
+        return float(obs_apf)
 
     def solver_add_soft_ttc(self, lv, ratio=80, expn=1,
                             carla=True, ttc_thr=6.0, d_max=45.0):
         """
-        在 MPC 目标函数中加入 TTC 势场（CasADi 形式）
-
-        - 只在以下条件满足时生效：
-            1) 自车速度 > 领航车速度（自车在追前车）
-            2) 自车与前车距离 < d_max
-            3) TTC = dist / (v_ego - v_lv) < ttc_thr
-
-        - 做了防除零处理：相对速度至少 0.1 m/s
+        在 MPC 目标函数中加入 TTC 势场 (CasADi 形式)
         """
         # 领航车速度与位置（右手系）
         v_lv = np.sqrt(lv.get_velocity().x ** 2 + lv.get_velocity().y ** 2)
@@ -358,6 +415,9 @@ class Vehicle:
 
         v_eps = 0.1  # 防止相对速度接近 0
         ttc_eps = 0.1
+
+        # Effective weight after applying global rule-layer scaling
+        ratio_eff = ratio * self.rule_weights.soft_ttc
 
         for i in range(self.horizon):
             # 自车在预测步 i 上的“质心 + 纵向速度”
@@ -376,18 +436,14 @@ class Vehicle:
             cond = (rel_v > 0) * (dist < d_max) * (ttc < ttc_thr)
 
             # 势场形状：ttc 越小势场越大；在 ttc = ttc_thr 处为 0
-            base = ratio * (1.0 / ca.fmax(ttc, ttc_eps) - 1.0 / ttc_thr) ** expn
+            base = ratio_eff * (1.0 / ca.fmax(ttc, ttc_eps) - 1.0 / ttc_thr) ** expn
 
             self.obj += ca.if_else(cond, base, 0.0)
-
 
     def soft_ttc_apf(self, lv, ref_traj, ratio=80, expn=1,
                      carla=False, ttc_thr=6.0, d_max=45.0):
         """
         计算 TTC 势场的数值（用于日志/画图），与 solver_add_soft_ttc 中一致。
-
-        返回一个标量 ttc_apf：
-        - 若条件不满足（没在追前车、太远或 TTC 足够大），则返回 0
         """
         # 领航车速度与位置（右手系）
         v_lv = np.sqrt(lv.get_velocity().x ** 2 + lv.get_velocity().y ** 2)
@@ -420,9 +476,9 @@ class Vehicle:
             return 0.0
 
         # 势场形状：ttc 越小，势场越大；在 ttc = ttc_thr 处为 0
-        base = ratio * (1.0 / max(ttc, ttc_eps) - 1.0 / ttc_thr) ** expn
+        ratio_eff = ratio * self.rule_weights.soft_ttc
+        base = ratio_eff * (1.0 / max(ttc, ttc_eps) - 1.0 / ttc_thr) ** expn
         return float(base)
-
 
     def get_av_center(self, av_, carla=False):
         av_center = [av_[0], av_[1], av_[3]]  # [x, y, v_x]
@@ -500,9 +556,8 @@ class Vehicle:
                     self.ac_r * (soft_width - dist) ** 2,
                     0.0)
 
-
     def c_road_pf(self, roads_pos, ref_traj, yaw=0, carla=False):
-        road_pf = 0
+        road_pf = 0.0
         soft_width = 1.0
 
         for road_pos in roads_pos:
@@ -513,8 +568,7 @@ class Vehicle:
             if dist < soft_width:
                 road_pf += self.ac_r * (soft_width - dist) ** 2
 
-        return road_pf
-
+        return float(road_pf)
 
     def solver_add_nc_road_pf(self, roads_pos, yaw=0, carla=False):
         """
@@ -527,7 +581,7 @@ class Vehicle:
             None
         """
         soft_width = 2.0      # |y - road_pos| < 2 m 内开始起作用
-        hard_band  = 0.3      # 离实线 0.3m 内视为“几乎压线”
+        hard_band = 0.3       # 离实线 0.3m 内视为“几乎压线”
 
         for i in range(self.horizon):
             for road_pos, dir in roads_pos:
@@ -543,21 +597,20 @@ class Vehicle:
                             dir == 1,
                             # 左侧实线：selfc[1] > road_pos - hard_band 认为“太靠近/越线”
                             ca.if_else(selfc[1] > road_pos - hard_band,
-                                       1500.0,
+                                       self.rule_weights.nc_line_over_penalty,
                                        self.anc_r * (1.0 / (dy)) ** 2),
                             # 右侧实线：selfc[1] < road_pos + hard_band
                             ca.if_else(selfc[1] < road_pos + hard_band,
-                                       1500.0,
+                                       self.rule_weights.nc_line_over_penalty,
                                        self.anc_r * (1.0 / (dy)) ** 2)
                         ),
                         0.0
                     )
 
-
     def nc_road_pf(self, roads_pos, ref_traj, yaw=0, carla=False):
-        nc_road_pf = 0
+        nc_road_pf = 0.0
         soft_width = 2.0
-        hard_band  = 0.3
+        hard_band = 0.3
 
         for road_pos, dir in roads_pos:
             for selfc in self.get_obs_centers(ref_traj[:, 0], carla):
@@ -568,17 +621,16 @@ class Vehicle:
                 if dist < soft_width:
                     if dir == 1:
                         if selfc[1] > road_pos - hard_band:
-                            nc_road_pf += 600.0
+                            nc_road_pf += self.rule_weights.nc_line_over_penalty
                         else:
                             nc_road_pf += self.anc_r * (1.0 / np.fabs(dy)) ** 2
                     else:
                         if selfc[1] < road_pos + hard_band:
-                            nc_road_pf += 600.0
+                            nc_road_pf += self.rule_weights.nc_line_over_penalty
                         else:
                             nc_road_pf += self.anc_r * (1.0 / np.fabs(dy)) ** 2
 
-        return nc_road_pf
-
+        return float(nc_road_pf)
 
     def solver_add_single_tr_lgt_pf(self, light_pos):
         """
@@ -591,7 +643,9 @@ class Vehicle:
             dist_l = 1.5 - self.X[:, i][1]
             dist_r = self.X[:, i][1] + 1.5
 
-            self.obj = self.obj + 200 * (1 / (dist)) + 1000 * (1 / (dist_l)) ** 2 + 1000 * (1 / (dist_r)) ** 2
+            self.obj = self.obj + self.w_tr_long * (1 / (dist)) \
+                       + self.w_tr_lat * (1 / (dist_l)) ** 2 \
+                       + self.w_tr_lat * (1 / (dist_r)) ** 2
 
     def solver_add_single_tr_lgt_pf_carla(self, lane_center_y, yaw, tl_x):
         """
@@ -609,7 +663,9 @@ class Vehicle:
             dist_l = 1.5 - (selfc[1] - lane_center_y)
             dist_r = (selfc[1] - lane_center_y) + 1.5
 
-            self.obj += 200 * (1 / (dist)) + 1000 * (1 / (dist_l)) ** 2 + 1000 * (1 / (dist_r)) ** 2
+            self.obj += self.w_tr_long * (1 / (dist)) \
+                        + self.w_tr_lat * (1 / (dist_l)) ** 2 \
+                        + self.w_tr_lat * (1 / (dist_r)) ** 2
 
     def traffic_pf(self, ref_traj, lane_center_y, yaw, tl_x):
         selfc = [np.cos(-yaw) * ref_traj[0, 0] - np.sin(-yaw) * ref_traj[1, 0],
@@ -617,8 +673,8 @@ class Vehicle:
         dist = -(selfc[0] - tl_x) + 2
         dist_l = 1.5 - (selfc[1] - lane_center_y)
         dist_r = (selfc[1] - lane_center_y) + 1.5
-        traffic_pf = 200 * (1 / (dist))
-        return traffic_pf
+        traffic_pf_val = self.w_tr_long * (1 / (dist))
+        return float(traffic_pf_val)
 
     def enable_dual_collision(self, obs_Am_list, obs_bm_list, car_box=(4.5, 2.0),
                               alpha_e=1.0, beta_s=10.0):

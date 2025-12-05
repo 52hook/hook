@@ -24,6 +24,8 @@ from collections import deque
 from official.basic_agent import BasicAgent
 from official.misc import get_trafficlight_trigger_location, is_within_distance
 from official.global_route_planner import GlobalRoutePlanner as GlobalRoutePlanner
+from utils.global_bspline_smoother import BSplineGlobalSmoother
+
 
 # polygon helpers (CARLA actors -> convex polygon half-spaces)
 from utils.geometry_poly import actors_to_Ab
@@ -60,10 +62,6 @@ class Xagent(BasicAgent):
         self._world = self._vehicle.get_world()
         self._map = self._world.get_map()
 
-        self._last_acc_cmd = 0.0
-        self._last_delta_cmd = 0.0
-
-
         self._base_min_distance = 5.0
         self._waypoints_queue = deque(maxlen=100000)
         self._d_dist = 0.4
@@ -75,7 +73,6 @@ class Xagent(BasicAgent):
 
         self._a_cmd = 0.0
         self._delta_cmd = 0.0
-        self._a_cmd_last = 0.0
 
         self._next_states = None
         self._last_traffic_light = None
@@ -83,9 +80,9 @@ class Xagent(BasicAgent):
 
         # 构建 NMPC 基础
         self._model.solver_basis(
-            Q=np.diag([8.0, 8.0, 6.0, 1.5, 2.5]),      # [x, y, yaw, vx, vy]
+            Q=np.diag([5.0, 15.0, 10.0, 2.0, 2.5]),      # [x, y, yaw, vx, vy]
             R=np.diag([0.8, 2.5]),                      # [a, δ]
-            Rd=np.diag([60.0, 2500.0])                    # [Δa, Δδ]
+            Rd=np.diag([2000.0, 8000.0])                    # [Δa, Δδ]
         )
         self.Q_origin = copy.deepcopy(self._model.Q)
         self._log_data = []
@@ -94,14 +91,23 @@ class Xagent(BasicAgent):
         self._global_planner = GlobalRoutePlanner(self._map, self._sample_resolution)
 
         self.dist_move = 0.2
-        self.dist_step = 1.5
+        self.dist_step = 1.2
 
         # 是否启用多边形 + 对偶硬约束
         self._use_dual = use_dual
-        # --- 额外的加速度平滑缓存，用来消掉高频锯齿 ---
-        self._a_hist = deque([0.0] * 8, maxlen=8)   # 最近 5 个 a_cmd
+                # === B 样条全局参考线平滑器（创新点 1） ===
 
-
+        # === B 样条全局参考线平滑器（创新点 1） ===
+        self._bspline_smoother = BSplineGlobalSmoother(
+            degree=3,
+            n_ctrl=None,      # 让它根据路径长度自适应控制点个数
+            w_fit=1.0,
+            w_smooth=50.0     # 可以后面再调
+        )
+        # 车道半宽（右手系下，Town03 单车道大概 3.5m 左右，半宽 ~1.75m）
+        self._lane_half_width = 4.0
+    
+ 
     # ======================================================================
     #   1) 只保留“与我相关”的车辆（前方 / 交叉口 / 环岛）
     # ======================================================================
@@ -291,7 +297,8 @@ class Xagent(BasicAgent):
         self._simu_time += self._dt
         state, height = self._model.get_state_carla()  # car's state and height
         current_state = np.array(
-            ca_u.carla_vector_to_rh_vector(state[0:2], state[2], state[3:]))
+            ca_u.carla_vector_to_rh_vector(state[0:2], state[2], state[3:])
+        )
 
         veh_location = self._vehicle.get_location()
         vehicle_speed = self._model.get_v()
@@ -305,33 +312,42 @@ class Xagent(BasicAgent):
             waypoints = []
             v = math.sqrt(current_state[3] ** 2 + current_state[4] ** 2)
             waypoints.append(
-                [current_state[0], current_state[1], v, current_state[2]])
+                [current_state[0], current_state[1], v, current_state[2]]
+            )
             cnt = 0
 
-            # delete the same waypoints to solve the problem of spline interpolation(NaN)
-            last_state = None
+            # --- [FIX START] 修改路点过滤逻辑 ---
+            last_loc = None # 改用记录上一个点的坐标
             for wp in carla_wp:
                 if cnt > 30:
                     break
                 cnt += 1
                 t = wp.transform
                 ref_state = ca_u.carla_vector_to_rh_vector(
-                    [t.location.x, t.location.y], t.rotation.yaw)
-                if last_state is not None:
-                    if np.sqrt(ref_state[0] ** 2 + ref_state[1] ** 2) - last_state < 0.005:
+                    [t.location.x, t.location.y], t.rotation.yaw
+                )
+                
+                # 计算当前点与上一个点的欧氏距离
+                if last_loc is not None:
+                    dist_diff = np.hypot(ref_state[0] - last_loc[0], 
+                                         ref_state[1] - last_loc[1])
+                    if dist_diff < 0.1: # 如果两个点距离小于 0.1m，则认为是重复点
                         continue
+                
                 waypoints.append(
                     [ref_state[0], ref_state[1],
-                     self._model.target_v, ref_state[2]])
-                last_state = np.sqrt(ref_state[0] ** 2 + ref_state[1] ** 2)
+                     self._model.target_v, ref_state[2]]
+                )
+                last_loc = [ref_state[0], ref_state[1]] # 更新上一个点坐标
+            # --- [FIX END] ---
 
-            waypoints = np.array(waypoints).T
+            waypoints = np.array(waypoints).T  # shape (4, Nw)
 
         # purge obsolete waypoints
         num_waypoint_removed = 0
         for waypoint, _ in self._waypoints_queue:
             if len(self._waypoints_queue) - num_waypoint_removed == 1:
-                min_distance = 1  # Don't remove the last waypoint until very close
+                min_distance = 1.0  # Don't remove the last waypoint until very close
             else:
                 min_distance = self._min_distance
 
@@ -344,23 +360,88 @@ class Xagent(BasicAgent):
             for _ in range(num_waypoint_removed):
                 self._waypoints_queue.popleft()
 
-        # interpolate reference path
-        cx, cy, cyaw, ck, s = itp.calc_spline_course_carla(
-            waypoints[0], waypoints[1], waypoints[3][0], ds=self._d_dist)
-        sp = itp.calc_speed_profile(cx, cy, cyaw, self._model.target_v)
+        # -------- 1.1 原版样条生成基准参考线 --------
+        cx0, cy0, cyaw0, ck0, s0 = itp.calc_spline_course_carla(
+            waypoints[0], waypoints[1], waypoints[3][0], ds=self._d_dist
+        )
 
+        # --- 关键：统一转成 numpy 数组，后面才能做浮点乘法 ---
+        cx0 = np.asarray(cx0, dtype=float)
+        cy0 = np.asarray(cy0, dtype=float)
+        cyaw0 = np.asarray(cyaw0, dtype=float)
+        ck0 = np.asarray(ck0, dtype=float)
+
+        base_path = np.stack([cx0, cy0], axis=1)   # (M, 2)
+
+        # 默认使用原始参考线
+        cx, cy = cx0.copy(), cy0.copy()
+        cyaw, ck = cyaw0.copy(), ck0.copy()
+
+        # -------- 1.2 B 样条小幅“修饰” --------
+        if base_path.shape[0] >= 4:
+            try:
+                smooth_path, ctrl_pts = self._bspline_smoother.smooth(
+                    path_xy=base_path,
+                    lane_center_xy=base_path,
+                    lane_half_width=self._lane_half_width
+                )
+
+                if smooth_path is not None and smooth_path.shape[0] == base_path.shape[0]:
+                    # 基准路径和 B 样条做小比例插值（此时 cx0/cy0 已是 ndarray）
+                    alpha_bs = 1.0
+                    cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
+                    cy = (1.0 - alpha_bs) * cy0 + alpha_bs * smooth_path[:, 1]
+
+                    # 重新计算 yaw、曲率
+                    dx = np.gradient(cx)
+                    dy = np.gradient(cy)
+                    raw_cyaw = np.arctan2(dy, dx + 1e-9)
+                    cyaw = np.unwrap(raw_cyaw)
+
+                    ddx = np.gradient(dx)
+                    ddy = np.gradient(dy)
+                    curv_eps = 1e-6
+                    ck = (dx * ddy - dy * ddx) / (dx * dx + dy * dy + curv_eps) ** 1.5
+            except Exception as e:
+                print("[Xagent] BSpline smoother failed, use original path:", e)
+                cx, cy = cx0.copy(), cy0.copy()
+                cyaw, ck = cyaw0.copy(), ck0.copy()
+
+
+        # -------- 1.3 生成速度曲线 & PATH 对象 --------
+        sp = itp.calc_speed_profile(cx, cy, cyaw, self._model.target_v)
         ref_path = itp.PATH(cx, cy, cyaw, ck)
+
+        # --- [FIX START] 强制对齐参考路径的 Yaw 周期 ---
+        # 找到最近点
+        ind_nearest, _ = ref_path.nearest_index([current_state[0], current_state[1], current_state[2]])
+        # 获取最近点的参考 yaw
+        ref_yaw_nearest = ref_path.cyaw[ind_nearest]
+        
+        # 计算自车 yaw 与 参考 yaw 的差值倍数
+        diff = current_state[2] - ref_yaw_nearest
+        k_cycle = round(diff / (2 * np.pi))
+        
+        # 将整个参考路径的 cyaw 平移 2*pi*k，使其与自车对齐
+        if k_cycle != 0:
+            ref_path.cyaw = [y + k_cycle * 2 * np.pi for y in ref_path.cyaw]
+        # --- [FIX END] ---
+
         z_ref, target_ind = self.calc_ref_trajectory_in_T_step(
             [current_state[0], current_state[1], v, current_state[2]],
-            ref_path, sp)
+            ref_path, sp
+        )
+        # z_ref: [x, y, v, yaw]
         ref_traj = np.array(
             [z_ref[0], z_ref[1], z_ref[3], z_ref[2],
-             [0] * len(z_ref[0]), [0] * len(z_ref[0])])[:, :self._model.horizon]
+             [0] * len(z_ref[0]), [0] * len(z_ref[0])]
+        )[:, :self._model.horizon]
 
         # 初始化 / 更新预测状态序列
         if self._next_states is None:
             self._next_states = np.zeros(
-                (self._model.n_states, self._model.horizon + 1)).T
+                (self._model.n_states, self._model.horizon + 1)
+            ).T
 
         cur_v = self._model.get_v()
         self._next_states[:, 3] = cur_v
@@ -411,7 +492,6 @@ class Xagent(BasicAgent):
                 )
 
             if len(obs_Am_list) > 0 and hasattr(self._model, "enable_dual_collision"):
-                # 启用 TDR-OBCA 风格多边形对偶硬约束
                 bb_ego = self._vehicle.bounding_box
                 ego_L = 2.0 * float(bb_ego.extent.x)
                 ego_W = 2.0 * float(bb_ego.extent.y)
@@ -426,7 +506,7 @@ class Xagent(BasicAgent):
                     beta_s=250.0   # slack 惩罚
                 )
 
-                # ====== 2.5 调用 QP 预规划：把 (X,U) 写入 warm-start 缓存 ======
+                # ====== 2.5 调用 QP 预规划 ======
                 if use_qp_this_step and hasattr(self._model, "obca_qp_preplan"):
                     ok = False
                     try:
@@ -446,7 +526,7 @@ class Xagent(BasicAgent):
                         print(f"[Xagent] obca_qp_preplan failed: {e}")
                         ok = False
 
-                    # ==== QP 结果与全局路径的“转向方向”一致性检查（阈值放宽）====
+                    # ==== QP 结果与全局路径“转向方向”一致性检查 ====
                     try:
                         if ok and getattr(self._model, "_qp_ws_X", None) is not None:
                             X_qp = np.asarray(self._model._qp_ws_X, dtype=float)  # (N+1, 6)
@@ -461,15 +541,15 @@ class Xagent(BasicAgent):
 
                                 bad = False
 
-                                # 情况 A：参考几乎直行，但 QP 第一拍就 >20° 转向
-                                if (abs(d_yaw_ref) < np.deg2rad(5.0) and
-                                        abs(d_yaw_qp) > np.deg2rad(20.0)):
+                                # A：参考几乎直行，但 QP 第一拍就 >20° 转向
+                                if (abs(d_yaw_ref) < np.deg2rad(5.0)
+                                        and abs(d_yaw_qp) > np.deg2rad(20.0)):
                                     bad = True
 
-                                # 情况 B：参考往左/右，QP 却反向大转（>30°）
-                                if (d_yaw_qp * d_yaw_ref < 0.0 and
-                                    abs(d_yaw_qp) > np.deg2rad(30.0) and
-                                    abs(d_yaw_ref) > np.deg2rad(5.0)):
+                                # B：参考往左/右，QP 却反向大转（>30°）
+                                if (d_yaw_qp * d_yaw_ref < 0.0
+                                        and abs(d_yaw_qp) > np.deg2rad(30.0)
+                                        and abs(d_yaw_ref) > np.deg2rad(5.0)):
                                     bad = True
 
                                 if bad:
@@ -480,15 +560,12 @@ class Xagent(BasicAgent):
                         print("[Xagent] QP heading check failed:", e)
 
                 else:
-                    # 这一拍不用 QP，当作没有热启动
                     if hasattr(self._model, "_qp_ws_valid"):
                         self._model._qp_ws_valid = False
             else:
-                # 根本没有障碍 / 没启用 dual，确保不残留上一拍的 QP 热启动
                 if hasattr(self._model, "_qp_ws_valid"):
                     self._model._qp_ws_valid = False
 
-                        
         # ========== 3. 环境感知：APF 用的障碍 / 行人 ==========
         obs, heights, obs_infer = self._env.get_obs(current_state)
 
@@ -508,10 +585,10 @@ class Xagent(BasicAgent):
         max_lat = 2.0
         min_long = -2.0
 
-        # 如果“前方一小段路”的最大曲率较大，认为是环岛或很紧的弯道
+        # 紧弯 / 环岛：横向多留一点，后方多看一点
         if k_window_max > 0.015:
-            max_lat = 3.5     # 横向 3.5 m 内都算相关车辆
-            min_long = -4.0   # 后方多看一点
+            max_lat = 3.5
+            min_long = -4.0
             is_roundabout_like = True
         else:
             is_roundabout_like = False
@@ -549,7 +626,7 @@ class Xagent(BasicAgent):
                 rel_y = s_ego * dx + c_ego * dy   # 左侧为 +y
                 d = math.hypot(rel_x, rel_y)
 
-                # ① 对向直行车：航向差接近 180°，在前方且横向距离不大
+                # ① 对向直行车
                 if (abs_yaw > math.radians(140.0)
                         and rel_x > 0.0
                         and abs(rel_y) < 4.0
@@ -567,92 +644,72 @@ class Xagent(BasicAgent):
                     obs_long.append(ob)
                     obs_long_infer.append(obs_infer[k])
 
-        # 是否进入“对向来车减速让行模式”：最近对向车 < 25 m
-        yield_for_opp = (opp_min_dist is not None and opp_min_dist < 25.0)
+        # 是否进入“对向直行车减速让行模式”
+        yield_for_opp = (
+            (opp_min_dist is not None)
+            and (opp_min_dist < 18.0)
+            and (not is_roundabout_like)
+        )
 
-        # === 下面是原来的 debug 画框，不变 ===
-        # 先把预测轨迹从 numpy 转成 python list 方便 casadi 使用
-        obs_infer = list(obs_infer)
-        for i in range(len(obs_infer)):
-            obs_infer[i] = obs_infer[i].tolist()
-
-        # 前向 / 交叉 / 对向车辆的预测也一并转成 list
-        obs_long_infer = [np.asarray(o).tolist() for o in obs_long_infer]
-        obs_cross_infer = [np.asarray(o).tolist() for o in obs_cross_infer]
-        obs_opp_infer = [np.asarray(o).tolist() for o in obs_opp_infer]
-
+        # === debug 画框：保持 obs_infer 为 ndarray，不再 .tolist() ===
         temp_obs = copy.copy(obs)
         if len(temp_obs) > 0:
             for i in range(len(temp_obs)):
                 centers = self._model.get_obs_centers(temp_obs[i], carla=True)
                 bb = carla.BoundingBox(
                     carla.Location(x=temp_obs[i][0], y=-temp_obs[i][1], z=heights[i] + 1.0),
-                    carla.Vector3D(2, 1, 0.8))
+                    carla.Vector3D(2, 1, 0.8)
+                )
                 self._world.debug.draw_box(
                     bb,
                     carla.Rotation(yaw=np.degrees(-temp_obs[i][2])),
-                    thickness=0.03, life_time=2 * self._dt)
+                    thickness=0.03, life_time=2 * self._dt
+                )
                 for j in range(len(obs_infer[i])):
                     self._world.debug.draw_point(
-                        carla.Location(x=obs_infer[i][j][0], y=-obs_infer[i][j][1],
+                        carla.Location(x=obs_infer[i][j][0],
+                                       y=-obs_infer[i][j][1],
                                        z=heights[i] + 1.5),
-                        size=0.06, life_time=2 * self._dt)
+                        size=0.06, life_time=2 * self._dt
+                    )
 
-                    
-        # === 行人感知 + debug 可视化（保持原来的逻辑） ===
+        # === 行人感知 + debug 可视化 ===
         pedes, pede_heights, pedes_infer = self._env.get_pedes(current_state)
-        pedes_infer = list(pedes_infer)
-        for i in range(len(pedes_infer)):
-            pedes_infer[i] = pedes_infer[i].tolist()
         temp_pedes = copy.copy(pedes)
-    
 
-        # === 基于“对向直行车”的简单减速让行速度规划 ===
-        # 注意：这里只改 ref_traj 的速度分量，不动几何路径
-        if yield_for_opp:
-            v_now = max(cur_v, 0.0)
-            v_stop = 0.5          # 希望在冲突区域附近基本停下（>0 防止数值问题）
-            t_brake = 3.0         # 期望大约 3 s 内从 v_now 减到 v_stop
-
-            for i in range(self._model.horizon):
-                ti = i * self._dt
-                alpha_brake = min(ti / t_brake, 1.0)
-                v_des_i = v_now + (v_stop - v_now) * alpha_brake
-                if v_des_i < 0.0:
-                    v_des_i = 0.0
-
-                # 只允许把参考速度往下压，不能调高
-                if v_des_i < ref_traj[3, i]:
-                    ref_traj[3, i] = v_des_i
-        
         if len(temp_pedes) > 0:
             for i in range(len(temp_pedes)):
                 bb = carla.BoundingBox(
                     carla.Location(x=temp_pedes[i][0], y=-temp_pedes[i][1], z=pede_heights[i]),
-                    carla.Vector3D(0.6, 0.6, 1.8))
+                    carla.Vector3D(0.6, 0.6, 1.8)
+                )
                 self._world.debug.draw_box(
                     bb,
                     carla.Rotation(yaw=np.degrees(-temp_pedes[i][2])),
-                    thickness=0.03, life_time=2 * self._dt)
+                    thickness=0.03, life_time=2 * self._dt
+                )
                 for j in range(len(pedes_infer[i])):
                     self._world.debug.draw_point(
-                        carla.Location(x=pedes_infer[i][j][0], y=-pedes_infer[i][j][1],
+                        carla.Location(x=pedes_infer[i][j][0],
+                                       y=-pedes_infer[i][j][1],
                                        z=pede_heights[i] + 1.5),
-                        size=0.06, life_time=2 * self._dt)
+                        size=0.06, life_time=2 * self._dt
+                    )
 
         # APF diagnostics
-        apf_obs = apf_pede = apf_nc_road = apf_c_road = apf_traffic = apf_ttc = 0
+        apf_obs = apf_pede = apf_nc_road = apf_c_road = apf_traffic = apf_ttc = 0.0
 
         # ========== 4. 构建代价函数和约束（在 model 内部） ==========
         self._model.solver_add_cost()
 
         # ----- 车道线相关约束 / 代价 -----
         lane_location = self._vehicle.get_location()
-        lane_location.z += 2
+        lane_location.z += 2.0
         wp = self._map.get_waypoint(lane_location, project_to_road=True)
 
         wp_yaw = -np.radians(wp.transform.rotation.yaw)
-        wp_y = np.sin(-wp_yaw) * wp.transform.location.x + np.cos(-wp_yaw) * -wp.transform.location.y
+        wp_y = (np.sin(-wp_yaw) * wp.transform.location.x +
+                np.cos(-wp_yaw) * -wp.transform.location.y)
         left_bound = wp_y + 1.75
         right_bound = wp_y - 1.75
 
@@ -670,24 +727,21 @@ class Xagent(BasicAgent):
                             carla.LaneMarkingType.SolidSolid]
         self._model.Q = self.Q_origin
 
-        # ========= 计算自车到左右车道线的距离 =========
+        # ========= 自车到左右车道线的距离 =========
         ego_loc = veh_location
         ego_y_lane = (math.sin(-wp_yaw) * ego_loc.x +
                       math.cos(-wp_yaw) * -ego_loc.y)
 
-        dist_left = left_bound - ego_y_lane      # >0 在左、=0 在线上
-        dist_right = ego_y_lane - right_bound    # >0 在右、=0 在线上
+        dist_left = left_bound - ego_y_lane
+        dist_right = ego_y_lane - right_bound
 
-        # 非可跨实线：阈值小一点；可跨虚线：阈值放宽一点
-        th_nc = 0.7     # non-crossable line
-        th_c = 1.1      # crossable line
-
+        th_nc = 0.7
+        th_c = 1.1
         close_left_nc = (dist_left < th_nc)
         close_right_nc = (dist_right < th_nc)
         close_left_c = (dist_left < th_c)
         close_right_c = (dist_right < th_c)
 
-        # 在环岛 / 紧弯里稍微放宽一点，但仍然用“距离”做开关
         if is_roundabout_like:
             th_nc_round = 0.8
             th_c_round = 1.3
@@ -696,14 +750,12 @@ class Xagent(BasicAgent):
             close_left_c = (dist_left < th_c_round)
             close_right_c = (dist_right < th_c_round)
 
-        # ==== 这里开始和你原来的逻辑类似，只是多了 close_* 判断 ====
         wq0 = self._wq(0)
         wq1 = self._wq(1)
         wq3 = self._wq(3)
 
         # ------------ 左车道线 ------------
         if wq0[1].value == 2 or wq3[1].value == 2:
-            # 相邻左车道存在且比较近
             if self.lat_dis_wp_ev(wq1[0], self._env.ego_vehicle) < 1.7:
                 if close_left_nc:
                     self._model.solver_add_nc_road_pf([[left_bound, 1]], wp_yaw, carla=True)
@@ -727,7 +779,7 @@ class Xagent(BasicAgent):
 
         # ------------ 右车道线 ------------
         if wq0[1].value == 1 or wq3[1].value == 1:
-            if self.lat_dis_wp_ev(wq0[0], self._env.ego_vehicle) < 1.70:
+            if self.lat_dis_wp_ev(wq0[0], self._env.ego_vehicle) < 1.7:
                 if close_right_nc:
                     self._model.solver_add_nc_road_pf([[right_bound, -1]], wp_yaw, carla=True)
                     apf_nc_road += self._model.nc_road_pf([[right_bound, -1]], ref_traj, wp_yaw)
@@ -756,25 +808,16 @@ class Xagent(BasicAgent):
             self._model.solver_add_single_tr_lgt_pf_carla(wp_y, wp_yaw, tl_x)
             apf_traffic += self._model.traffic_pf(ref_traj, wp_y, wp_yaw, tl_x)
 
-
-
         # ----- APF 障碍 / 行人 / TTC -----
-
-        # 1) 车辆 APF：前向 / 交叉 / 对向直行车分开处理
-        #    - obs_long_infer：同向前车，主要跟车对象
-        #    - obs_opp_infer ：对向直行车，主要靠减速让行，横向斥力较弱
-        #    - obs_cross_infer：横向 / 斜向驶来的车，只给中等斥力
         obs_ratio_front = 150
         obs_ratio_cross = 60
-        obs_ratio_opp = 40      # 对向车默认斥力更弱
+        obs_ratio_opp = 40
 
         if is_roundabout_like:
-            # 在环岛 / 紧弯里整体再软一点
             obs_ratio_front = 80
             obs_ratio_cross = 40
             obs_ratio_opp = 30
 
-        # 如果已经进入“对向来车减速让行模式”，进一步弱化横向斥力
         if yield_for_opp:
             obs_ratio_opp = 10
 
@@ -784,27 +827,25 @@ class Xagent(BasicAgent):
                 obs_long_infer, ratio=obs_ratio_front, carla=True
             )
 
-        # 对向直行车辆：只给很弱的 APF，避免把车强行推到右侧
+        # 对向直行车辆
         if len(obs_opp_infer) > 0:
             self._model.solver_add_soft_obs(
                 obs_opp_infer, ratio=obs_ratio_opp, carla=True
             )
 
-        # 横向 / 交叉车辆：比前向稍弱
+        # 横向 / 交叉车辆
         if len(obs_cross_infer) > 0:
             self._model.solver_add_soft_obs(
                 obs_cross_infer, ratio=obs_ratio_cross, carla=True
             )
 
-
-        # 2) 行人 APF 保持不变（还是优先绕行人）
+        # 行人 APF
         if len(pedes) > 0:
             self._model.solver_add_soft_obs(
                 pedes_infer, ratio=600, carla=True, pede=True
             )
 
-
-        # 3) TTC 势场：直路上启用，环岛里只做监控不进优化
+        # TTC 势场
         if lv is not None:
             if not is_roundabout_like:
                 self._model.solver_add_soft_ttc(lv, ratio=80)
@@ -815,8 +856,8 @@ class Xagent(BasicAgent):
             apf_ttc += ttc_val
             if ttc_val > 1e-3:
                 print("---------------the apf for ttc is attached-----------------")
-        # 只把前向车辆作为主 APF，交叉车的 APF 记一半权重
-        # 前向车 APF + 对向 / 交叉车 APF（对向/交叉只记一半权重）
+
+        # APF 诊断值
         apf_obs += self._model.soft_obs_apf(obs_long, ref_traj)
         if len(obs_opp) > 0:
             apf_obs += 0.5 * self._model.soft_obs_apf(obs_opp, ref_traj)
@@ -825,32 +866,27 @@ class Xagent(BasicAgent):
 
         apf_pede += self._model.soft_obs_apf(pedes, ref_traj, pede=True)
 
-        # ========== 4.5 椭圆硬约束兜底：只对最近几辆前向车辆 ==========
+        # ========== 4.5 椭圆硬约束兜底 ==========
         if hasattr(self._model, "set_ellip_backup_obstacles"):
-            # 兜底硬约束对“前向 + 对向直行车”都生效
-            front_like = obs_long_infer + obs_opp_infer
+            front_like = obs_long_infer + obs_opp_infer + obs_cross_infer
             if len(front_like) > 0:
-                # 只挑最近 2 辆
-                ellip_obs = front_like[:2]
+                ellip_obs = front_like[:3]
                 self._model.set_ellip_backup_obstacles(
                     ellip_obs,
-                    a=4.5,   # 椭圆长半轴，可按车长调整
-                    b=2.0,   # 椭圆短半轴，可按车宽调整
-                    margin=0.1  # 安全裕度
+                    a=4.5,
+                    b=2.0,
+                    margin=0.25
                 )
             else:
                 self._model.set_ellip_backup_obstacles([])
-
-
-
 
         # ========== 5. 构建 NLP 约束边界并求解 ==========
         self._model.solver_add_bounds()
 
         tick = time.time()
         state = self._model.solve_MPC(
-            ref_traj.T, current_state, self._next_states, u0)
-
+            ref_traj.T, current_state, self._next_states, u0
+        )
         time_2 = time.time() - tick
         self._env.computing_times.append(time_2)
 
@@ -867,49 +903,33 @@ class Xagent(BasicAgent):
         raw_a = float(self._a_opt[0])
         raw_delta = float(self._delta_opt[0])
 
-        # ---------- 6.0 环境判定，用于调节滤波强度 ----------
         no_front_threat = (apf_obs < 1e-3 and apf_pede < 1e-3 and apf_ttc < 1e-3)
-        almost_straight = (k_window_max < 0.008)   # 前方几乎直线
+        almost_straight = (k_window_max < 0.008)
         safe_and_straight = no_front_threat and almost_straight
 
-        # ---------- 6.0.1 额外：检测“危险工况”（需要优先跟随 MPC 急刹） ----------
         danger = (apf_ttc > 0.15) or (apf_obs > 0.25) or (apf_pede > 0.20)
 
-        # === 6.1 纵向 a：按危险/安全分两种平滑策略 ===
+        # 6.1 纵向 a
         if danger:
-            # 紧急避碰 / 跟车距离很近：
-            #   - 基本不做平滑，只靠后面的 jerk 限制防抖
-            #   - jerk 限制放得比较宽，方便急刹
-            self._a_hist.clear()
-            self._a_cmd = raw_a
-            max_da = 0.9          # 后面 jerk 限制使用（允许较大的变化）
+            tau_a = 0.18
+        elif safe_and_straight:
+            tau_a = 0.8
         else:
-            # 普通巡航工况：重点是“好看 + 舒适”
-            if safe_and_straight:
-                # 完全安全 + 直路：加速度变化尽量平
-                alpha_a = 0.15      # 更信上一拍输出
-                max_da = 0.25
-            else:
-                # 有些弯 / 轻微障碍：稍微灵一点
-                alpha_a = 0.25
-                max_da = 0.30
+            tau_a = 0.35
 
-            # 一阶低通
-            a_lpf = alpha_a * raw_a + (1.0 - alpha_a) * self._a_cmd
+        alpha_a = self._dt / (tau_a + self._dt)
+        self._a_cmd = self._a_cmd + alpha_a * (raw_a - self._a_cmd)
 
-            # 8 点移动平均，抹掉高频锯齿
-            self._a_hist.append(a_lpf)
-            self._a_cmd = float(sum(self._a_hist) / len(self._a_hist))
-
-
-
-        # === 6.2 横向 δ：沿用你原来的自适应逻辑 ===
+        # 6.2 横向 δ
         if safe_and_straight:
-            alpha_delta = 0.30
-            max_delta_step = 0.05
+            alpha_delta = 0.20
+            max_delta_step = 0.03
+        elif is_roundabout_like or k_window_max > 0.015:
+            alpha_delta = 0.70
+            max_delta_step = 0.25
         else:
-            alpha_delta = 0.60
-            max_delta_step = 0.18
+            alpha_delta = 0.50
+            max_delta_step = 0.15
 
         delta_lp = alpha_delta * raw_delta + (1.0 - alpha_delta) * self._delta_cmd
         delta_step = np.clip(delta_lp - self._delta_cmd,
@@ -919,37 +939,27 @@ class Xagent(BasicAgent):
         v_ref = ref_traj[3, 0]
         v_err = cur_v - v_ref
 
-        # 只有在“完全安全”且非危险时才用加速度死区
         if (not danger) and abs(v_err) < 0.4 and abs(self._a_cmd) < 0.25 and apf_ttc < 1e-3:
             self._a_cmd = 0.0
 
-        # 把 danger 作为 emergency 传给前车安全层，危险时不再限制急刹
+        # 防倒车 / 低速刹车保护
         safe_acc, safe_delta = self._front_ttc_brake(
             current_state, self._a_cmd, self._delta_cmd, emergency=danger
         )
 
- 
-        safe_acc = float(np.clip(safe_acc, -3.0, 3.0))
-
-        da = safe_acc - self._a_cmd_last
-        da = float(np.clip(da, -max_da, max_da))
-        self._a_cmd = self._a_cmd_last + da
-        self._a_cmd_last = self._a_cmd
-
-        # 转向只做幅值饱和（之前已经经过 LPF + rate limit）
+        self._a_cmd = float(np.clip(safe_acc, -3.0, 3.0))
         self._delta_cmd = float(np.clip(safe_delta, -0.7, 0.7))
 
-
         # 用“滤波 + 死区 + 安全层”后的指令推进内部模型
-        next_state = self._model.predict(current_state,
-                                         (self._a_cmd, self._delta_cmd))
+        next_state = self._model.predict(
+            current_state, (self._a_cmd, self._delta_cmd)
+        )
         self._model.set_state(next_state)
-
-
 
         dist_error = math.hypot(
             next_state[0] - ref_traj[0, 1],
-            next_state[1] - ref_traj[1, 1] - self.dist_move)
+            next_state[1] - ref_traj[1, 1] - self.dist_move
+        )
         yaw_error = abs(next_state[2] - ref_traj[2, 1])
         vel_error = abs(state[2][0][3] - ref_traj[3, 0])
         acc = self._a_cmd
@@ -964,6 +974,7 @@ class Xagent(BasicAgent):
         ])
 
         return self._a_cmd, self._delta_cmd, (next_state, height + 0.05)
+
 
     def trace_route(self, start_location, end_location):
         return self._global_planner.trace_route(start_location, end_location)
