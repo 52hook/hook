@@ -1449,21 +1449,19 @@ class Vehicle:
                 self._s_cache = s_2d.flatten()
 
 
-        # ---------- 2.5 凸 QP 热启动 blend（在 shift 后叠加障碍感知修正） ----------
+        # ---------- 2.5 凸 QP 热启动：仅 blend 控制序列 U ----------
+        # 注意：不 blend 状态 X，因为 QP 的 3 维简化模型扩展到 6 维后
+        # vx/vy/omega 不准确，会导致 NMPC 收敛到错误解。
         if getattr(self, "_qp_ws_valid", False) \
-        and (self._qp_ws_U is not None) \
-        and (self._qp_ws_X is not None):
+        and (self._qp_ws_U is not None):
             try:
                 u_qp = np.asarray(self._qp_ws_U, dtype=float)
-                x_qp = np.asarray(self._qp_ws_X, dtype=float)
-                if u_qp.shape == u_ws.shape and x_qp.shape == x_m.shape:
+                if u_qp.shape == u_ws.shape:
                     alpha = self.qp_blend_alpha
                     u_ws = alpha * u_ws + (1.0 - alpha) * u_qp
-                    x_m  = alpha * x_m  + (1.0 - alpha) * x_qp
                 else:
-                    logger.warning("solve_MPC: QP warm-start shape 不匹配, "
-                                   "u_qp %s vs %s, x_qp %s vs %s",
-                                   u_qp.shape, u_ws.shape, x_qp.shape, x_m.shape)
+                    logger.warning("solve_MPC: QP warm-start U shape 不匹配, "
+                                   "u_qp %s vs %s", u_qp.shape, u_ws.shape)
             except Exception as e:
                 logger.warning("solve_MPC: QP warm-start 使用失败: %s", e)
             finally:
