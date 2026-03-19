@@ -141,7 +141,7 @@ class Vehicle:
 
         # === 对偶热启动可配参数 ===
         self.dual_damping = 0.7        # λ/μ 缓存阻尼系数
-        self.qp_blend_alpha = 0.8      # QP 混合比例（上一拍 MPC 占比）
+        self.qp_blend_alpha = 0.95     # QP 混合比例（上一拍 MPC 占 95%，QP 仅占 5%）
 
         # === 额外：椭圆硬约束兜底（可选） ===
         # 外面通过 set_ellip_backup_obstacles() 配置

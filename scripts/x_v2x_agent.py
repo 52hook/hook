@@ -545,9 +545,10 @@ class Xagent(BasicAgent):
 
                                 bad = False
 
-                                # A：参考几乎直行，但 QP 第一拍转向过大（> 45°）
+                                # A：参考几乎直行，但 QP 第一拍转向过大（> 10°）
+                                # 注：steer_bound=0.55, v=10, L=2.9, dt=0.05 → 物理最大 ≈ 6°/步
                                 if (abs(d_yaw_ref) < np.deg2rad(5.0)
-                                        and abs(d_yaw_qp) > np.deg2rad(45.0)):
+                                        and abs(d_yaw_qp) > np.deg2rad(10.0)):
                                     bad = True
 
                                 # B：参考往左/右，QP 却反向大转（> 60°）
