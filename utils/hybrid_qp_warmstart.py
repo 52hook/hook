@@ -6,10 +6,15 @@ hybrid_qp_warmstart.py
 
 论文 Section E：含多边形碰撞约束的混合 QP 热启动
 
-核心思路——对车辆动力学与几何避障约束进行双重凸化简化：
-  1. 动力学：沿参考路径一阶线性化 → 仿射等式约束
-  2. 避障：顶点-半空间模型（活跃分离面 + 自车 4 顶点） → 线性不等式
-  3. 二次代价 + 线性约束 = 标准凸 QP → 全局最优、快速收敛
+核心思路——固定参考航向 θ_ref，将旋转矩阵固化为常量：
+  1. 状态降维：[x, y, v]（3 维），yaw = yaw_ref（参数，非变量）
+  2. 控制：[acc]（1 维），steering 由参考 yaw 隐式确定
+  3. 动力学：精确线性约束（无线性化误差）
+     x_{k+1} = x_k + dt * v_k * cos(yaw_ref_k)
+     y_{k+1} = y_k + dt * v_k * sin(yaw_ref_k)
+     v_{k+1} = v_k + dt * a_k
+  4. 避障：顶点-半空间模型（活跃分离面 + 自车 4 顶点） → 线性不等式
+  5. 二次代价 + 线性约束 = 标准凸 QP → 全局最优、快速收敛
 """
 
 import math
@@ -26,10 +31,12 @@ logger = logging.getLogger(__name__)
 
 class HybridQPWarmStarter:
     """
-    凸 QP 预规划器
+    凸 QP 预规划器（固定参考航向版）
 
-    状态 (4 维运动学): [x, y, yaw, v]
-    控制 (2 维):       [acc, delta]
+    QP 内部状态 (3 维): [x, y, v]
+    QP 内部控制 (1 维): [acc]
+    输出状态 (4 维):     [x, y, yaw_ref, v]
+    输出控制 (2 维):     [acc, delta_ref]
     """
 
     def __init__(self,
@@ -48,8 +55,6 @@ class HybridQPWarmStarter:
         self.N = int(horizon)
         self.dt = float(dt)
         self.L = float(wheelbase)
-        self.nx = 4
-        self.nu = 2
         self.d_safe = float(d_safe)
 
         # 控制输入边界
@@ -62,18 +67,36 @@ class HybridQPWarmStarter:
         self.car_L = float(car_box[0])
         self.car_W = float(car_box[1])
 
-        # 代价权重
+        # QP 内部维度
+        self.nx_qp = 3   # [x, y, v]
+        self.nu_qp = 1   # [acc]
+
+        # 代价权重（QP 内部 3 状态 + 1 控制）
         if Q is None:
-            self.Q = np.diag([10.0, 10.0, 1.0, 1.0])
+            self.Q = np.diag([10.0, 10.0, 1.0])
         else:
-            self.Q = np.array(Q, dtype=float)
+            Q = np.array(Q, dtype=float)
+            # 若传入 4 维 Q，提取 [x, y, v] 对应的行列
+            if Q.shape[0] == 4:
+                self.Q = np.diag([Q[0, 0], Q[1, 1], Q[3, 3]])
+            else:
+                self.Q = Q[:3, :3]
 
         if R is None:
-            self.R = np.diag([1.0, 10.0])
+            self.R = np.diag([1.0])
         else:
-            self.R = np.array(R, dtype=float)
+            R = np.array(R, dtype=float)
+            # 若传入 2 维 R，仅取 acc 对应权重
+            if R.shape[0] == 2:
+                self.R = np.diag([R[0, 0]])
+            else:
+                self.R = R[:1, :1]
 
-        self.Rd = np.array(Rd, dtype=float) if Rd is not None else None
+        self.Rd = None  # 控制增量惩罚暂不使用
+
+        # qpOASES solver 缓存
+        self._qp_solver = None
+        self._qp_cache_key = None
 
     # ========== 自车 4 顶点的本地偏移量 ==========
 
@@ -90,69 +113,20 @@ class HybridQPWarmStarter:
             [-hL, -hW],
         ], dtype=float)
 
-    # ========== 一阶线性化 ==========
-
-    def _linearize_at(self, x_ref, u_ref):
-        """
-        在 (x_ref, u_ref) 处对运动学自行车模型做一阶泰勒展开
-
-        返回 (A_d, B_d, c_d):  x_{k+1} ≈ A_d @ x_k + B_d @ u_k + c_d
-        """
-        _, _, yaw_r, v_r = x_ref[:4]
-        acc_r, delta_r = u_ref[:2]
-
-        cos_y = math.cos(yaw_r)
-        sin_y = math.sin(yaw_r)
-        tan_d = math.tan(delta_r)
-        cos_d2 = math.cos(delta_r) ** 2
-        L = self.L
-        dt = self.dt
-
-        # 连续时间雅可比
-        A_c = np.array([
-            [0, 0, -v_r * sin_y, cos_y],
-            [0, 0,  v_r * cos_y, sin_y],
-            [0, 0,  0,           tan_d / L],
-            [0, 0,  0,           0],
-        ], dtype=float)
-
-        B_c = np.array([
-            [0,                     0],
-            [0,                     0],
-            [0, v_r / (L * cos_d2) if abs(cos_d2) > 1e-8 else 0],
-            [1,                     0],
-        ], dtype=float)
-
-        # 非线性值 f(x_ref, u_ref)
-        f_ref = np.array([
-            v_r * cos_y,
-            v_r * sin_y,
-            v_r / L * tan_d,
-            acc_r,
-        ], dtype=float)
-
-        # 前向欧拉离散化
-        A_d = np.eye(4) + dt * A_c
-        B_d = dt * B_c
-        c_d = x_ref[:4] + dt * f_ref - A_d @ x_ref[:4] - B_d @ u_ref[:2]
-
-        return A_d, B_d, c_d
-
     # ========== 活跃分离面选择 + 顶点约束 ==========
 
     def _vertex_obstacle_constraints(self, k, ref_pos_k, yaw_ref_k,
-                                     obs_Am_list, obs_bm_list):
+                                     obs_Am_list, obs_bm_list, n_w, nx_qp):
         """
         对时步 k，为每个障碍选择活跃分离面，生成线性避障约束
 
+        约束格式：A_row @ w <= b_val
+        其中 w 的 [k*nx_qp : k*nx_qp+2] 对应 [x_k, y_k]
+
         polygon_to_Ab 的约定: A*x <= b 描述障碍**内部**
-        → a_i^T * p <= b_i 表示 p 在面 i 的内侧
-        → a_i^T * p >= b_i 表示 p 在面 i 的外侧（安全）
-
-        活跃面选择：ref_pos 离开障碍最远的面
-        → argmax_i { a_i^T * ref_pos - b_i } （最正 = 最远离内部）
-
-        约束方向：-a_face^T * [x,y] <= -(b_face + d_safe - a_face^T * R * offset_j)
+        → 活跃面：argmax_i { a_i^T * ref_pos - b_i }
+        → 约束：a_face^T * (pos + R*offset_j) >= b_face + d_safe
+        → 标准形式：-a_face^T * [x,y] <= -(b_face + d_safe) + a_face^T * R * offset_j
         """
         cos_y = math.cos(yaw_ref_k)
         sin_y = math.sin(yaw_ref_k)
@@ -173,20 +147,19 @@ class HybridQPWarmStarter:
             scores = Am @ ref_pos_k - bm
             face_idx = np.argmax(scores)
 
-            a_face = Am[face_idx]   # (2,)  指向障碍外侧的法向量
+            a_face = Am[face_idx]   # (2,)
             b_face = bm[face_idx]   # 标量
 
-            # 对 4 个顶点：a_face^T * ([x,y] + R*offset_j) >= b_face + d_safe
-            # 转为标准 <= 形式：-a_face^T * [x,y] <= -(b_face + d_safe) + a_face^T * R * offset_j
+            # 对 4 个顶点生成约束
             for j in range(4):
                 a_dot_offset = float(a_face @ rot_offsets[j])
-                A_rows.append(-a_face)
+                # 构建完整行向量
+                row = np.zeros(n_w)
+                row[k * nx_qp: k * nx_qp + 2] = -a_face
+                A_rows.append(row)
                 b_rows.append(-(b_face + self.d_safe) + a_dot_offset)
 
-        if len(A_rows) == 0:
-            return None, None
-
-        return np.array(A_rows), np.array(b_rows)
+        return A_rows, b_rows
 
     # ========== 主求解接口 ==========
 
@@ -195,20 +168,28 @@ class HybridQPWarmStarter:
         """
         凸 QP 预规划求解
 
-        Returns: (X_sol, U_sol, None) 或 raise
+        参数:
+          x0:       当前状态 [x, y, yaw, v]
+          ref_traj: 参考轨迹 (N+1, >=4) — [x, y, yaw, v]
+          obs_Am_list, obs_bm_list: 障碍物半空间表示
+          u_init:   上一拍控制序列
+
+        返回: (X_sol, U_sol, None)
+          X_sol: (N+1, 4) — [x, y, yaw_ref, v]
+          U_sol: (N, 2)   — [acc, delta_ref]
         """
         N = self.N
-        nx = self.nx
-        nu = self.nu
+        nx = self.nx_qp   # 3
+        nu = self.nu_qp   # 1
 
         # ---------- 预处理 ----------
         ref_traj = np.asarray(ref_traj, dtype=float).copy()
-        assert ref_traj.shape[0] >= N + 1 and ref_traj.shape[1] >= nx
-        x0 = np.asarray(x0, dtype=float).reshape(-1)[:nx]
+        assert ref_traj.shape[0] >= N + 1 and ref_traj.shape[1] >= 4
+        x0_full = np.asarray(x0, dtype=float).reshape(-1)[:4]
 
         # yaw 归一化
         ref_yaw = np.unwrap(ref_traj[:, 2])
-        yaw_offset = x0[2] - ref_yaw[0]
+        yaw_offset = x0_full[2] - ref_yaw[0]
         yaw_offset = np.arctan2(np.sin(yaw_offset), np.cos(yaw_offset))
         ref_traj[:, 2] = ref_yaw + yaw_offset
 
@@ -217,54 +198,71 @@ class HybridQPWarmStarter:
         if obs_bm_list is None:
             obs_bm_list = []
 
-        # 参考控制序列
-        u_ref_seq = np.zeros((N, nu))
-        if u_init is not None:
-            u_init = np.asarray(u_init, dtype=float)
-            if u_init.shape[0] >= N:
-                u_ref_seq = u_init[:N, :nu].copy()
+        # 提取固定的参考 yaw 序列
+        yaw_ref = ref_traj[:N + 1, 2].copy()
 
-        # ---------- 线性化 ----------
-        A_list, B_list, c_list = [], [], []
-        for k in range(N):
-            A_d, B_d, c_d = self._linearize_at(ref_traj[k, :nx], u_ref_seq[k])
-            A_list.append(A_d)
-            B_list.append(B_d)
-            c_list.append(c_d)
+        # 提取 QP 用的 3 维参考：[x, y, v]
+        ref_qp = np.zeros((N + 1, nx))
+        ref_qp[:, 0] = ref_traj[:N + 1, 0]   # x
+        ref_qp[:, 1] = ref_traj[:N + 1, 1]   # y
+        ref_qp[:, 2] = ref_traj[:N + 1, 3]   # v
+
+        # QP 初始状态：[x0, y0, v0]
+        x0_qp = np.array([x0_full[0], x0_full[1], x0_full[3]])
 
         # ---------- 构建 QP 矩阵 ----------
         n_x_total = (N + 1) * nx
         n_u_total = N * nu
         n_w = n_x_total + n_u_total
 
-        # Hessian
+        # Hessian 和线性代价
         H = np.zeros((n_w, n_w))
         g = np.zeros(n_w)
         for k in range(N + 1):
             idx = k * nx
-            H[idx:idx+nx, idx:idx+nx] = 2.0 * self.Q
-            g[idx:idx+nx] = -2.0 * self.Q @ ref_traj[k, :nx]
+            H[idx:idx + nx, idx:idx + nx] = 2.0 * self.Q
+            g[idx:idx + nx] = -2.0 * self.Q @ ref_qp[k]
         for k in range(N):
             idx = n_x_total + k * nu
-            H[idx:idx+nu, idx:idx+nu] = 2.0 * self.R
+            H[idx:idx + nu, idx:idx + nu] = 2.0 * self.R
 
-        # 等式约束：初始条件 + 线性化动力学
+        # 等式约束：初始条件 + 精确线性动力学
         n_eq = nx + N * nx
         A_eq = np.zeros((n_eq, n_w))
         b_eq = np.zeros(n_eq)
 
+        # 初始条件：[x_0, y_0, v_0] = x0_qp
         A_eq[:nx, :nx] = np.eye(nx)
-        b_eq[:nx] = x0
+        b_eq[:nx] = x0_qp
 
+        # 动力学约束（精确线性！无线性化误差）
+        dt = self.dt
         for k in range(N):
             row = nx + k * nx
+            cos_y = math.cos(yaw_ref[k])
+            sin_y = math.sin(yaw_ref[k])
             x_k_idx = k * nx
             x_k1_idx = (k + 1) * nx
             u_k_idx = n_x_total + k * nu
-            A_eq[row:row+nx, x_k_idx:x_k_idx+nx] = A_list[k]
-            A_eq[row:row+nx, x_k1_idx:x_k1_idx+nx] = -np.eye(nx)
-            A_eq[row:row+nx, u_k_idx:u_k_idx+nu] = B_list[k]
-            b_eq[row:row+nx] = -c_list[k]
+
+            # x_{k+1} = x_k + dt * v_k * cos(yaw_ref_k)
+            # → x_{k+1} - x_k - dt*cos(yaw_ref_k)*v_k = 0
+            A_eq[row, x_k1_idx + 0] = -1.0       # -x_{k+1}
+            A_eq[row, x_k_idx + 0] = 1.0          #  x_k
+            A_eq[row, x_k_idx + 2] = dt * cos_y   #  dt*cos(yaw)*v_k
+            b_eq[row] = 0.0
+
+            # y_{k+1} = y_k + dt * v_k * sin(yaw_ref_k)
+            A_eq[row + 1, x_k1_idx + 1] = -1.0       # -y_{k+1}
+            A_eq[row + 1, x_k_idx + 1] = 1.0          #  y_k
+            A_eq[row + 1, x_k_idx + 2] = dt * sin_y   #  dt*sin(yaw)*v_k
+            b_eq[row + 1] = 0.0
+
+            # v_{k+1} = v_k + dt * a_k
+            A_eq[row + 2, x_k1_idx + 2] = -1.0   # -v_{k+1}
+            A_eq[row + 2, x_k_idx + 2] = 1.0      #  v_k
+            A_eq[row + 2, u_k_idx] = dt            #  dt*a_k
+            b_eq[row + 2] = 0.0
 
         # 不等式约束：活跃分离面 + 顶点
         ineq_rows_A = []
@@ -273,33 +271,29 @@ class HybridQPWarmStarter:
         if len(obs_Am_list) > 0:
             for k in range(N + 1):
                 ref_pos_k = ref_traj[k, :2]
-                yaw_ref_k = ref_traj[k, 2]
-                A_vtx, b_vtx = self._vertex_obstacle_constraints(
-                    k, ref_pos_k, yaw_ref_k, obs_Am_list, obs_bm_list)
-                if A_vtx is not None:
-                    n_vtx = A_vtx.shape[0]
-                    A_full = np.zeros((n_vtx, n_w))
-                    A_full[:, k*nx:k*nx+2] = A_vtx  # 只影响 [x, y]
-                    ineq_rows_A.append(A_full)
-                    ineq_rows_b.append(b_vtx)
+                yaw_ref_k = yaw_ref[k]
+                rows_A, rows_b = self._vertex_obstacle_constraints(
+                    k, ref_pos_k, yaw_ref_k, obs_Am_list, obs_bm_list,
+                    n_w, nx)
+                if rows_A:
+                    ineq_rows_A.extend(rows_A)
+                    ineq_rows_b.extend(rows_b)
 
         # 变量边界
         lbx = np.full(n_w, -1e8)
         ubx = np.full(n_w, 1e8)
         for k in range(N + 1):
-            lbx[k * nx + 3] = 0.0
-            ubx[k * nx + 3] = self.v_max
+            lbx[k * nx + 2] = 0.0           # v >= 0
+            ubx[k * nx + 2] = self.v_max     # v <= v_max
         for k in range(N):
             idx = n_x_total + k * nu
             lbx[idx] = self.acc_lb
             ubx[idx] = self.acc_ub
-            lbx[idx + 1] = -self.steer_bound
-            ubx[idx + 1] = self.steer_bound
 
         # ---------- 组装约束矩阵 ----------
         if len(ineq_rows_A) > 0:
-            A_ineq = np.vstack(ineq_rows_A)
-            b_ineq = np.concatenate(ineq_rows_b)
+            A_ineq = np.array(ineq_rows_A)
+            b_ineq = np.array(ineq_rows_b)
             n_ineq = A_ineq.shape[0]
         else:
             A_ineq = np.zeros((0, n_w))
@@ -311,25 +305,35 @@ class HybridQPWarmStarter:
         uba = np.concatenate([b_eq, b_ineq])
 
         # ---------- 求解 ----------
-        H_sp = ca.Sparsity.dense(n_w, n_w)
-        A_sp = ca.Sparsity.dense(A_all.shape[0], n_w)
-
+        n_con = A_all.shape[0]
         w_opt = None
 
-        # 优先 qpOASES
-        try:
-            solver = ca.conic('qp_ws', 'qpoases',
-                              {'h': H_sp, 'a': A_sp},
-                              {'printLevel': 'none',
-                               'error_on_fail': False})
-            sol = solver(h=ca.DM(H), g=ca.DM(g), a=ca.DM(A_all),
-                         lba=ca.DM(lba), uba=ca.DM(uba),
-                         lbx=ca.DM(lbx), ubx=ca.DM(ubx))
-            # 检查 qpOASES 是否成功
-            if solver.stats()['success']:
-                w_opt = np.array(sol['x']).reshape(-1)
-        except Exception as e:
-            logger.debug("qpOASES 求解失败: %s", e)
+        # 缓存 qpOASES solver（仅在维度变化时重建）
+        cache_key = (n_w, n_con)
+        if self._qp_cache_key != cache_key:
+            try:
+                H_sp = ca.Sparsity.dense(n_w, n_w)
+                A_sp = ca.Sparsity.dense(n_con, n_w)
+                self._qp_solver = ca.conic('qp_ws', 'qpoases',
+                                           {'h': H_sp, 'a': A_sp},
+                                           {'printLevel': 'none',
+                                            'error_on_fail': False})
+                self._qp_cache_key = cache_key
+            except Exception:
+                self._qp_solver = None
+                self._qp_cache_key = None
+
+        # 调用缓存的 solver
+        if self._qp_solver is not None:
+            try:
+                sol = self._qp_solver(
+                    h=ca.DM(H), g=ca.DM(g), a=ca.DM(A_all),
+                    lba=ca.DM(lba), uba=ca.DM(uba),
+                    lbx=ca.DM(lbx), ubx=ca.DM(ubx))
+                if self._qp_solver.stats()['success']:
+                    w_opt = np.array(sol['x']).reshape(-1)
+            except Exception as e:
+                logger.debug("qpOASES 求解失败: %s", e)
 
         # 保底 IPOPT
         if w_opt is None:
@@ -347,25 +351,32 @@ class HybridQPWarmStarter:
 
             w0 = np.zeros(n_w)
             for k in range(N + 1):
-                w0[k*nx:(k+1)*nx] = ref_traj[k, :nx]
+                w0[k * nx:(k + 1) * nx] = ref_qp[k]
 
             sol = ipopt_solver(x0=ca.DM(w0),
                                lbg=ca.DM(lba), ubg=ca.DM(uba),
                                lbx=ca.DM(lbx), ubx=ca.DM(ubx))
             w_opt = np.array(sol['x']).reshape(-1)
 
-        # ---------- 解包 ----------
-        X_sol = np.zeros((N + 1, nx))
-        U_sol = np.zeros((N, nu))
-        for k in range(N + 1):
-            X_sol[k] = w_opt[k*nx:(k+1)*nx]
-        for k in range(N):
-            U_sol[k] = w_opt[n_x_total + k*nu : n_x_total + (k+1)*nu]
+        # ---------- 解包：从 3 维 QP 解恢复 4 维完整状态 ----------
+        X_sol = np.zeros((N + 1, 4))
+        U_sol = np.zeros((N, 2))
 
-        # yaw 归一化输出
-        X_sol[:, 2] = np.unwrap(X_sol[:, 2])
-        sol_yaw_off = x0[2] - X_sol[0, 2]
-        sol_yaw_off = np.arctan2(np.sin(sol_yaw_off), np.cos(sol_yaw_off))
-        X_sol[:, 2] += sol_yaw_off
+        for k in range(N + 1):
+            qp_state = w_opt[k * nx:(k + 1) * nx]
+            X_sol[k, 0] = qp_state[0]   # x
+            X_sol[k, 1] = qp_state[1]   # y
+            X_sol[k, 2] = yaw_ref[k]    # yaw = 固定的参考值
+            X_sol[k, 3] = qp_state[2]   # v
+
+        for k in range(N):
+            U_sol[k, 0] = w_opt[n_x_total + k * nu]  # acc
+            # steering 由参考 yaw 差分推算
+            if k < N - 1:
+                dyaw = yaw_ref[k + 1] - yaw_ref[k]
+                v_k = max(X_sol[k, 3], 0.5)
+                U_sol[k, 1] = math.atan2(dyaw * self.L, dt * v_k)
+            else:
+                U_sol[k, 1] = U_sol[k - 1, 1] if k > 0 else 0.0
 
         return X_sol, U_sol, None
