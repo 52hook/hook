@@ -916,8 +916,9 @@ class Vehicle:
         v_col = np.sqrt(vx_col**2 + vy_col**2)
 
         # yaw 归一化：unwrap 后对齐自车 yaw，消除 2kπ 偏差
+        _ego_yaw = float(np.asarray(current_state).flatten()[2])
         yaw_col = np.unwrap(yaw_col)
-        _yaw_off = x0_yaw - yaw_col[0]
+        _yaw_off = _ego_yaw - yaw_col[0]
         _yaw_off = np.arctan2(np.sin(_yaw_off), np.cos(_yaw_off))
         yaw_col = yaw_col + _yaw_off
 
