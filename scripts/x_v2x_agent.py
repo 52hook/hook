@@ -95,9 +95,8 @@ class Xagent(BasicAgent):
 
         # 是否启用多边形 + 对偶硬约束
         self._use_dual = use_dual
-                # === B 样条全局参考线平滑器（创新点 1） ===
 
-        # === B 样条全局参考线平滑器（创新点 1） ===
+        # === B 样条全局参考线平滑器 ===
         self._bspline_smoother = BSplineGlobalSmoother(
             degree=3,
             n_ctrl=None,      # 让它根据路径长度自适应控制点个数

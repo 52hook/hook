@@ -171,8 +171,38 @@ class PIDAccelerationController():
 class Env:
     def __init__(self, host="localhost", port=2000, map_id='05', birdeye_view=False, 
                  display_method='spec',recording=True, dt=0.05, is_Leaderboard=False) -> None:
+        env_host = os.getenv("CARLA_HOST")
+        env_port = os.getenv("CARLA_PORT")
+        if env_host:
+            host = env_host
+        if env_port:
+            try:
+                port = int(env_port)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid CARLA_PORT={env_port!r}; expected an integer port number."
+                ) from exc
+
+        logging.info("Connecting to CARLA at %s:%s", host, port)
         self.client = carla.Client(host, port)
         self.client.set_timeout(10.0)
+
+        # Fail early on client/server mismatches instead of crashing later in RPC calls.
+        client_version = None
+        server_version = None
+        try:
+            client_version = self.client.get_client_version()
+            server_version = self.client.get_server_version()
+        except RuntimeError:
+            pass
+        if client_version and server_version and client_version != server_version:
+            raise RuntimeError(
+                "CARLA version mismatch: client API version "
+                f"{client_version} vs simulator API version {server_version}. "
+                "Start the matching simulator or set CARLA_HOST/CARLA_PORT to the "
+                "correct server."
+            )
+
         self.world = self.client.get_world()
         self.map = self.world.get_map()
         self.steer_ratio = 1/0.7 # 70.0/180.0*math.pi

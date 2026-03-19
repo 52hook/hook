@@ -1,12 +1,24 @@
 import carla
 import math
+import os
+import sys
 import time
+import logging
 
 import numpy as np
 from scipy.optimize import minimize
 import copy
 import casadi as ca
 from dataclasses import dataclass
+
+# 确保 utils/ 目录在 import 搜索路径中（供 QP warm-start 模块使用）
+try:
+    sys.path.append(os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'utils'))
+except Exception:
+    pass
+
+logger = logging.getLogger(__name__)
 
 
 # estimated parameters by SLSQP with steering transformation of 70 deg
@@ -126,6 +138,10 @@ class Vehicle:
         self.obs_bm_list = []
         self.obs_edges_count = []
         self.num_obs = 0
+
+        # === 对偶热启动可配参数 ===
+        self.dual_damping = 0.7        # λ/μ 缓存阻尼系数
+        self.qp_blend_alpha = 0.8      # QP 混合比例（上一拍 MPC 占比）
 
         # === 额外：椭圆硬约束兜底（可选） ===
         # 外面通过 set_ellip_backup_obstacles() 配置
@@ -706,7 +722,8 @@ class Vehicle:
 
         # 障碍多边形（世界系 A x <= b）
         self.obs_Am_list = [ca.DM(Am) for Am in obs_Am_list]
-        self.obs_bm_list = [ca.DM(bm).full().flatten() for bm in obs_bm_list]
+        # Ensure bm is a column vector for CasADi operations
+        self.obs_bm_list = [ca.DM(np.asarray(bm).reshape(-1, 1)) for bm in obs_bm_list]
         self.num_obs = len(self.obs_Am_list)
         self.obs_edges_count = [int(Am.shape[0]) for Am in self.obs_Am_list]
 
@@ -814,9 +831,10 @@ class Vehicle:
         # 1) 懒加载 QP 模块
         if self.qp_warmstarter is None:
             try:
+                # Assuming hybrid_qp_warmstart.py is directly in the 'utils' directory
                 from hybrid_qp_warmstart import HybridQPWarmStarter
             except ImportError as e:
-                print("[Vehicle] obca_qp_preplan: cannot import HybridQPWarmStarter:", e)
+                logger.warning("obca_qp_preplan: 无法导入 HybridQPWarmStarter: %s", e)
                 return False
 
             try:
@@ -853,7 +871,7 @@ class Vehicle:
                     solver_name='ipopt'
                 )
             except Exception as e:
-                print("[Vehicle] obca_qp_preplan: failed to create HybridQPWarmStarter:", e)
+                logger.warning("obca_qp_preplan: 创建 HybridQPWarmStarter 失败: %s", e)
                 self.qp_warmstarter = None
                 return False
 
@@ -862,7 +880,7 @@ class Vehicle:
         # 2) 统一 ref_traj 形状为 (T, 6)，每一行一个时刻的 6 维状态
         ref_traj = np.asarray(ref_traj, dtype=float)
         if ref_traj.ndim != 2:
-            print("[Vehicle.obca_qp_preplan] ref_traj must be 2D, got", ref_traj.shape)
+            logger.warning("obca_qp_preplan: ref_traj 必须为 2D, 实际 shape=%s", ref_traj.shape)
             return False
 
         if ref_traj.shape[1] >= self.n_states:
@@ -872,7 +890,7 @@ class Vehicle:
             # (6, T) 或 (>6, T) => 转置
             z_seq = ref_traj.T
         else:
-            print("[Vehicle.obca_qp_preplan] ref_traj shape too small:", ref_traj.shape)
+            logger.warning("obca_qp_preplan: ref_traj shape 太小: %s", ref_traj.shape)
             return False
 
         T = z_seq.shape[0]
@@ -902,7 +920,7 @@ class Vehicle:
         # 4) current_state -> 4 维 QP 状态 [x, y, yaw, v]
         current_state = np.asarray(current_state, dtype=float).flatten()
         if current_state.size < 4:
-            print("[Vehicle.obca_qp_preplan] current_state too short:", current_state)
+            logger.warning("obca_qp_preplan: current_state 太短: %s", current_state)
             return False
 
         x0_x = current_state[0]
@@ -936,8 +954,8 @@ class Vehicle:
             elif u_prev_arr.shape == (N, self.n_controls):
                 u_prev_mat = u_prev_arr.T
             else:
-                print("[Vehicle.obca_qp_preplan] u_prev shape mismatch:",
-                      u_prev_arr.shape, "expect (2,N) or (N,2)")
+                logger.warning("obca_qp_preplan: u_prev shape 不匹配: %s, 期望 (2,N) 或 (N,2)",
+                               u_prev_arr.shape)
                 return False
 
         u_init_qp = u_prev_mat.T  # HybridQPWarmStarter 期望 (N,2)
@@ -952,11 +970,11 @@ class Vehicle:
                 u_init=u_init_qp              # (N,2)
             )
         except Exception as e:
-            print("[Vehicle] obca_qp_preplan: QP solve failed:", e)
+            logger.warning("obca_qp_preplan: QP 求解失败: %s", e)
             return False
 
         if X_sol is None or U_sol is None:
-            print("[Vehicle] obca_qp_preplan: QP returned None, skip warm-start.")
+            logger.info("obca_qp_preplan: QP 返回 None, 跳过 warm-start")
             return False
 
         # 7) 整理形状：U_sol 可能是 (N,2) 或 (2,N)，统一成 (2,N)
@@ -968,8 +986,8 @@ class Vehicle:
         elif U_sol.shape == (self.n_controls, N):
             U_qp = U_sol
         else:
-            print("[Vehicle.obca_qp_preplan] unexpected U_sol shape from QP:",
-                  U_sol.shape, "expected (N,2) or (2,N) with N =", N)
+            logger.warning("obca_qp_preplan: QP 返回 U_sol shape 异常: %s, 期望 (N,2)/(2,N) N=%d",
+                           U_sol.shape, N)
             return False
 
         # 如果 UDMC 的 n_states > 4，后面几维用 current_state 填充
@@ -988,8 +1006,7 @@ class Vehicle:
         else:
             X_full = X_sol[:, :self.n_states]
 
-        print("[Vehicle.obca_qp_preplan] U_qp shape to cache:", U_qp.shape,
-            "X_full:", X_full.shape)
+        logger.debug("obca_qp_preplan: U_qp shape=%s, X_full shape=%s", U_qp.shape, X_full.shape)
 
         # 8) 写入缓存：只设置 PRIMAL (U/X)，不再传 lam_poly
         self.set_primal_dual_warm_start(U_qp, X_full)
@@ -1023,20 +1040,21 @@ class Vehicle:
                     # 先按 (N,2) 还原，再转成 (2,N)
                     u_mat = u_arr.reshape(self.horizon, self.n_controls).T
                 else:
-                    print("[Vehicle] set_primal_dual_warm_start: u_ws 1D size mismatch, "
-                        f"got {u_arr.size}, expect {self.horizon * self.n_controls}")
+                    logger.warning("set_primal_dual_warm_start: u_ws 1D 长度不匹配, "
+                                   "实际 %d, 期望 %d", u_arr.size, self.horizon * self.n_controls)
             elif u_arr.ndim == 2:
                 if u_arr.shape == (self.n_controls, self.horizon):
                     u_mat = u_arr
                 elif u_arr.shape == (self.horizon, self.n_controls):
                     u_mat = u_arr.T
                 else:
-                    print("[Vehicle] set_primal_dual_warm_start: u_ws 2D shape mismatch, "
-                        f"got {u_arr.shape}, expect {(self.n_controls, self.horizon)} "
-                        f"or {(self.horizon, self.n_controls)}")
+                    logger.warning("set_primal_dual_warm_start: u_ws 2D shape 不匹配, "
+                                   "实际 %s, 期望 %s 或 %s",
+                                   u_arr.shape, (self.n_controls, self.horizon),
+                                   (self.horizon, self.n_controls))
             else:
-                print("[Vehicle] set_primal_dual_warm_start: u_ws ndim", u_arr.ndim,
-                    "only support 1D or 2D")
+                logger.warning("set_primal_dual_warm_start: u_ws ndim=%d, 仅支持 1D/2D",
+                               u_arr.ndim)
 
             if u_mat is not None:
                 # 内部一律缓存为展平后的 (2,N)
@@ -1052,15 +1070,14 @@ class Vehicle:
                 self._qp_ws_X    = x_arr.copy()
                 self._qp_ws_valid = True
             else:
-                print("[Vehicle] set_primal_dual_warm_start: x_ws shape mismatch, "
-                    f"expected ({self.horizon + 1}, {self.n_states}), got {x_arr.shape}")
+                logger.warning("set_primal_dual_warm_start: x_ws shape 不匹配, "
+                               "期望 (%d, %d), 实际 %s",
+                               self.horizon + 1, self.n_states, x_arr.shape)
 
         # -------- 对偶变量：外部传入一律忽略 --------
         if (lam_ws is not None) or (mu_ws is not None) or (s_ws is not None):
-            # 只打印一行 debug，提醒不要乱用
-            print("[Vehicle] set_primal_dual_warm_start: external dual warm-start "
-                "(lam/mu/s) is ignored; dual variables are only "
-                "warm-started from previous NMPC solution.")
+            logger.debug("set_primal_dual_warm_start: 外部对偶 warm-start (lam/mu/s) 被忽略；"
+                         "对偶变量仅从上一拍 NMPC 解中热启动")
 
 
 
@@ -1089,24 +1106,24 @@ class Vehicle:
             if lam_ws.size == exp_lam:
                 self._lam_cache = lam_ws.copy()
             else:
-                print("[Vehicle] set_dual_warm_start: lam_ws length mismatch, "
-                    f"expected {exp_lam}, got {lam_ws.size}")
+                logger.warning("set_dual_warm_start: lam_ws 长度不匹配, 期望 %d, 实际 %d",
+                               exp_lam, lam_ws.size)
 
         if mu_ws is not None:
             mu_ws = np.asarray(mu_ws, dtype=float).reshape(-1)
             if mu_ws.size == exp_mu:
                 self._mu_cache = mu_ws.copy()
             else:
-                print("[Vehicle] set_dual_warm_start: mu_ws length mismatch, "
-                    f"expected {exp_mu}, got {mu_ws.size}")
+                logger.warning("set_dual_warm_start: mu_ws 长度不匹配, 期望 %d, 实际 %d",
+                               exp_mu, mu_ws.size)
 
         if s_ws is not None:
             s_ws = np.asarray(s_ws, dtype=float).reshape(-1)
             if s_ws.size == exp_s:
                 self._s_cache = s_ws.copy()
             else:
-                print("[Vehicle] set_dual_warm_start: s_ws length mismatch, "
-                    f"expected {exp_s}, got {s_ws.size}")
+                logger.warning("set_dual_warm_start: s_ws 长度不匹配, 期望 %d, 实际 %d",
+                               exp_s, s_ws.size)
 
 
 
@@ -1353,7 +1370,7 @@ class Vehicle:
         - 对偶变量 λ/μ/s 只从上一拍 NMPC 解中回写缓存，不接受外部 QP
         """
         # ---------- 1. 基础量准备 ----------
-        print("[solve_MPC] qp_valid =", getattr(self, "_qp_ws_valid", False))
+        logger.debug("solve_MPC: qp_valid=%s", getattr(self, "_qp_ws_valid", False))
         xs = np.asarray(z_ref, dtype=float)          # 参考轨迹 (N+1, n_states)
         x_m = np.asarray(n_states, dtype=float)      # 初始状态轨迹 (N+1, n_states)
 
@@ -1375,9 +1392,9 @@ class Vehicle:
                 # (N,2) -> (2,N)
                 u_ws = u_ws.T
             else:
-                print("[Vehicle.solve_MPC] unexpected u0 shape:", u_ws.shape,
-                    "expect", (self.n_controls, self.horizon), "or",
-                    (self.horizon, self.n_controls))
+                logger.warning("solve_MPC: u0 shape 异常: %s, 期望 %s 或 %s",
+                               u_ws.shape, (self.n_controls, self.horizon),
+                               (self.horizon, self.n_controls))
                 # 退化为 0 初值，以免崩溃
                 u_ws = np.zeros((self.n_controls, self.horizon))
         else:
@@ -1393,16 +1410,16 @@ class Vehicle:
 
                 if u_qp.shape == u_ws.shape and x_qp.shape == x_m.shape:
                     # 上一拍 MPC 解占 alpha，QP 只做“轻微修正”
-                    alpha = 0.8   # 之后你可以在 [0.5, 0.9] 内自己调
+                    alpha = self.qp_blend_alpha
 
                     u_ws = alpha * u_ws + (1.0 - alpha) * u_qp
                     x_m  = alpha * x_m  + (1.0 - alpha) * x_qp
                 else:
-                    print("[Vehicle.solve_MPC] QP warm-start shape mismatch, "
-                        f"u_qp {u_qp.shape} vs {u_ws.shape}, "
-                        f"x_qp {x_qp.shape} vs {x_m.shape}")
+                    logger.warning("solve_MPC: QP warm-start shape 不匹配, "
+                                   "u_qp %s vs %s, x_qp %s vs %s",
+                                   u_qp.shape, u_ws.shape, x_qp.shape, x_m.shape)
             except Exception as e:
-                print("[Vehicle.solve_MPC] use QP warm-start failed:", e)
+                logger.warning("solve_MPC: QP warm-start 使用失败: %s", e)
             finally:
                 # one-shot：用完就清掉标志，避免一直复用过期解
                 self._qp_ws_valid = False
@@ -1467,9 +1484,10 @@ class Vehicle:
             s_vec   = estimated_opt[offset:offset + s_size].flatten()
 
             # 轻度阻尼，稳定热启动（注意：这里的 λ/μ 是 NMPC 自己的，对几何结构完全兼容）
-            self._lam_cache = 0.7 * lam_vec
-            self._mu_cache  = 0.7 * mu_vec
-            self._s_cache   = 0.0 * s_vec   # 希望 s 从小开始，可置 0
+            # 轻度阻尼，稳定热启动
+            self._lam_cache = self.dual_damping * lam_vec
+            self._mu_cache  = self.dual_damping * mu_vec
+            self._s_cache   = 0.0 * s_vec   # s 从 0 开始，鼓励严格满足约束
 
         # ---------- 8. 也缓存 U/X（跨步 warm-start） ----------
         self._u_cache = u0.flatten()

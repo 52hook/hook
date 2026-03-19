@@ -1,182 +1,181 @@
-# UDMC: Unified Decision-Making and Control Framework for Urban Autonomous Driving with Motion Prediction of Traffic Participants
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/henryhcliu/udmc_carla/blob/main/LICENSE)
-[![Version](https://img.shields.io/badge/Version-1.0-brightgreen)](https://github.com/henryhcliu/udmc_carla/releases/tag/v1.0)
-[![arXiv](https://img.shields.io/badge/arXiv-2501.02530-b31b1b.svg)](https://arxiv.org/abs/2501.02530)
+# GRIPC：面向城市自动驾驶的几何-规则集成规划与控制框架
 
-> This autonomous driving framework (named UDMC) is based on nonparametric Bayesian learning and optimization methods, so it is lightweight, interpretable, and adaptable to various driving scenarios.
+> **G**eometry-**R**ule **I**ntegrated **P**lanning and **C**ontrol for Urban Autonomous Driving with B-Spline Reference Lines and Hybrid Polygonal Collision Avoidance
 
-> Live demo: [https://www.youtube.com/watch?v=jftTsf1jXjU](https://www.youtube.com/watch?v=jftTsf1jXjU).
+本框架面向复杂城市道路场景，将行为决策、轨迹规划与车辆控制统一建模为有限时域最优控制问题（OCP），通过几何精确建模与交通规则显式编码，在安全性、效率、舒适性和实时性之间实现整体权衡。仿真环境基于 **CARLA 0.9.16**。
 
-> Preprint: [https://arxiv.org/abs/2501.02530](https://arxiv.org/abs/2501.02530).
+---
 
-> The paper has been published in **IEEE Transactions on Intelligent Transportation Systems (T-ITS)** and can be accessed [here](https://ieeexplore.ieee.org/document/10942456).
+## 核心技术贡献
 
-## Table of Contents
-* [General Info](#general-information)
-* [Technologies Used](#technologies-used)
-* [Features](#features)
-* [Driving Demo](#driving-demo-in-the-first-person-view)
-* [Setup](#setup)
-* [Usage](#usage)
-* [File Structure](#file-structure)
-* [Project Status](#project-status)
-* [Acknowledgements](#acknowledgements)
-* [Contact](#contact)
-* [License](#license)
+### 1. 约束 B-spline 全局参考线平滑
 
+在 A\* 车道级拓扑路径之上，以 B-spline 控制点为决策变量构造二次规划（QP）子问题，将拟合精度、曲率约束与车道边界同时纳入约束集合，生成具有 C² 连续性且曲率可控的全局参考线，为下游 MPC 提供高质量的几何基准。
 
-## General Information
-<!-- Insert the udmc_structure.png figure using 0.5\width width -->
+### 2. 显式参数化行为规则势场层
 
-<div style="text-align:center;">
-  <img src="img/udmc_structure.png" alt="The Structure of the UDMC" width="70%" />
-</div>
+提出一套结构统一的规则势场编码机制，将车道保持、限速、跟车安全、交通信号与行人礼让等交通规则统一转化为低维特征向量中的可微标量惩罚项，在统一优化问题中实现隐式的行为决策与规划，显著提升对不同城市驾驶场景的适应性。
 
-- This project contains the necessary code for our presented Unified Decision-Making and Control (UDMC) scheme for urban driving. 
-- The purpose of this project is to build a uniformed, versatile and light-weighted autonomous driving framework for both decision-making and motion control.
-- This driving framework settles the complex traffic rule compliance problem using the artificial potential field (APF), rather than if-else commands in most current rule-based methods.
-- We tested it on varieties of scenarios (car following, overtaking, roundabout, intersection, T-junction, etc.) and `CARLA Town05 Benchmark`.
-<!-- You don't have to answer all the questions - just the ones relevant to your project. -->
+### 3. 混合多边形避障约束
 
+利用凸优化强对偶理论，将多边形不相交几何条件重构为一组连续可微的代数约束，通过引入对偶变量与非负松弛因子构建软硬协同机制。在消除传统圆盘近似保守性的同时，为非线性优化提供高质量梯度信息，显著提升复杂环境下的几何安全性。
 
-## Technologies Used
-- Ubuntu 20.04
-- Python 3.8 with `requirements.txt`
-- CasADi 3.6.3
-- CARLA 0.9.14
+### 4. 混合 QP 热启动求解策略
 
+针对含多边形碰撞约束与复杂势场代价的非凸 OCP，构造基于线性化动力学简化与顶点-半空间碰撞近似的凸 QP 预规划模块，快速生成局部安全轨迹作为主 NLP 初始解，大幅降低平均求解时间并提升迭代稳定性。
 
-## Features
-- Lightweight Design
-- Interpretability
-- Broad Applicability for Urban Road Networks
-- Compliance with Traffic Regulations
+---
 
+## 支持场景
 
-## Driving Demo
+| 场景 | 关键字 |
+|---|---|
+| 多车道自适应巡航 | `multilaneACC` |
+| 环岛 | `roundabout` |
+| 有信号路口 | `crossroad` |
+| 无信号路口 | `unsig_crossroad` |
+| 混合交通（含行人） | `mixed_traffic` |
 
-### Driving Demo in the First-Person View
-<!-- insert the roundabout_animation.gif file here -->
-![Roundabout Driving](img/roundabout_animation.gif)
+---
 
-### Driving Demo in the Bird's-Eye View
-<!-- insert the .png file with a link of the YouTube video -->
-[![Bird's-Eye View](img/youtube_promotion.png)](https://www.youtube.com/watch?v=jftTsf1jXjU)
+## 快速开始
 
+### 环境要求
 
-## Setup
-Install anaconda
-```Shell
-wget https://repo.anaconda.com/archive/Anaconda3-2020.11-Linux-x86_64.sh
-bash Anaconda3-2020.11-Linux-x86_64.sh
-source ~/.profile
+| 项目 | 版本 |
+|---|---|
+| Ubuntu | 22.04.5 LTS |
+| Python | 3.10（Conda 环境 `first1`） |
+| CARLA | 0.9.16 |
+| CasADi | 3.6.3 |
+
+其余 Python 依赖见 `requirements.txt`。
+
+### 启动步骤
+
+**1. 激活环境**
+
+```shell
+conda activate first1
 ```
 
-Clone the repo and build the environment
-```Shell
-git clone https://github.com/henryhcliu/udmc_carla.git
-cd udmc_carla
-conda create -n udmc_carla python=3.8
-conda activate udmc_carla
-pip3 install -r requirements.txt
+**2. 启动 CARLA 服务端**
+
+```shell
+cd ~/CARLA_0.9.16
+./CarlaUE4.sh -carla-rpc-port=2001
 ```
 
-Download and setup CARLA 0.9.14
-```Shell
-sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 1AF1527DE64CB8D9
-sudo add-apt-repository "deb [arch=amd64] http://dist.carla.org/carla $(lsb_release -sc) main"
-sudo apt-get update # Update the Debian package index
-sudo apt-get install carla-simulator=0.9.14 # Install the 0.9.14 CARLA version
-cd /opt/carla-simulator # Open the folder where CARLA is installed
-./CarlaUE4.sh
+**3. 运行仿真**
+
+```shell
+cd ~/phd/0.9.16udmc_carla-main\ myfinal
+CARLA_PORT=2001 python udmc_main.py roundabout True
 ```
 
-## Usage
-Before running the following codes, CARLA Simulator should be active.
-```Shell
-cd /opt/carla-simulator # Open the folder where CARLA is installed
-./CarlaUE4.sh
+最后一个参数为 `True` 时随机生成周车；传 `False` 则从 `spawnPoints/` 读取固定初始条件，用于对比实验复现。
+
+---
+
+## 常用命令
+
+### 场景仿真
+
+```shell
+CARLA_PORT=2001 python udmc_main.py multilaneACC True
+CARLA_PORT=2001 python udmc_main.py roundabout True
+CARLA_PORT=2001 python udmc_main.py crossroad True
+CARLA_PORT=2001 python udmc_main.py unsig_crossroad True
+CARLA_PORT=2001 python udmc_main.py mixed_traffic True
 ```
-In another terminal:
-```Shell
-cd udmc_carla # Open the folder where this repository exists
+
+### FSM 基线对比
+
+```shell
+CARLA_PORT=2001 python "fsm_main(baseline).py" crossroad True
 ```
-### Run the UDMC with different driving scenario settings and surrounding vehicle spawn options
-```Shell 
-# Multilane ACC driving with randomly generated surrounding vehicles
-python udmc_main.py multilaneACC True
 
-# Roundabout driving with randomly generated surrounding vehicles
-python udmc_main.py roundabout True
+### 车辆动力学参数辨识
 
-# Crossroad driving with randomly generated surrounding vehicles
-python udmc_main.py crossroad True
+```shell
+# 若需重新采集辨识数据
+python carla_nl_system_identification.py
 
-# Unsignalized crossroad driving with randomly generated surrounding vehicles
-python udmc_main.py unsig_crossroad True
-
-# T-junction driving with pedestrians and randomly generated surrounding vehicles
-python udmc_main.py mixed_traffic True
-```
-With runing the above command lines, the randomly generated initial spawn points of the traffic participants will be recorded in the folder `spawnPoints`. If you want to spawn surrounding vehicles with certain spawn points (to test the performance of different methods under the same condition), please change the last argument to `False`.
-
-### Run the Parameter Identification of the vehicle dynamics model
-```Shell
+# 运行参数辨识
 python param_est_using_slsqp.py
 ```
-** Note:** The ploted figures contains four subplots:
-1. The accumulated error of the x and y coordinates.
-2. The ground truth and accumulated estimated route.
-3. The sliding window-based error of the x and y coordinates.
-4. The ground truth and estimated route using sliding window-based estimation.
-The subfigures 3 and 4 are more suitable for the evaluation of the sliding window-based motion planning and control method.
 
-Please also note that the collected data `data_w_real_steer_70_train.npy` and `data_w_real_steer_70_test.npy` can be regenerated by running the following command:
-```Shell
-python carla_nl_system_identification.py
-```
-This program prints the estimated parameters to the terminal.
-### Run the Interpolation-based Gaussian Process Regression training process and store the GPR model to file
-```Shell
+### 周车轨迹预测模型训练（IGPR）
+
+```shell
 python IGPR_predict_sv_wps.py
 ```
-### Run the UDMC with `CARLA Town05` Benchmark
-**Change to the branch of `town05short`**, and then run the following command:
-```Shell
-cd leaderboard/scripts
-# Run the CARLA Town05 Benchmark automatically
-./local_evaluation.sh 
+
+---
+
+## 仓库结构
+
 ```
-Wait until the program is finished, and the evaluation result on the Town05 Short Benchmark can be inspected in the `results` folder.
-
-## File structure
-If you want to modify this driving system to adapt to specific applications, please refer to the structure of this repository (`main` branch).
-```bash
--data # contains the Potential Functions' value and the control input during autonomous driving
--images # contains the pictures captured by a camera mounted on the Ego Vehicle with T_s time step
--official # some official examples provided by CARLA (with our modification)
--scripts # core implementation of the UDMC
-    - env.py # interact with CARLA, it includes spawn vehicles, initial visualization, and CARLA environment, etc.
-    - others_agent.py # Be in charge of the behavior of other vehicles, like following the lane and changing lane
-    - vehicle_obs.py # the UDMC core with traffic rules (lane keeping, not running to solid lane markings, not running a red light, etc)
-    - x_v2x_agent.py # implement the main function, such as acc, overtaking, and parking
--spawnpoints # contains the spawn points for the surrounding vehicles when not using `random_spawn` mode
--utils # some third-party or commonly-used function
--fms_main.py # run this code to execute the same simulation in same surrounding conditions with udmc_main.py, but the Ego Vehicle uses Finite State Machine to control its motion
--IGPR_predict_sv_wps.py # use this code to train an IGPR model for surrounding vehicles' motion from 15 pieces of history state record to 10 pieces of future state prediction.
--udmc_main.py # main entrance of this paper, run it from the command line with an augment (crossroad, multilaneACC, roundabout,...), before that you need to launch CarlaUE4 following the instruction above.
+├── udmc_main.py                       # 主入口，选择场景并启动仿真
+├── fsm_main(baseline).py             # 有限状态机基线，用于对比实验
+├── IGPR_predict_sv_wps.py            # IGPR 周车轨迹预测模型训练
+├── param_est_using_slsqp.py          # 车辆动力学参数辨识（SLSQP）
+├── carla_nl_system_identification.py # 动力学辨识数据采集
+├── mixed_traffic_scenario_generation.py  # 混合交通场景生成
+│
+├── scripts/
+│   ├── env.py                         # CARLA 连接、车辆生成、仿真环境封装
+│   ├── vehicle_obs.py                 # 核心逻辑：规则势场、多边形约束、状态优化
+│   ├── x_v2x_agent.py                # 主控代理：ACC、超车、停车等行为决策
+│   ├── vehicle_v2x_obs.py            # V2X 约束观测扩展
+│   ├── others_agent.py                # 周车行为控制（跟车、变道）
+│   ├── x_agent.py                     # 基础代理
+│   └── lti_v2x.py                     # LTI 系统模型
+│
+├── utils/                             # 工具函数（插值、几何、多项式、平滑、绘图）
+├── official/                          # 基于 CARLA 官方示例的改动代码
+├── data/                              # 仿真输出（势场值、控制量、图表）
+├── spawnPoints/                       # 固定初始点（非随机复现模式）
+├── gpr.pkl                            # 训练好的 GPR 预测模型
+├── lstm.pkl                           # 训练好的 LSTM 预测模型
+└── requirements.txt                   # Python 依赖
 ```
 
-## Project Status
-Project is: _complete_ 
+---
 
+## 关键配置项
 
-## Acknowledgements
-- Thanks to the [CasADi](https://web.casadi.org/docs/#nonlinear-programming).
-- Thanks to the [CARLA](https://carla.readthedocs.io/en/0.9.14/).
+`udmc_main.py` 中的主要全局参数：
 
-## Contact
-Created by [@henryhcliu](https://henryhcliu.github.io) - feel free to contact me!
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `USE_DUAL` | `True` | 启用多边形对偶碰撞约束（GRIPC 核心特性） |
+| `simu_step` | `0.05` | 仿真步长（秒） |
+| `target_v` | `35` | 目标速度（km/h，因场景而异） |
+| `veh_num` | `100` | 随机生成的周车数量 |
 
-## License
-This project is open source and available under the [MIT License](https://opensource.org/license/mit/).
+---
+
+## 输出数据
+
+| 路径 | 内容 |
+|---|---|
+| `data/` | 势场值、控制输入量、仿真过程图表 |
+| `spawnPoints/` | 用于复现实验的周车初始点 |
+| `computing_time.txt` | 求解耗时统计 |
+| `{场景}.txt` | 各场景仿真运行日志 |
+
+---
+
+## 致谢
+
+- [CasADi](https://web.casadi.org/) — 非线性优化求解器
+- [CARLA](https://carla.readthedocs.io/en/0.9.16/) — 开源自动驾驶仿真平台
+
+`official/` 目录包含基于 CARLA 官方示例修改的代码，相关第三方文件中已有的版权和许可证声明仍然有效。
+
+---
+
+## 联系方式
+
+维护者：[@52hook](https://github.com/52hook)
