@@ -113,7 +113,7 @@ class HybridQPWarmStarter(object):
         nu = self.nu
 
         # ---------- sanity checks ----------
-        ref_traj = np.asarray(ref_traj, dtype=float)
+        ref_traj = np.asarray(ref_traj, dtype=float).copy()
         assert ref_traj.shape[0] >= N + 1, \
             f"ref_traj length {ref_traj.shape[0]} < N+1={N+1}"
         assert ref_traj.shape[1] >= nx, \
@@ -121,6 +121,14 @@ class HybridQPWarmStarter(object):
 
         x0 = np.asarray(x0, dtype=float).reshape(-1)
         assert x0.shape[0] == nx
+
+        # ====== yaw 归一化：参考轨迹的 yaw 列 unwrap 并对齐自车 yaw ======
+        # 先 unwrap 保证时间序列连续，再整体平移到与 x0[2] 同周期
+        ref_yaw = np.unwrap(ref_traj[:, 2])
+        yaw_offset = x0[2] - ref_yaw[0]
+        # 把偏差归到 [-π, π] 再加回去
+        yaw_offset = np.arctan2(np.sin(yaw_offset), np.cos(yaw_offset))
+        ref_traj[:, 2] = ref_yaw + yaw_offset
 
         if obs_Am_list is None:
             obs_Am_list = []
@@ -280,6 +288,13 @@ class HybridQPWarmStarter(object):
 
         X_sol = X_mat.T        # shape (N+1, 4)
         U_sol = U_mat.T        # shape (N, 2)
+
+        # ====== QP 输出 yaw 归一化：unwrap 后对齐自车 yaw ======
+        X_sol[:, 2] = np.unwrap(X_sol[:, 2])
+        sol_yaw_offset = x0[2] - X_sol[0, 2]
+        sol_yaw_offset = np.arctan2(np.sin(sol_yaw_offset),
+                                    np.cos(sol_yaw_offset))
+        X_sol[:, 2] += sol_yaw_offset
 
         # ---------- extract polygon duals ----------
         if len(poly_idx) == 0:

@@ -915,6 +915,12 @@ class Vehicle:
             vy_col = np.zeros_like(vx_col)
         v_col = np.sqrt(vx_col**2 + vy_col**2)
 
+        # yaw 归一化：unwrap 后对齐自车 yaw，消除 2kπ 偏差
+        yaw_col = np.unwrap(yaw_col)
+        _yaw_off = x0_yaw - yaw_col[0]
+        _yaw_off = np.arctan2(np.sin(_yaw_off), np.cos(_yaw_off))
+        yaw_col = yaw_col + _yaw_off
+
         ref_traj_qp = np.stack([x_col, y_col, yaw_col, v_col], axis=1)  # (N+1, 4)
 
         # 4) current_state -> 4 维 QP 状态 [x, y, yaw, v]
@@ -1003,6 +1009,12 @@ class Vehicle:
             # omega 用当前的 omega 保持不变
             omega0 = current_state[5] if current_state.size > 5 else 0.0
             X_full[:, 5] = omega0
+
+            # yaw 归一化：确保 X_full 的 yaw 与 current_state[2] 在同一周期
+            X_full[:, 2] = np.unwrap(X_full[:, 2])
+            _x_yaw_off = current_state[2] - X_full[0, 2]
+            _x_yaw_off = np.arctan2(np.sin(_x_yaw_off), np.cos(_x_yaw_off))
+            X_full[:, 2] += _x_yaw_off
         else:
             X_full = X_sol[:, :self.n_states]
 

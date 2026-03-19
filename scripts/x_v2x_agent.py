@@ -532,11 +532,16 @@ class Xagent(BasicAgent):
                             if X_qp.shape[0] >= 2 and X_qp.shape[1] >= 3:
                                 yaw_qp0 = X_qp[0, 2]
                                 yaw_qp1 = X_qp[1, 2]
-                                d_yaw_qp = yaw_qp1 - yaw_qp0
+                                # 用 atan2 归一化到 [-π, π]，消除 2kπ 跳变
+                                d_yaw_qp = math.atan2(
+                                    math.sin(yaw_qp1 - yaw_qp0),
+                                    math.cos(yaw_qp1 - yaw_qp0))
 
                                 yaw_ref0 = ref_traj[2, 0]
                                 yaw_ref1 = ref_traj[2, 1]
-                                d_yaw_ref = yaw_ref1 - yaw_ref0
+                                d_yaw_ref = math.atan2(
+                                    math.sin(yaw_ref1 - yaw_ref0),
+                                    math.cos(yaw_ref1 - yaw_ref0))
 
                                 bad = False
 
