@@ -525,44 +525,7 @@ class Xagent(BasicAgent):
                         print(f"[Xagent] obca_qp_preplan failed: {e}")
                         ok = False
 
-                    # ==== QP 结果与全局路径“转向方向”一致性检查 ====
-                    try:
-                        if ok and getattr(self._model, "_qp_ws_X", None) is not None:
-                            X_qp = np.asarray(self._model._qp_ws_X, dtype=float)  # (N+1, 6)
-                            if X_qp.shape[0] >= 2 and X_qp.shape[1] >= 3:
-                                yaw_qp0 = X_qp[0, 2]
-                                yaw_qp1 = X_qp[1, 2]
-                                # 用 atan2 归一化到 [-π, π]，消除 2kπ 跳变
-                                d_yaw_qp = math.atan2(
-                                    math.sin(yaw_qp1 - yaw_qp0),
-                                    math.cos(yaw_qp1 - yaw_qp0))
-
-                                yaw_ref0 = ref_traj[2, 0]
-                                yaw_ref1 = ref_traj[2, 1]
-                                d_yaw_ref = math.atan2(
-                                    math.sin(yaw_ref1 - yaw_ref0),
-                                    math.cos(yaw_ref1 - yaw_ref0))
-
-                                bad = False
-
-                                # A：参考几乎直行，但 QP 第一拍转向过大（> 10°）
-                                # 注：steer_bound=0.55, v=10, L=2.9, dt=0.05 → 物理最大 ≈ 6°/步
-                                if (abs(d_yaw_ref) < np.deg2rad(5.0)
-                                        and abs(d_yaw_qp) > np.deg2rad(10.0)):
-                                    bad = True
-
-                                # B：参考往左/右，QP 却反向大转（> 60°）
-                                if (d_yaw_qp * d_yaw_ref < 0.0
-                                        and abs(d_yaw_qp) > np.deg2rad(60.0)
-                                        and abs(d_yaw_ref) > np.deg2rad(5.0)):
-                                    bad = True
-
-                                if bad:
-                                    print("[Xagent] QP warm-start heading conflicts with global path, drop it.",
-                                          f"d_yaw_qp={d_yaw_qp:.3f}, d_yaw_ref={d_yaw_ref:.3f}")
-                                    self._model._qp_ws_valid = False
-                    except Exception as e:
-                        print("[Xagent] QP heading check failed:", e)
+                    # 固定参考航向 QP：yaw 恒等于 yaw_ref，不需要 heading check
 
                 else:
                     if hasattr(self._model, "_qp_ws_valid"):
