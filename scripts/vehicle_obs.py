@@ -871,7 +871,8 @@ class Vehicle:
                     solver_name='ipopt',
                     acc_bounds=(self.acc_lbound, self.acc_ubound),
                     steer_bound=self.steer_bound,
-                    v_max=self.target_v
+                    v_max=self.target_v,
+                    car_box=(4.5, 2.0)
                 )
             except Exception as e:
                 logger.warning("obca_qp_preplan: 创建 HybridQPWarmStarter 失败: %s", e)
@@ -1450,6 +1451,26 @@ class Vehicle:
                 s_2d[:-1] = s_2d[1:]
                 self._s_cache = s_2d.flatten()
 
+
+        # ---------- 2.5 凸 QP 热启动 blend（在 shift 后叠加障碍感知修正） ----------
+        if getattr(self, "_qp_ws_valid", False) \
+        and (self._qp_ws_U is not None) \
+        and (self._qp_ws_X is not None):
+            try:
+                u_qp = np.asarray(self._qp_ws_U, dtype=float)
+                x_qp = np.asarray(self._qp_ws_X, dtype=float)
+                if u_qp.shape == u_ws.shape and x_qp.shape == x_m.shape:
+                    alpha = self.qp_blend_alpha
+                    u_ws = alpha * u_ws + (1.0 - alpha) * u_qp
+                    x_m  = alpha * x_m  + (1.0 - alpha) * x_qp
+                else:
+                    logger.warning("solve_MPC: QP warm-start shape 不匹配, "
+                                   "u_qp %s vs %s, x_qp %s vs %s",
+                                   u_qp.shape, u_ws.shape, x_qp.shape, x_m.shape)
+            except Exception as e:
+                logger.warning("solve_MPC: QP warm-start 使用失败: %s", e)
+            finally:
+                self._qp_ws_valid = False
 
         # ---------- 3. 把 (U,X) 展开成 NLP 初值 ----------
         c_p = np.vstack((z0.T, xs)).T

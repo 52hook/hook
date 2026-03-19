@@ -505,9 +505,7 @@ class Xagent(BasicAgent):
                     beta_s=250.0   # slack 惩罚
                 )
 
-                # ====== 2.5 调用 QP 预规划 ======
-                # RTI shift 已替代 QP warm-start，跳过 QP 预规划
-                use_qp_this_step = False
+                # ====== 2.5 调用凸 QP 预规划 ======
                 if use_qp_this_step and hasattr(self._model, "obca_qp_preplan"):
                     ok = False
                     try:

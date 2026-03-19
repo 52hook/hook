@@ -2,22 +2,36 @@
 # -*- coding: utf-8 -*-
 
 """
-Hybrid QP warm-start module for UDMC:
-- OBCA-inspired convex pre-planner
-- Generates primal (X,U) warm start + polygon-constraint dual multipliers
+hybrid_qp_warmstart.py
 
-Assumptions:
-- State:  [x, y, yaw, v]  (4-dim)
-- Input:  [a, delta]      (2-dim)
-- Dynamics: kinematic bicycle (discrete-time)
-- Polygon constraints: A_m [x;y] <= b_m - d_safe, using actors_to_Ab output
+论文 Section E：含多边形碰撞约束的混合 QP 热启动
+
+核心思路——对车辆动力学与几何避障约束进行双重凸化简化：
+  1. 动力学：沿参考路径一阶线性化 → 仿射等式约束
+  2. 避障：顶点-半空间模型（固定参考航向角，自车 4 顶点） → 线性不等式
+  3. 二次代价 + 线性约束 = 标准凸 QP → 全局最优、快速收敛
 """
 
+import math
+import logging
 import numpy as np
-import casadi as ca
+
+try:
+    import casadi as ca
+except ImportError:
+    ca = None
+
+logger = logging.getLogger(__name__)
 
 
-class HybridQPWarmStarter(object):
+class HybridQPWarmStarter:
+    """
+    凸 QP 预规划器
+
+    状态 (4 维运动学): [x, y, yaw, v]
+    控制 (2 维):       [acc, delta]
+    """
+
     def __init__(self,
                  horizon,
                  dt,
@@ -29,28 +43,31 @@ class HybridQPWarmStarter(object):
                  solver_name='ipopt',
                  acc_bounds=(-6.0, 3.0),
                  steer_bound=0.55,
-                 v_max=20.0):
+                 v_max=20.0,
+                 car_box=(4.5, 2.0)):
         """
         Parameters
         ----------
         horizon : int
-            Prediction horizon N (should match MPC horizon)
+            预测时域 N
         dt : float
-            Sampling time
+            采样时间
         wheelbase : float
-            Wheelbase used in kinematic bicycle model
+            轴距（运动学自行车模型）
         Q, R, Rd : np.ndarray or None
-            Cost weights. If None, use simple defaults.
+            代价权重
         d_safe : float
-            Safety margin for polygon constraints: A x <= b - d_safe
+            安全裕度
         solver_name : str
-            NLP solver name for casadi.nlpsol (e.g. 'ipopt')
+            CasADi NLP solver 名称
         acc_bounds : tuple
             (下界, 上界) 纵向加速度范围 (m/s^2)
         steer_bound : float
             转向角绝对值上界 (rad)
         v_max : float
             速度上界 (m/s)
+        car_box : tuple
+            (车长 L, 车宽 W) 用于顶点-半空间模型
         """
         self.N = int(horizon)
         self.dt = float(dt)
@@ -65,7 +82,11 @@ class HybridQPWarmStarter(object):
         self.steer_bound = float(steer_bound)
         self.v_max = float(v_max)
 
-        # cost weights
+        # 自车尺寸
+        self.car_L = float(car_box[0])
+        self.car_W = float(car_box[1])
+
+        # 代价权重
         if Q is None:
             self.Q = np.diag([10.0, 10.0, 1.0, 1.0])
         else:
@@ -76,7 +97,6 @@ class HybridQPWarmStarter(object):
         else:
             self.R = np.array(R, dtype=float)
 
-        # rate penalty can be None
         if Rd is None:
             self.Rd = None
         else:
@@ -84,64 +104,154 @@ class HybridQPWarmStarter(object):
 
         self.solver_name = solver_name
 
-    # ------------------------------------------------------------------
-    # main entry
-    # ------------------------------------------------------------------
-    def solve(self,
-              x0,
-              ref_traj,
-              obs_Am_list=None,
-              obs_bm_list=None,
+    # ========== 自车 4 顶点的本地偏移量 ==========
+
+    def _ego_vertex_offsets(self):
+        """
+        返回自车 4 个顶点相对质心的局部坐标 (4, 2)
+        CCW 顺序：右前、左前、左后、右后
+        """
+        hL = self.car_L / 2.0
+        hW = self.car_W / 2.0
+        return np.array([
+            [+hL, -hW],   # 右前
+            [+hL, +hW],   # 左前
+            [-hL, +hW],   # 左后
+            [-hL, -hW],   # 右后
+        ], dtype=float)
+
+    # ========== 一阶线性化 ==========
+
+    def _linearize_at(self, x_ref, u_ref):
+        """
+        在 (x_ref, u_ref) 处对运动学自行车模型做一阶线性化
+
+        dx/dt = v * cos(yaw)
+        dy/dt = v * sin(yaw)
+        dyaw/dt = v / L * tan(delta)
+        dv/dt = acc
+
+        返回离散化的 (A_d, B_d, c_d):
+            x_{k+1} ≈ A_d @ x_k + B_d @ u_k + c_d
+        """
+        _, _, yaw_r, v_r = x_ref[:4]
+        acc_r, delta_r = u_ref[:2]
+
+        cos_y = math.cos(yaw_r)
+        sin_y = math.sin(yaw_r)
+        tan_d = math.tan(delta_r)
+        cos_d2 = math.cos(delta_r) ** 2
+        L = self.L
+        dt = self.dt
+
+        # 连续时间雅可比 A_c = df/dx
+        A_c = np.array([
+            [0, 0, -v_r * sin_y, cos_y],
+            [0, 0,  v_r * cos_y, sin_y],
+            [0, 0,  0,           tan_d / L],
+            [0, 0,  0,           0],
+        ], dtype=float)
+
+        # 连续时间雅可比 B_c = df/du
+        B_c = np.array([
+            [0,                     0],
+            [0,                     0],
+            [0, v_r / (L * cos_d2)],
+            [1,                     0],
+        ], dtype=float)
+
+        # 连续时间非线性值 f(x_ref, u_ref)
+        f_ref = np.array([
+            v_r * cos_y,
+            v_r * sin_y,
+            v_r / L * tan_d,
+            acc_r,
+        ], dtype=float)
+
+        # 前向欧拉离散化
+        A_d = np.eye(4) + dt * A_c
+        B_d = dt * B_c
+
+        # 仿射偏移项: c_d = x_ref + dt * f_ref - A_d @ x_ref - B_d @ u_ref
+        c_d = x_ref[:4] + dt * f_ref - A_d @ x_ref[:4] - B_d @ u_ref[:2]
+
+        return A_d, B_d, c_d
+
+    # ========== 顶点-半空间避障约束 ==========
+
+    def _vertex_halfspace_constraints(self, yaw_ref_k, obs_Am_list, obs_bm_list):
+        """
+        在固定航向角 yaw_ref_k 下，构建自车 4 顶点的线性避障约束
+
+        对每个障碍 m 的每个半空间 a_i^T p <= b_i:
+            a_i^T [x, y] <= b_i - d_safe - a_i^T (R @ offset_j)   对 j=1..4
+
+        返回 (A_vtx, b_vtx)：仅关于 [x, y] 的线性不等式
+            A_vtx @ [x, y] <= b_vtx
+        """
+        cos_y = math.cos(yaw_ref_k)
+        sin_y = math.sin(yaw_ref_k)
+        R = np.array([[cos_y, -sin_y],
+                       [sin_y,  cos_y]], dtype=float)
+
+        offsets = self._ego_vertex_offsets()  # (4, 2)
+        # 旋转后的顶点偏移量
+        rot_offsets = (R @ offsets.T).T  # (4, 2)
+
+        A_rows = []
+        b_rows = []
+
+        for Am, bm in zip(obs_Am_list, obs_bm_list):
+            Am = np.asarray(Am, dtype=float)
+            bm = np.asarray(bm, dtype=float).reshape(-1)
+            # Am: (E, 2), bm: (E,)
+            for i in range(Am.shape[0]):
+                a_vec = Am[i, :2]  # (2,)
+                b_val = bm[i]
+                # 对每个顶点，生成一个约束
+                for j in range(4):
+                    # a_vec^T [x,y] <= b_val - d_safe - a_vec^T rot_offsets[j]
+                    A_rows.append(a_vec)
+                    b_rows.append(b_val - self.d_safe - a_vec @ rot_offsets[j])
+
+        if len(A_rows) == 0:
+            return None, None
+
+        return np.array(A_rows), np.array(b_rows)
+
+    # ========== 主求解接口 ==========
+
+    def solve(self, x0, ref_traj, obs_Am_list=None, obs_bm_list=None,
               u_init=None):
         """
-        Solve warm-start problem.
+        凸 QP 预规划求解器
 
         Parameters
         ----------
-        x0 : array-like, shape (4,)
-            Current state [x, y, yaw, v]
-        ref_traj : array-like, shape (N+1, >=4)
-            Reference trajectory. First 4 columns: [x, y, yaw, v].
-        obs_Am_list : list of np.ndarray, optional
-            Each element Am[m] has shape (E_m, 2)
-        obs_bm_list : list of np.ndarray, optional
-            Each element bm[m] has shape (E_m,)
-        u_init : array-like, shape (N,2), optional
-            Previous MPC input sequence for rate penalty / warm initial guess.
+        x0 : (4,) 当前状态 [x, y, yaw, v]
+        ref_traj : (N+1, 4) 参考轨迹 [x, y, yaw, v]
+        obs_Am_list : list of (E_m, 2) 障碍多边形半空间 A
+        obs_bm_list : list of (E_m,) 障碍多边形半空间 b
+        u_init : (N, 2) 控制初值（可选，用于 rate cost）
 
         Returns
         -------
-        X_sol : np.ndarray, shape (N+1, 4)
-            Warm-start state trajectory (x,y,yaw,v)
-        U_sol : np.ndarray, shape (N, 2)
-            Warm-start input trajectory (a, delta)
-        lam_poly : np.ndarray or None
-            Flattened polygon dual multipliers, ordered as:
-            for k in 0..N:
-              for m in obstacles:
-                for each edge i of obstacle m
-                  -> lam[k, m, i]
-            If no polygon constraints, returns None.
+        X_sol : (N+1, 4) 状态解
+        U_sol : (N, 2) 控制解
+        lam_poly : None（凸 QP 不需要返回对偶变量给 NMPC）
         """
         N = self.N
         nx = self.nx
         nu = self.nu
 
-        # ---------- sanity checks ----------
+        # ---------- 预处理 ----------
         ref_traj = np.asarray(ref_traj, dtype=float).copy()
-        assert ref_traj.shape[0] >= N + 1, \
-            f"ref_traj length {ref_traj.shape[0]} < N+1={N+1}"
-        assert ref_traj.shape[1] >= nx, \
-            "ref_traj must have at least 4 columns [x,y,yaw,v]"
+        assert ref_traj.shape[0] >= N + 1 and ref_traj.shape[1] >= nx
+        x0 = np.asarray(x0, dtype=float).reshape(-1)[:nx]
 
-        x0 = np.asarray(x0, dtype=float).reshape(-1)
-        assert x0.shape[0] == nx
-
-        # ====== yaw 归一化：参考轨迹的 yaw 列 unwrap 并对齐自车 yaw ======
-        # 先 unwrap 保证时间序列连续，再整体平移到与 x0[2] 同周期
+        # yaw 归一化：参考轨迹的 yaw 列 unwrap 并对齐自车 yaw
         ref_yaw = np.unwrap(ref_traj[:, 2])
         yaw_offset = x0[2] - ref_yaw[0]
-        # 把偏差归到 [-π, π] 再加回去
         yaw_offset = np.arctan2(np.sin(yaw_offset), np.cos(yaw_offset))
         ref_traj[:, 2] = ref_yaw + yaw_offset
 
@@ -149,188 +259,193 @@ class HybridQPWarmStarter(object):
             obs_Am_list = []
         if obs_bm_list is None:
             obs_bm_list = []
-        assert len(obs_Am_list) == len(obs_bm_list), \
-            "obs_Am_list / obs_bm_list length mismatch"
 
         if u_init is not None:
             u_init = np.asarray(u_init, dtype=float)
-            assert u_init.shape[0] >= N and u_init.shape[1] >= nu
 
-        # ---------- casadi symbols ----------
-        X = ca.SX.sym('X', nx, N + 1)   # [x,y,yaw,v] over horizon
-        U = ca.SX.sym('U', nu, N)       # [a,delta] over horizon
+        # 构造参考控制序列（简单零序列）
+        u_ref_seq = np.zeros((N, nu))
+        if u_init is not None and u_init.shape[0] >= N:
+            u_ref_seq = u_init[:N, :nu].copy()
 
-        w = ca.vertcat(
-            ca.reshape(X, nx * (N + 1), 1),
-            ca.reshape(U, nu * N, 1)
-        )
-
-        Q = ca.DM(self.Q)
-        R = ca.DM(self.R)
-        Rd = ca.DM(self.Rd) if self.Rd is not None else None
-
-        # ---------- objective ----------
-        J = 0
-
+        # ---------- 一阶线性化：逐步计算 A_d(k), B_d(k), c_d(k) ----------
+        A_list = []
+        B_list = []
+        c_list = []
         for k in range(N):
-            xk = X[:, k]
-            uk = U[:, k]
-            xr = ca.DM(ref_traj[k, :nx])
+            x_ref_k = ref_traj[k, :nx]
+            u_ref_k = u_ref_seq[k, :nu]
+            A_d, B_d, c_d = self._linearize_at(x_ref_k, u_ref_k)
+            A_list.append(A_d)
+            B_list.append(B_d)
+            c_list.append(c_d)
 
-            e = xk - xr
-            J += ca.mtimes([e.T, Q, e])
+        # ---------- 构建 QP ----------
+        # 决策变量: w = [x_0, x_1, ..., x_N, u_0, ..., u_{N-1}]
+        # 总维度: (N+1)*nx + N*nu
+        n_x_total = (N + 1) * nx
+        n_u_total = N * nu
+        n_w = n_x_total + n_u_total
 
-            # input magnitude cost
-            J += ca.mtimes([uk.T, R, uk])
-
-            # rate cost (if available)
-            if Rd is not None and u_init is not None:
-                du = uk - ca.DM(u_init[k, :nu])
-                J += ca.mtimes([du.T, Rd, du])
-
-        # terminal state tracking
-        xN = X[:, N]
-        xrN = ca.DM(ref_traj[N, :nx])
-        eN = xN - xrN
-        J += ca.mtimes([eN.T, Q, eN])
-
-        # ---------- constraints ----------
-        g = []
-        lbg = []
-        ubg = []
-        poly_idx = []   # indices of polygon constraints in g
-
-        # initial condition: X_0 = x0
-        g.append(X[:, 0] - ca.DM(x0))
-        lbg += [0.0] * nx
-        ubg += [0.0] * nx
-
-        # dynamics: X_{k+1} = f(X_k, U_k)
+        # -- Hessian H (稀疏对角) --
+        H = np.zeros((n_w, n_w))
+        for k in range(N + 1):
+            idx = k * nx
+            H[idx:idx+nx, idx:idx+nx] = 2.0 * self.Q
         for k in range(N):
-            xk = X[:, k]
-            uk = U[:, k]
-            x_next = X[:, k + 1]
+            idx = n_x_total + k * nu
+            H[idx:idx+nu, idx:idx+nu] = 2.0 * self.R
 
-            a = uk[0]
-            delta = uk[1]
-            v = xk[3]
-            yaw = xk[2]
+        # -- 线性代价 g --
+        g = np.zeros(n_w)
+        for k in range(N + 1):
+            idx = k * nx
+            g[idx:idx+nx] = -2.0 * self.Q @ ref_traj[k, :nx]
 
-            # simple kinematic bicycle
-            dx = v * ca.cos(yaw)
-            dy = v * ca.sin(yaw)
-            dyaw = v / self.L * ca.tan(delta)
-            dv = a
+        # -- 等式约束: 初始条件 + 线性化动力学 --
+        # 初始条件: x_0 = x0 → nx 个等式
+        # 动力学: x_{k+1} = A_d(k) @ x_k + B_d(k) @ u_k + c_d(k) → N*nx 个等式
+        n_eq = nx + N * nx
+        A_eq = np.zeros((n_eq, n_w))
+        b_eq = np.zeros(n_eq)
 
-            xk_next_model = xk + self.dt * ca.vertcat(dx, dy, dyaw, dv)
+        # 初始条件
+        A_eq[:nx, :nx] = np.eye(nx)
+        b_eq[:nx] = x0
 
-            g.append(x_next - xk_next_model)
-            lbg += [0.0] * nx
-            ubg += [0.0] * nx
+        # 动力学
+        for k in range(N):
+            row = nx + k * nx
+            # x_{k+1} = A_d(k) @ x_k + B_d(k) @ u_k + c_d(k)
+            # → A_d(k) @ x_k + B_d(k) @ u_k - x_{k+1} + c_d(k) = 0
+            # → [ ... A_d(k) at x_k ... | -I at x_{k+1} ... | B_d(k) at u_k ... ] w = -c_d(k)
+            x_k_idx = k * nx
+            x_k1_idx = (k + 1) * nx
+            u_k_idx = n_x_total + k * nu
 
-        # polygon constraints (if obstacles exist)
+            A_eq[row:row+nx, x_k_idx:x_k_idx+nx] = A_list[k]
+            A_eq[row:row+nx, x_k1_idx:x_k1_idx+nx] = -np.eye(nx)
+            A_eq[row:row+nx, u_k_idx:u_k_idx+nu] = B_list[k]
+            b_eq[row:row+nx] = -c_list[k]
+
+        # -- 不等式约束: 顶点-半空间避障 --
+        ineq_A_list = []
+        ineq_b_list = []
+
         if len(obs_Am_list) > 0:
             for k in range(N + 1):
-                xk = X[:, k]
-                px = xk[0]
-                py = xk[1]
+                yaw_ref_k = ref_traj[k, 2]
+                A_vtx, b_vtx = self._vertex_halfspace_constraints(
+                    yaw_ref_k, obs_Am_list, obs_bm_list)
+                if A_vtx is not None:
+                    n_vtx = A_vtx.shape[0]
+                    # A_vtx @ [x_k, y_k] <= b_vtx
+                    # 扩展为对 w 的稀疏行
+                    A_full = np.zeros((n_vtx, n_w))
+                    x_k_idx = k * nx
+                    A_full[:, x_k_idx:x_k_idx+2] = A_vtx  # 只影响 [x, y]
+                    ineq_A_list.append(A_full)
+                    ineq_b_list.append(b_vtx)
 
-                for Am, bm in zip(obs_Am_list, obs_bm_list):
-                    Am = np.asarray(Am, dtype=float)
-                    bm = np.asarray(bm, dtype=float).reshape(-1)
+        # -- 变量边界 --
+        lbx = np.full(n_w, -1e8)
+        ubx = np.full(n_w, 1e8)
 
-                    assert Am.shape[1] >= 2, \
-                        "Am must have at least 2 columns for [x,y]"
-                    assert Am.shape[0] == bm.shape[0], \
-                        "Am rows must match bm length"
+        # 状态边界: v >= 0, v <= v_max
+        for k in range(N + 1):
+            idx = k * nx + 3  # v 的索引
+            lbx[idx] = 0.0
+            ubx[idx] = self.v_max
 
-                    for i in range(Am.shape[0]):
-                        a_vec = Am[i, :2]
-                        b_val = bm[i]
-                        # A [x;y] <= b - d_safe  ->  a_x*x + a_y*y - (b - d_safe) <= 0
-                        g_poly = a_vec[0] * px + a_vec[1] * py - (b_val - self.d_safe)
-                        g.append(g_poly)
-                        lbg.append(-1e8)   # "no" lower bound
-                        ubg.append(0.0)    # upper bound 0
-                        poly_idx.append(len(g) - 1)
+        # 控制边界
+        for k in range(N):
+            idx_a = n_x_total + k * nu
+            idx_d = n_x_total + k * nu + 1
+            lbx[idx_a] = self.acc_lb
+            ubx[idx_a] = self.acc_ub
+            lbx[idx_d] = -self.steer_bound
+            ubx[idx_d] = self.steer_bound
 
-        g_expr = ca.vertcat(*g)
-
-        # ---------- 变量边界 lbx / ubx ----------
-        lbx = []
-        ubx = []
-
-        # 状态变量 X: [x, y, yaw, v] × (N+1)
-        for _k in range(N + 1):
-            lbx += [-1e8, -1e8, -1e8, 0.0]          # v >= 0
-            ubx += [ 1e8,  1e8,  1e8, self.v_max]
-
-        # 控制变量 U: [acc, delta] × N
-        for _k in range(N):
-            lbx += [self.acc_lb, -self.steer_bound]
-            ubx += [self.acc_ub,  self.steer_bound]
-
-        # ---------- solver ----------
-        nlp = {'x': w, 'f': J, 'g': g_expr}
-
-        opts = {
-            'ipopt': {
-                'print_level': 0,
-                'max_iter': 80,
-                'tol': 1e-4,
-            },
-            'print_time': False
-        }
-
-        solver = ca.nlpsol('qp_ws', self.solver_name, nlp, opts)
-
-        # initial guess from ref_traj + zero inputs / previous U
-        X0 = ca.DM(ref_traj[:N + 1, :nx].T)
-        if u_init is not None:
-            U0 = ca.DM(u_init[:N, :nu].T)
+        # ---------- 用 CasADi 求解 QP ----------
+        # 合并等式和不等式约束: lbg <= A_all @ w <= ubg
+        if len(ineq_A_list) > 0:
+            A_ineq_all = np.vstack(ineq_A_list)
+            b_ineq_all = np.concatenate(ineq_b_list)
+            n_ineq = A_ineq_all.shape[0]
         else:
-            U0 = ca.DM.zeros(nu, N)
+            A_ineq_all = np.zeros((0, n_w))
+            b_ineq_all = np.zeros(0)
+            n_ineq = 0
 
-        w0 = ca.vertcat(
-            ca.reshape(X0, -1, 1),
-            ca.reshape(U0, -1, 1)
-        )
+        # CasADi QP: minimize (1/2) w^T H w + g^T w
+        #            s.t.  lba <= A_all @ w <= uba
+        #                  lbx <= w <= ubx
+        A_all = np.vstack([A_eq, A_ineq_all])
+        lba = np.concatenate([b_eq, np.full(n_ineq, -1e8)])
+        uba = np.concatenate([b_eq, b_ineq_all])
 
-        sol = solver(x0=w0,
-                     lbg=ca.DM(lbg),
-                     ubg=ca.DM(ubg),
-                     lbx=ca.DM(lbx),
-                     ubx=ca.DM(ubx))
+        # 尝试使用 qpoases 或 osqp，保底用 ipopt
+        H_dm = ca.DM(H)
+        g_dm = ca.DM(g)
+        A_dm = ca.DM(A_all)
 
-        w_opt = np.array(sol['x']).reshape(-1)
-        lam_g = np.array(sol['lam_g']).reshape(-1)
+        solver = None
+        for qp_solver in ['qpoases', 'osqp']:
+            try:
+                solver = ca.conic('qp_ws', qp_solver,
+                                  {'h': H_dm.sparsity(), 'a': A_dm.sparsity()},
+                                  {'printLevel': 'none'} if qp_solver == 'qpoases'
+                                  else {'verbose': False})
+                break
+            except Exception:
+                continue
 
-        # ---------- unpack X, U ----------
-        nX = nx * (N + 1)
-        nU = nu * N
-        assert w_opt.size == nX + nU
+        if solver is not None:
+            # QP 求解
+            sol = solver(h=H_dm, g=g_dm, a=A_dm,
+                         lba=ca.DM(lba), uba=ca.DM(uba),
+                         lbx=ca.DM(lbx), ubx=ca.DM(ubx))
+            w_opt = np.array(sol['x']).reshape(-1)
+        else:
+            # 保底：用 IPOPT（凸 QP 下 5-10 次迭代即收敛）
+            w_sym = ca.SX.sym('w', n_w)
+            J_expr = 0.5 * ca.mtimes([w_sym.T, ca.DM(H), w_sym]) + ca.mtimes(ca.DM(g).T, w_sym)
+            g_expr = ca.mtimes(ca.DM(A_all), w_sym)
 
-        X_vec = w_opt[:nX]
-        U_vec = w_opt[nX:]
+            nlp = {'x': w_sym, 'f': J_expr, 'g': g_expr}
+            opts = {
+                'ipopt': {
+                    'print_level': 0,
+                    'max_iter': 30,
+                    'tol': 1e-6,
+                },
+                'print_time': False
+            }
+            ipopt_solver = ca.nlpsol('qp_ws_ipopt', 'ipopt', nlp, opts)
 
-        # casadi reshape uses column-major, so we invert with order='F'
-        X_mat = X_vec.reshape((nx, N + 1), order='F')
-        U_mat = U_vec.reshape((nu, N), order='F')
+            # 初始猜测：参考轨迹 + 零控制
+            w0 = np.zeros(n_w)
+            for k in range(N + 1):
+                w0[k*nx:(k+1)*nx] = ref_traj[k, :nx]
 
-        X_sol = X_mat.T        # shape (N+1, 4)
-        U_sol = U_mat.T        # shape (N, 2)
+            sol = ipopt_solver(x0=ca.DM(w0),
+                               lbg=ca.DM(lba), ubg=ca.DM(uba),
+                               lbx=ca.DM(lbx), ubx=ca.DM(ubx))
+            w_opt = np.array(sol['x']).reshape(-1)
 
-        # ====== QP 输出 yaw 归一化：unwrap 后对齐自车 yaw ======
+        # ---------- 解包 ----------
+        X_sol = np.zeros((N + 1, nx))
+        U_sol = np.zeros((N, nu))
+
+        for k in range(N + 1):
+            X_sol[k] = w_opt[k*nx:(k+1)*nx]
+        for k in range(N):
+            U_sol[k] = w_opt[n_x_total + k*nu : n_x_total + (k+1)*nu]
+
+        # yaw 归一化输出：确保与自车 yaw 对齐
         X_sol[:, 2] = np.unwrap(X_sol[:, 2])
-        sol_yaw_offset = x0[2] - X_sol[0, 2]
-        sol_yaw_offset = np.arctan2(np.sin(sol_yaw_offset),
-                                    np.cos(sol_yaw_offset))
-        X_sol[:, 2] += sol_yaw_offset
+        sol_yaw_off = x0[2] - X_sol[0, 2]
+        sol_yaw_off = np.arctan2(np.sin(sol_yaw_off), np.cos(sol_yaw_off))
+        X_sol[:, 2] += sol_yaw_off
 
-        # ---------- extract polygon duals ----------
-        if len(poly_idx) == 0:
-            lam_poly = None
-        else:
-            lam_poly = lam_g[poly_idx].copy()   # 1D array, length = (N+1)*sum(E_m)
-
-        return X_sol, U_sol, lam_poly
+        return X_sol, U_sol, None
