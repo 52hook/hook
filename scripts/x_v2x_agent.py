@@ -506,6 +506,8 @@ class Xagent(BasicAgent):
                 )
 
                 # ====== 2.5 调用 QP 预规划 ======
+                # RTI shift 已替代 QP warm-start，跳过 QP 预规划
+                use_qp_this_step = False
                 if use_qp_this_step and hasattr(self._model, "obca_qp_preplan"):
                     ok = False
                     try:

@@ -1416,29 +1416,40 @@ class Vehicle:
         else:
             raise ValueError(f"solve_MPC: u0 ndim {u_ws.ndim}, only 1D/2D supported")
 
-        # ---------- 2. 混合 PRIMAL 热启动 (上一拍 MPC + QP 一次性解) ----------
-        if getattr(self, "_qp_ws_valid", False) \
-        and (self._qp_ws_U is not None) \
-        and (self._qp_ws_X is not None):
-            try:
-                u_qp = np.asarray(self._qp_ws_U, dtype=float)
-                x_qp = np.asarray(self._qp_ws_X, dtype=float)
+        # ---------- 2. RTI shift：将上一拍解左移一个时步 ----------
+        # 时间已前进一步，上一拍的 step[k+1] 对应本拍的 step[k]
+        N = self.horizon
 
-                if u_qp.shape == u_ws.shape and x_qp.shape == x_m.shape:
-                    # 上一拍 MPC 解占 alpha，QP 只做“轻微修正”
-                    alpha = self.qp_blend_alpha
+        # u_ws: (2, N) → 左移一位，末尾保持（复制 u_{N-1}）
+        u_ws[:, :-1] = u_ws[:, 1:]
 
-                    u_ws = alpha * u_ws + (1.0 - alpha) * u_qp
-                    x_m  = alpha * x_m  + (1.0 - alpha) * x_qp
-                else:
-                    logger.warning("solve_MPC: QP warm-start shape 不匹配, "
-                                   "u_qp %s vs %s, x_qp %s vs %s",
-                                   u_qp.shape, u_ws.shape, x_qp.shape, x_m.shape)
-            except Exception as e:
-                logger.warning("solve_MPC: QP warm-start 使用失败: %s", e)
-            finally:
-                # one-shot：用完就清掉标志，避免一直复用过期解
-                self._qp_ws_valid = False
+        # x_m: (N+1, n_states) → 左移一位，末尾保持（复制 x_N）
+        x_m[:-1, :] = x_m[1:, :]
+
+        # 对偶变量 shift（仅在 dual 开启且缓存尺寸匹配时做）
+        if getattr(self, 'dual_enabled', False) and self.num_obs > 0:
+            lam_per_step = sum(self.obs_edges_count)
+            mu_per_step  = 4 * self.num_obs
+            s_per_step   = self.num_obs
+
+            if (self._lam_cache is not None
+                    and self._lam_cache.size == lam_per_step * (N + 1)):
+                lam_2d = self._lam_cache.reshape(N + 1, lam_per_step)
+                lam_2d[:-1] = lam_2d[1:]
+                self._lam_cache = lam_2d.flatten()
+
+            if (self._mu_cache is not None
+                    and self._mu_cache.size == mu_per_step * (N + 1)):
+                mu_2d = self._mu_cache.reshape(N + 1, mu_per_step)
+                mu_2d[:-1] = mu_2d[1:]
+                self._mu_cache = mu_2d.flatten()
+
+            if (self._s_cache is not None
+                    and self._s_cache.size == s_per_step * (N + 1)):
+                s_2d = self._s_cache.reshape(N + 1, s_per_step)
+                s_2d[:-1] = s_2d[1:]
+                self._s_cache = s_2d.flatten()
+
 
         # ---------- 3. 把 (U,X) 展开成 NLP 初值 ----------
         c_p = np.vstack((z0.T, xs)).T
