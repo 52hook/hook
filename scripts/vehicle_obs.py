@@ -868,7 +868,10 @@ class Vehicle:
                     R=R_qp,
                     Rd=Rd_qp,
                     d_safe=0.5,
-                    solver_name='ipopt'
+                    solver_name='ipopt',
+                    acc_bounds=(self.acc_lbound, self.acc_ubound),
+                    steer_bound=self.steer_bound,
+                    v_max=self.target_v
                 )
             except Exception as e:
                 logger.warning("obca_qp_preplan: 创建 HybridQPWarmStarter 失败: %s", e)

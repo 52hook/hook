@@ -545,14 +545,14 @@ class Xagent(BasicAgent):
 
                                 bad = False
 
-                                # A：参考几乎直行，但 QP 第一拍就 >20° 转向
+                                # A：参考几乎直行，但 QP 第一拍转向过大（> 45°）
                                 if (abs(d_yaw_ref) < np.deg2rad(5.0)
-                                        and abs(d_yaw_qp) > np.deg2rad(20.0)):
+                                        and abs(d_yaw_qp) > np.deg2rad(45.0)):
                                     bad = True
 
-                                # B：参考往左/右，QP 却反向大转（>30°）
+                                # B：参考往左/右，QP 却反向大转（> 60°）
                                 if (d_yaw_qp * d_yaw_ref < 0.0
-                                        and abs(d_yaw_qp) > np.deg2rad(30.0)
+                                        and abs(d_yaw_qp) > np.deg2rad(60.0)
                                         and abs(d_yaw_ref) > np.deg2rad(5.0)):
                                     bad = True
 

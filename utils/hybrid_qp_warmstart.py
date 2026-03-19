@@ -26,7 +26,10 @@ class HybridQPWarmStarter(object):
                  R=None,
                  Rd=None,
                  d_safe=0.5,
-                 solver_name='ipopt'):
+                 solver_name='ipopt',
+                 acc_bounds=(-6.0, 3.0),
+                 steer_bound=0.55,
+                 v_max=20.0):
         """
         Parameters
         ----------
@@ -42,6 +45,12 @@ class HybridQPWarmStarter(object):
             Safety margin for polygon constraints: A x <= b - d_safe
         solver_name : str
             NLP solver name for casadi.nlpsol (e.g. 'ipopt')
+        acc_bounds : tuple
+            (下界, 上界) 纵向加速度范围 (m/s^2)
+        steer_bound : float
+            转向角绝对值上界 (rad)
+        v_max : float
+            速度上界 (m/s)
         """
         self.N = int(horizon)
         self.dt = float(dt)
@@ -49,6 +58,12 @@ class HybridQPWarmStarter(object):
         self.nx = 4
         self.nu = 2
         self.d_safe = float(d_safe)
+
+        # 控制输入边界
+        self.acc_lb = float(acc_bounds[0])
+        self.acc_ub = float(acc_bounds[1])
+        self.steer_bound = float(steer_bound)
+        self.v_max = float(v_max)
 
         # cost weights
         if Q is None:
@@ -241,14 +256,28 @@ class HybridQPWarmStarter(object):
 
         g_expr = ca.vertcat(*g)
 
+        # ---------- 变量边界 lbx / ubx ----------
+        lbx = []
+        ubx = []
+
+        # 状态变量 X: [x, y, yaw, v] × (N+1)
+        for _k in range(N + 1):
+            lbx += [-1e8, -1e8, -1e8, 0.0]          # v >= 0
+            ubx += [ 1e8,  1e8,  1e8, self.v_max]
+
+        # 控制变量 U: [acc, delta] × N
+        for _k in range(N):
+            lbx += [self.acc_lb, -self.steer_bound]
+            ubx += [self.acc_ub,  self.steer_bound]
+
         # ---------- solver ----------
         nlp = {'x': w, 'f': J, 'g': g_expr}
 
         opts = {
             'ipopt': {
                 'print_level': 0,
-                'max_iter': 50,
-                'tol': 1e-3,
+                'max_iter': 80,
+                'tol': 1e-4,
             },
             'print_time': False
         }
@@ -269,7 +298,9 @@ class HybridQPWarmStarter(object):
 
         sol = solver(x0=w0,
                      lbg=ca.DM(lbg),
-                     ubg=ca.DM(ubg))
+                     ubg=ca.DM(ubg),
+                     lbx=ca.DM(lbx),
+                     ubx=ca.DM(ubx))
 
         w_opt = np.array(sol['x']).reshape(-1)
         lam_g = np.array(sol['lam_g']).reshape(-1)
