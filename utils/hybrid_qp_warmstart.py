@@ -94,10 +94,6 @@ class HybridQPWarmStarter:
 
         self.Rd = None  # 控制增量惩罚暂不使用
 
-        # qpOASES solver 缓存
-        self._qp_solver = None
-        self._qp_cache_key = None
-
     # ========== 自车 4 顶点的本地偏移量 ==========
 
     def _ego_vertex_offsets(self):
@@ -304,59 +300,30 @@ class HybridQPWarmStarter:
         lba = np.concatenate([b_eq, np.full(n_ineq, -1e8)])
         uba = np.concatenate([b_eq, b_ineq])
 
-        # ---------- 求解 ----------
+        # ---------- 求解（纯 IPOPT，避免 qpOASES 版权打印和 infeasible 问题） ----------
         n_con = A_all.shape[0]
-        w_opt = None
 
-        # 缓存 qpOASES solver（仅在维度变化时重建）
-        cache_key = (n_w, n_con)
-        if self._qp_cache_key != cache_key:
-            try:
-                H_sp = ca.Sparsity.dense(n_w, n_w)
-                A_sp = ca.Sparsity.dense(n_con, n_w)
-                self._qp_solver = ca.conic('qp_ws', 'qpoases',
-                                           {'h': H_sp, 'a': A_sp},
-                                           {'printLevel': 'none',
-                                            'error_on_fail': False})
-                self._qp_cache_key = cache_key
-            except Exception:
-                self._qp_solver = None
-                self._qp_cache_key = None
+        w_sym = ca.SX.sym('w', n_w)
+        J_expr = 0.5 * ca.mtimes([w_sym.T, ca.DM(H), w_sym]) \
+                 + ca.mtimes(ca.DM(g).T, w_sym)
+        g_expr = ca.mtimes(ca.DM(A_all), w_sym)
 
-        # 调用缓存的 solver
-        if self._qp_solver is not None:
-            try:
-                sol = self._qp_solver(
-                    h=ca.DM(H), g=ca.DM(g), a=ca.DM(A_all),
-                    lba=ca.DM(lba), uba=ca.DM(uba),
-                    lbx=ca.DM(lbx), ubx=ca.DM(ubx))
-                if self._qp_solver.stats()['success']:
-                    w_opt = np.array(sol['x']).reshape(-1)
-            except Exception as e:
-                logger.debug("qpOASES 求解失败: %s", e)
+        nlp = {'x': w_sym, 'f': J_expr, 'g': g_expr}
+        opts = {
+            'ipopt': {'print_level': 0, 'max_iter': 50, 'tol': 1e-4},
+            'print_time': False
+        }
+        solver = ca.nlpsol('qp_ws', 'ipopt', nlp, opts)
 
-        # 保底 IPOPT
-        if w_opt is None:
-            w_sym = ca.SX.sym('w', n_w)
-            J_expr = 0.5 * ca.mtimes([w_sym.T, ca.DM(H), w_sym]) \
-                     + ca.mtimes(ca.DM(g).T, w_sym)
-            g_expr = ca.mtimes(ca.DM(A_all), w_sym)
+        # 初始猜测：用参考轨迹
+        w0 = np.zeros(n_w)
+        for k in range(N + 1):
+            w0[k * nx:(k + 1) * nx] = ref_qp[k]
 
-            nlp = {'x': w_sym, 'f': J_expr, 'g': g_expr}
-            opts = {
-                'ipopt': {'print_level': 0, 'max_iter': 30, 'tol': 1e-4},
-                'print_time': False
-            }
-            ipopt_solver = ca.nlpsol('qp_ws_ipopt', 'ipopt', nlp, opts)
-
-            w0 = np.zeros(n_w)
-            for k in range(N + 1):
-                w0[k * nx:(k + 1) * nx] = ref_qp[k]
-
-            sol = ipopt_solver(x0=ca.DM(w0),
-                               lbg=ca.DM(lba), ubg=ca.DM(uba),
-                               lbx=ca.DM(lbx), ubx=ca.DM(ubx))
-            w_opt = np.array(sol['x']).reshape(-1)
+        sol = solver(x0=ca.DM(w0),
+                     lbg=ca.DM(lba), ubg=ca.DM(uba),
+                     lbx=ca.DM(lbx), ubx=ca.DM(ubx))
+        w_opt = np.array(sol['x']).reshape(-1)
 
         # ---------- 解包：从 3 维 QP 解恢复 4 维完整状态 ----------
         X_sol = np.zeros((N + 1, 4))
