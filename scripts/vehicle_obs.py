@@ -397,10 +397,13 @@ class Vehicle:
                 for self_center in self.get_obs_centers(self.X[:, i], carla=carla):  # for each circle of the EV
                     if not pede:
                         dist = self.dist_point_to_ellipsoid(self_center, ob_center, ob_[i][2])
+                        # 车辆：反距离型（保持原逻辑）
+                        self.obj += 12 * ((1 / dist - 0.5) ** expn) * ratio_eff / (i + 1)
                     else:
                         dist = self.dist_point_to_ellipsoid(self_center, ob_center, ob_[i][2], a=0.5, b=0.5)
-                    # decrease the weight when i is getting larger
-                    self.obj += 12 * ((1 / dist - 0.5) ** expn) * ratio_eff / (i + 1)
+                        # 行人：指数衰减（论文 F_PD = k * exp(-α * d)）
+                        alpha_pd = 1.0  # 衰减率
+                        self.obj += 12 * ca.exp(-alpha_pd * dist) * ratio_eff / (i + 1)
 
     def soft_obs_apf(self, obs, ref_traj, ratio=500, expn=1, carla=False, pede=False):
         obs_apf = 0.0
@@ -417,7 +420,14 @@ class Vehicle:
             for obc_ in obc:
                 for selfc in self.get_obs_centers(ref_traj[:, 0], carla):
                     dist = (selfc[0] - obc_[0]) ** 2 + (selfc[1] - obc_[1]) ** 2
-                    obs_apf += (1 / dist) ** expn * ratio_eff
+                    if pede:
+                        # 行人：指数衰减（论文 F_PD）
+                        alpha_pd = 1.0
+                        d = max(np.sqrt(dist), 0.01)
+                        obs_apf += np.exp(-alpha_pd * d) * ratio_eff
+                    else:
+                        # 车辆：反距离型（保持原逻辑）
+                        obs_apf += (1 / dist) ** expn * ratio_eff
         return float(obs_apf)
 
     def solver_add_soft_ttc(self, lv, ratio=80, expn=1,
@@ -663,12 +673,14 @@ class Vehicle:
                        + self.w_tr_lat * (1 / (dist_l)) ** 2 \
                        + self.w_tr_lat * (1 / (dist_r)) ** 2
 
-    def solver_add_single_tr_lgt_pf_carla(self, lane_center_y, yaw, tl_x):
+    def solver_add_single_tr_lgt_pf_carla(self, lane_center_y, yaw, tl_x,
+                                           red_time_ratio=1.0):
         """
         Add traffic light cost function in Carla
         Parameters:
             lane_center_y : y coordinate of the lane center
             yaw : yaw of the lane center point
+            red_time_ratio : 红灯剩余时间比率 ∈ [0,1]
         Returns:
             None
         """
@@ -679,17 +691,19 @@ class Vehicle:
             dist_l = 1.5 - (selfc[1] - lane_center_y)
             dist_r = (selfc[1] - lane_center_y) + 1.5
 
-            self.obj += self.w_tr_long * (1 / (dist)) \
-                        + self.w_tr_lat * (1 / (dist_l)) ** 2 \
-                        + self.w_tr_lat * (1 / (dist_r)) ** 2
+            self.obj += red_time_ratio * (
+                self.w_tr_long * (1 / (dist))
+                + self.w_tr_lat * (1 / (dist_l)) ** 2
+                + self.w_tr_lat * (1 / (dist_r)) ** 2
+            )
 
-    def traffic_pf(self, ref_traj, lane_center_y, yaw, tl_x):
+    def traffic_pf(self, ref_traj, lane_center_y, yaw, tl_x, red_time_ratio=1.0):
         selfc = [np.cos(-yaw) * ref_traj[0, 0] - np.sin(-yaw) * ref_traj[1, 0],
                  np.sin(-yaw) * ref_traj[0, 0] + np.cos(-yaw) * ref_traj[1, 0]]
         dist = -(selfc[0] - tl_x) + 2
         dist_l = 1.5 - (selfc[1] - lane_center_y)
         dist_r = (selfc[1] - lane_center_y) + 1.5
-        traffic_pf_val = self.w_tr_long * (1 / (dist))
+        traffic_pf_val = red_time_ratio * self.w_tr_long * (1 / (dist))
         return float(traffic_pf_val)
 
     def enable_dual_collision(self, obs_Am_list, obs_bm_list, car_box=(4.5, 2.0),

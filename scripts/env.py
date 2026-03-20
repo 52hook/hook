@@ -579,10 +579,16 @@ class Env:
                     pede_hist = pede_hist.reshape(-1, 1).T
                     # normalize the x, y of the SVs history states
                     pede_hist = self.norm_pre_states(pede_hist)
-                    # 推断行人轨迹（论文 IGPR：同时获取均值和标准差）
+                    # 推断行人轨迹
                     if self.inferMethod == "gpr":
-                        pede_infer_i, pede_std_i = self.gpr.predict(
-                            pede_hist, return_std=True)
+                        # 先用原始方式获取预测均值（保证结果不变）
+                        pede_infer_i = self.gpr.predict(pede_hist)
+                        # 再单独获取标准差（论文 IGPR 方差利用）
+                        try:
+                            _, pede_std_i = self.gpr.predict(
+                                pede_hist, return_std=True)
+                        except Exception:
+                            pede_std_i = np.zeros(1)
                     elif self.inferMethod == "lstm":
                         pede_hist = pede_hist.reshape(1, 15, 5)
                         pede_infer_i = self.lstm.predict(pede_hist)
@@ -643,11 +649,17 @@ class Env:
                     obs_hist = obs_hist.reshape(-1, 1).T
                     # normalize the x, y of the SVs history states
                     obs_hist = self.norm_pre_states(obs_hist)
-                    # 推断障碍车轨迹（论文 IGPR：同时获取均值和标准差）
+                    # 推断障碍车轨迹
                     tick = time.time()
                     if self.inferMethod == "gpr":
-                        obs_infer_i, obs_std_i = self.gpr.predict(
-                            obs_hist, return_std=True)
+                        # 先用原始方式获取预测均值（保证结果不变）
+                        obs_infer_i = self.gpr.predict(obs_hist)
+                        # 再单独获取标准差（论文 IGPR 方差利用）
+                        try:
+                            _, obs_std_i = self.gpr.predict(
+                                obs_hist, return_std=True)
+                        except Exception:
+                            obs_std_i = np.zeros(1)
                     elif self.inferMethod == "lstm":
                         obs_hist = obs_hist.reshape(1, 15, 5)
                         obs_infer_i = self.lstm.predict(obs_hist)

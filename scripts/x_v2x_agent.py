@@ -769,12 +769,14 @@ class Xagent(BasicAgent):
                 apf_nc_road += self._model.nc_road_pf([[right_bound, -1]], ref_traj, wp_yaw)
 
         # ----- 红灯约束 -----
-        tl_bool, tl_waypoint = self.check_traffic_light()
+        tl_bool, tl_waypoint, red_time_ratio = self.check_traffic_light()
         if tl_bool:
             tl_x = (np.cos(-wp_yaw) * tl_waypoint.transform.location.x -
                     np.sin(-wp_yaw) * -tl_waypoint.transform.location.y)
-            self._model.solver_add_single_tr_lgt_pf_carla(wp_y, wp_yaw, tl_x)
-            apf_traffic += self._model.traffic_pf(ref_traj, wp_y, wp_yaw, tl_x)
+            self._model.solver_add_single_tr_lgt_pf_carla(wp_y, wp_yaw, tl_x,
+                                                          red_time_ratio=red_time_ratio)
+            apf_traffic += self._model.traffic_pf(ref_traj, wp_y, wp_yaw, tl_x,
+                                                   red_time_ratio=red_time_ratio)
 
         # ----- APF 障碍 / 行人 / TTC -----
         obs_ratio_front = 150
@@ -962,16 +964,30 @@ class Xagent(BasicAgent):
                 self._last_traffic_light = None
                 self._last_traffic_waypoint = None
             else:
-                return (True, self._last_traffic_waypoint)
+                red_time_ratio = self._get_red_time_ratio(self._last_traffic_light)
+                return (True, self._last_traffic_waypoint, red_time_ratio)
 
         traffic_light, object_waypoint = self.get_traffic_light(
             traffic_distance, 'opposite')
         if traffic_light:
             self._last_traffic_light = traffic_light
             self._last_traffic_waypoint = object_waypoint
-            return (True, object_waypoint)
+            red_time_ratio = self._get_red_time_ratio(traffic_light)
+            return (True, object_waypoint, red_time_ratio)
         else:
-            return (False, None)
+            return (False, None, 0.0)
+
+    def _get_red_time_ratio(self, traffic_light):
+        """计算红灯剩余时间占红灯总时长的比率 ∈ [0, 1]"""
+        try:
+            red_time = traffic_light.get_red_time()
+            elapsed = traffic_light.get_elapsed_time()
+            if red_time > 0:
+                remain = max(red_time - elapsed, 0.0)
+                return remain / red_time
+        except Exception:
+            pass
+        return 1.0  # 无法获取时默认满比率（最保守）
 
     def get_traffic_light(self, traffic_distance=5.0, type='closest'):
         """
