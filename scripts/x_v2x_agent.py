@@ -790,10 +790,11 @@ class Xagent(BasicAgent):
             obs_ratio_opp = 10
 
         # === IGPR 方差 → 动态调整 APF 权重（论文核心创新点）===
-        # k_sigma：方差放大系数，可调参；默认 2.0
+        # k_sigma：方差放大系数；sigma_scale_max：上限（防止对向车等高方差目标过度放大）
         k_sigma = 2.0
+        sigma_scale_max = 1.5  # ratio 最多放大到 1.5 倍
         obs_sigma_mean = float(np.mean(obs_stds)) if len(obs_stds) > 0 else 0.0
-        sigma_scale = 1.0 + k_sigma * obs_sigma_mean  # 车辆方差放大平堆
+        sigma_scale = min(1.0 + k_sigma * obs_sigma_mean, sigma_scale_max)
 
         # 前向车辆
         if len(obs_long_infer) > 0:
@@ -816,7 +817,7 @@ class Xagent(BasicAgent):
         # 行人 APF（单独用行人方差）
         if len(pedes) > 0:
             pede_sigma_mean = float(np.mean(pede_stds)) if len(pede_stds) > 0 else 0.0
-            pede_sigma_scale = 1.0 + k_sigma * pede_sigma_mean
+            pede_sigma_scale = min(1.0 + k_sigma * pede_sigma_mean, sigma_scale_max)
             self._model.solver_add_soft_obs(
                 pedes_infer, ratio=600 * pede_sigma_scale, carla=True, pede=True
             )
