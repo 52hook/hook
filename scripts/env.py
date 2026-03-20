@@ -541,6 +541,7 @@ class Env:
         pedes = []
         heights = []
         pedes_infer = []
+        pede_stds = []  # IGPR 预测标准差
         # add the current states of the pedestrians to the state queue for trajectory prediction:
         for sv in self.pedestrian_list:
             sv_state = sv.get_transform()
@@ -578,33 +579,32 @@ class Env:
                     pede_hist = pede_hist.reshape(-1, 1).T
                     # normalize the x, y of the SVs history states
                     pede_hist = self.norm_pre_states(pede_hist)
-                    # infer the x, y of the SVs history states\
-                    # tick = time.time()
+                    # 推断行人轨迹（论文 IGPR：同时获取均值和标准差）
                     if self.inferMethod == "gpr":
-                        pede_infer_i = self.gpr.predict(pede_hist)
+                        pede_infer_i, pede_std_i = self.gpr.predict(
+                            pede_hist, return_std=True)
                     elif self.inferMethod == "lstm":
                         pede_hist = pede_hist.reshape(1, 15, 5)
                         pede_infer_i = self.lstm.predict(pede_hist)
+                        pede_std_i = np.zeros(1)
                     else:
-                        # just repeat the last state for 10 times
-                        last_state = pede_hist[0,-5:-2]
-                        pede_infer_i = np.tile(last_state, 10)
-                        pede_infer_i = pede_infer_i.reshape(1, 30)
-                    # tock = time.time()
-                    # infer_time_once.append(tock-tick)
-                        # print("lstm infer time: ", tock-tick)
+                        last_state = pede_hist[0, -5:-2]
+                        pede_infer_i = np.tile(last_state, 10).reshape(1, 30)
+                        pede_std_i = np.zeros(1)
                     pede_infer_i = np.array(pede_infer_i)
-                    # restore the x, y of the SVs history states
                     pede_infer_i = self.restore_pre_states(pede_infer_i)
                     pede_infer_i = pede_infer_i.reshape(-1, 3)
                     pedes_infer.append(pede_infer_i)
+                    # 取所有维度均值标准差作为不确定性指标
+                    pede_stds.append(float(np.mean(np.abs(pede_std_i))))
                     heights.append(location.z)
-        return pedes, heights, pedes_infer
+        return pedes, heights, pedes_infer, pede_stds
 
     def get_obs(self, cur_state=None, dist_threshold=15):
         obs = []
-        heights = [] # the height of the SVs, for the bounding box drawing in Carla
+        heights = []
         obs_infer = []
+        obs_stds = []  # IGPR 预测标准差
         infer_time_once = []
         # add the current states of the SVs to the state queue for trajectory prediction:
         for sv in self.other_vehicles_list:
@@ -643,34 +643,34 @@ class Env:
                     obs_hist = obs_hist.reshape(-1, 1).T
                     # normalize the x, y of the SVs history states
                     obs_hist = self.norm_pre_states(obs_hist)
-                    # infer the x, y of the SVs history states\
+                    # 推断障碍车轨迹（论文 IGPR：同时获取均值和标准差）
                     tick = time.time()
                     if self.inferMethod == "gpr":
-                        obs_infer_i = self.gpr.predict(obs_hist)
+                        obs_infer_i, obs_std_i = self.gpr.predict(
+                            obs_hist, return_std=True)
                     elif self.inferMethod == "lstm":
                         obs_hist = obs_hist.reshape(1, 15, 5)
                         obs_infer_i = self.lstm.predict(obs_hist)
+                        obs_std_i = np.zeros(1)
                     else:
-                        # just repeat the last state for 10 times
-                        last_state = obs_hist[0,-5:-2]
-                        obs_infer_i = np.tile(last_state, 10)
-                        obs_infer_i = obs_infer_i.reshape(1, 30)
+                        last_state = obs_hist[0, -5:-2]
+                        obs_infer_i = np.tile(last_state, 10).reshape(1, 30)
+                        obs_std_i = np.zeros(1)
                     tock = time.time()
-                    infer_time_once.append(tock-tick)
-                        # print("lstm infer time: ", tock-tick)
+                    infer_time_once.append(tock - tick)
                     obs_infer_i = np.array(obs_infer_i)
-                    # restore the x, y of the SVs history states
                     obs_infer_i = self.restore_pre_states(obs_infer_i)
                     obs_infer_i = obs_infer_i.reshape(-1, 3)
                     obs_infer.append(obs_infer_i)
+                    # 取所有维度均值标准差作为不确定性指标
+                    obs_stds.append(float(np.mean(np.abs(obs_std_i))))
                     heights.append(location.z)
         infer_time_sum = np.sum(infer_time_once)
         if self.inferMethod == "gpr":
             self.gpr_infer_times.append(infer_time_sum)
-            # print("gpr infer time: ", tock-tick)
         elif self.inferMethod == "lstm":
             self.lstm_infer_times.append(infer_time_sum)
-        return obs, heights, obs_infer
+        return obs, heights, obs_infer, obs_stds
 
     def norm_pre_states(self, history_data):
         self.extract_val = copy.deepcopy(history_data[0][0:2])

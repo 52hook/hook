@@ -535,7 +535,7 @@ class Xagent(BasicAgent):
                     self._model._qp_ws_valid = False
 
         # ========== 3. 环境感知：APF 用的障碍 / 行人 ==========
-        obs, heights, obs_infer = self._env.get_obs(current_state)
+        obs, heights, obs_infer, obs_stds = self._env.get_obs(current_state)
 
         # === 根据前方一段路径的“最大曲率”判断：是否进入环岛 / 紧弯区域 ===
         try:
@@ -642,7 +642,7 @@ class Xagent(BasicAgent):
                     )
 
         # === 行人感知 + debug 可视化 ===
-        pedes, pede_heights, pedes_infer = self._env.get_pedes(current_state)
+        pedes, pede_heights, pedes_infer, pede_stds = self._env.get_pedes(current_state)
         temp_pedes = copy.copy(pedes)
 
         if len(temp_pedes) > 0:
@@ -789,28 +789,36 @@ class Xagent(BasicAgent):
         if yield_for_opp:
             obs_ratio_opp = 10
 
+        # === IGPR 方差 → 动态调整 APF 权重（论文核心创新点）===
+        # k_sigma：方差放大系数，可调参；默认 2.0
+        k_sigma = 2.0
+        obs_sigma_mean = float(np.mean(obs_stds)) if len(obs_stds) > 0 else 0.0
+        sigma_scale = 1.0 + k_sigma * obs_sigma_mean  # 车辆方差放大平堆
+
         # 前向车辆
         if len(obs_long_infer) > 0:
             self._model.solver_add_soft_obs(
-                obs_long_infer, ratio=obs_ratio_front, carla=True
+                obs_long_infer, ratio=obs_ratio_front * sigma_scale, carla=True
             )
 
         # 对向直行车辆
         if len(obs_opp_infer) > 0:
             self._model.solver_add_soft_obs(
-                obs_opp_infer, ratio=obs_ratio_opp, carla=True
+                obs_opp_infer, ratio=obs_ratio_opp * sigma_scale, carla=True
             )
 
         # 横向 / 交叉车辆
         if len(obs_cross_infer) > 0:
             self._model.solver_add_soft_obs(
-                obs_cross_infer, ratio=obs_ratio_cross, carla=True
+                obs_cross_infer, ratio=obs_ratio_cross * sigma_scale, carla=True
             )
 
-        # 行人 APF
+        # 行人 APF（单独用行人方差）
         if len(pedes) > 0:
+            pede_sigma_mean = float(np.mean(pede_stds)) if len(pede_stds) > 0 else 0.0
+            pede_sigma_scale = 1.0 + k_sigma * pede_sigma_mean
             self._model.solver_add_soft_obs(
-                pedes_infer, ratio=600, carla=True, pede=True
+                pedes_infer, ratio=600 * pede_sigma_scale, carla=True, pede=True
             )
 
         # TTC 势场
