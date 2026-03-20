@@ -796,19 +796,19 @@ class Xagent(BasicAgent):
         obs_sigma_mean = float(np.mean(obs_stds)) if len(obs_stds) > 0 else 0.0
         sigma_scale = min(1.0 + k_sigma * obs_sigma_mean, sigma_scale_max)
 
-        # 前向车辆
+        # 前向车辆（方差放大）
         if len(obs_long_infer) > 0:
             self._model.solver_add_soft_obs(
                 obs_long_infer, ratio=obs_ratio_front * sigma_scale, carla=True
             )
 
-        # 对向直行车辆
+        # 对向直行车辆（不乘方差：对向车方差天然高但不代表更危险）
         if len(obs_opp_infer) > 0:
             self._model.solver_add_soft_obs(
-                obs_opp_infer, ratio=obs_ratio_opp * sigma_scale, carla=True
+                obs_opp_infer, ratio=obs_ratio_opp, carla=True
             )
 
-        # 横向 / 交叉车辆
+        # 横向 / 交叉车辆（方差放大）
         if len(obs_cross_infer) > 0:
             self._model.solver_add_soft_obs(
                 obs_cross_infer, ratio=obs_ratio_cross * sigma_scale, carla=True
