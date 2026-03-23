@@ -46,14 +46,21 @@ class RoadOption(Enum):
 
 
 class Xagent(BasicAgent):
-    def __init__(self, env, model, dt=0.1, use_dual=True) -> None:
+    def __init__(self, env, model, dt=0.1,
+                 use_dual=True,
+                 use_opp_detect=True,
+                 use_igpr_var=True,
+                 use_bspline=True) -> None:
         """
         env   : simulation environment (provides ego_vehicle, get_obs, get_pedes)
         model : Vehicle model (vehicle_obs.Vehicle)
         dt    : controller step time
-        use_dual : 是否启用“多边形 + 对偶硬约束”
-                   True  -> UDMC-X (你的改进版)
-                   False -> 原始 UDMC（仅 APF / 椭圆约束）
+
+        消融实验开关（全部 True = 完整 UDMC-X）:
+            use_dual       : 多边形 + 对偶硬约束 (OBCA/QP)
+            use_opp_detect : 对向直行车检测与让行
+            use_igpr_var   : IGPR 方差驱动动态 APF 权重
+            use_bspline    : B 样条全局参考线平滑
         """
         self._env = env
         self._vehicle = env.ego_vehicle
@@ -93,8 +100,11 @@ class Xagent(BasicAgent):
         self.dist_move = 0.2
         self.dist_step = 1.2
 
-        # 是否启用多边形 + 对偶硬约束
+        # ---- 消融实验开关 ----
         self._use_dual = use_dual
+        self._use_opp_detect = use_opp_detect
+        self._use_igpr_var = use_igpr_var
+        self._use_bspline = use_bspline
 
         # === B 样条全局参考线平滑器 ===
         self._bspline_smoother = BSplineGlobalSmoother(
@@ -376,8 +386,8 @@ class Xagent(BasicAgent):
         cx, cy = cx0.copy(), cy0.copy()
         cyaw, ck = cyaw0.copy(), ck0.copy()
 
-        # -------- 1.2 B 样条小幅“修饰” --------
-        if base_path.shape[0] >= 4:
+        # -------- 1.2 B 样条小幅“修饰”（消融开关: use_bspline）--------
+        if self._use_bspline and base_path.shape[0] >= 4:
             try:
                 smooth_path, ctrl_pts = self._bspline_smoother.smooth(
                     path_xy=base_path,
@@ -568,7 +578,7 @@ class Xagent(BasicAgent):
             min_long_dist=min_long
         )
 
-        # === 按航向把障碍拆成“纵向前车 / 交叉来车 / 对向直行车” ===
+        # === 按航向把障碍拆成“纵向前车 / 交叉来车 / 对向直行车”（消融开关: use_opp_detect）===
         obs_long, obs_cross, obs_opp = [], [], []
         obs_long_infer, obs_cross_infer, obs_opp_infer = [], [], []
 
@@ -582,6 +592,12 @@ class Xagent(BasicAgent):
 
         if obs is not None and len(obs) > 0:
             for k, ob in enumerate(obs):
+                # 如果禁用对向车检测，所有车辆统一当作“同向前车”处理
+                if not self._use_opp_detect:
+                    obs_long.append(ob)
+                    obs_long_infer.append(obs_infer[k])
+                    continue
+
                 ox, oy, oyaw = float(ob[0]), float(ob[1]), float(ob[2])
 
                 yaw_diff = oyaw - ego_yaw
@@ -612,9 +628,10 @@ class Xagent(BasicAgent):
                     obs_long.append(ob)
                     obs_long_infer.append(obs_infer[k])
 
-        # 是否进入“对向直行车减速让行模式”
+        # 是否进入“对向直行车减速让行模式”（消融: 禁用时永远不让行）
         yield_for_opp = (
-            (opp_min_dist is not None)
+            self._use_opp_detect
+            and (opp_min_dist is not None)
             and (opp_min_dist < 18.0)
             and (not is_roundabout_like)
         )
@@ -791,12 +808,15 @@ class Xagent(BasicAgent):
         if yield_for_opp:
             obs_ratio_opp = 10
 
-        # === IGPR 方差 → 动态调整 APF 权重（论文核心创新点）===
+        # === IGPR 方差 → 动态调整 APF 权重（消融开关: use_igpr_var）===
         # k_sigma：方差放大系数；sigma_scale_max：上限（防止对向车等高方差目标过度放大）
-        k_sigma = 2.0
-        sigma_scale_max = 1.5  # ratio 最多放大到 1.5 倍
-        obs_sigma_mean = float(np.mean(obs_stds)) if len(obs_stds) > 0 else 0.0
-        sigma_scale = min(1.0 + k_sigma * obs_sigma_mean, sigma_scale_max)
+        if self._use_igpr_var:
+            k_sigma = 2.0
+            sigma_scale_max = 1.5  # ratio 最多放大到 1.5 倍
+            obs_sigma_mean = float(np.mean(obs_stds)) if len(obs_stds) > 0 else 0.0
+            sigma_scale = min(1.0 + k_sigma * obs_sigma_mean, sigma_scale_max)
+        else:
+            sigma_scale = 1.0     # 关闭方差驱动，ratio 固定为 1.0
 
         # 前向车辆（方差放大）
         if len(obs_long_infer) > 0:

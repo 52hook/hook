@@ -30,6 +30,12 @@ veh_num = 100
 
 USE_DUAL = True
 
+# ---- 消融实验开关（通过环境变量控制，默认全部启用 = 完整 UDMC-X）----
+# 设为 "0" 关闭对应改进，例: ABLATION_OPP=0 python udmc_main.py unsig_s1 False
+USE_OPP_DETECT = os.environ.get('ABLATION_OPP', '1') != '0'
+USE_IGPR_VAR   = os.environ.get('ABLATION_IGPR', '1') != '0'
+USE_BSPLINE    = os.environ.get('ABLATION_BSPLINE', '1') != '0'
+
 random_spawn = False
 
 # logging 
@@ -166,8 +172,13 @@ env.reset(start_transform)
 # - Dynamic model(for MPC control)
 dynamic_model = Vehicle(actor=env.ego_vehicle, horizon=10, target_v=target_v, delta_t=simu_step, max_iter=30)
 
-# - Allocate Agent
-agent = Xagent(env, dynamic_model, dt=simu_step, use_dual=USE_DUAL)
+# - Allocate Agent（传入消融开关）
+agent = Xagent(env, dynamic_model, dt=simu_step,
+               use_dual=USE_DUAL,
+               use_opp_detect=USE_OPP_DETECT,
+               use_igpr_var=USE_IGPR_VAR,
+               use_bspline=USE_BSPLINE)
+print(f'[Config] dual={USE_DUAL} opp={USE_OPP_DETECT} igpr={USE_IGPR_VAR} bspline={USE_BSPLINE}')
 
 # - Spawn other vehicles
 if random_spawn:
