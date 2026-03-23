@@ -63,7 +63,12 @@ else:
     scenario = 'roundabout'
     random_spawn = 'False'
 
-if scenario not in ['roundabout', 'multilaneACC', 'crossroad', 'comprehensive', 'unsig_crossroad', 'mixed_traffic']:
+VALID_SCENARIOS = [
+    'roundabout', 'multilaneACC', 'crossroad', 'comprehensive',
+    'unsig_crossroad', 'mixed_traffic',
+    'unsig_s1', 'unsig_s2', 'unsig_s3',   # 对比实验子场景
+]
+if scenario not in VALID_SCENARIOS:
     print('Wrong scenario!')
     exit()
 if random_spawn not in ['True', 'False']:
@@ -102,6 +107,27 @@ elif scenario == 'unsig_crossroad':
     target_v = 25
     start_transform = carla.Transform(carla.Location(x=8.914989, y=-96.977425, z=0.02), carla.Rotation(pitch=0.0, yaw=-88.5864, roll=0.0))
     destination_transform = carla.Transform(carla.Location(x=-46.57, y=-139.27, z=0.00), carla.Rotation(pitch=0.0, yaw=-180.5864, roll=0.0))
+
+# =====================================================================
+# 对比实验子场景 S1/S2/S3
+# 共用与 unsig_crossroad 相同的起止点，仅对向/交叉车辆配置不同
+# AV 从 (8.91, -96.98) 向北行驶，在交叉口左转至 (-46.57, -139.27)
+# 对向车在 x≈-4, 向南行驶 (yaw≈91°)
+# =====================================================================
+elif scenario in ('unsig_s1', 'unsig_s2', 'unsig_s3'):
+    # 信号灯常绿（无信号灯约束）
+    traffic_lights = env.world.get_actors().filter('*traffic_light*')
+    for traffic_light in traffic_lights:
+        traffic_light.set_state(carla.TrafficLightState.Green)
+        traffic_light.freeze(True)
+    random_spawn = False          # 对比实验使用手动放置
+    target_v = 25
+    start_transform = carla.Transform(
+        carla.Location(x=8.914989, y=-96.977425, z=0.02),
+        carla.Rotation(pitch=0.0, yaw=-88.5864, roll=0.0))
+    destination_transform = carla.Transform(
+        carla.Location(x=-46.57, y=-139.27, z=0.00),
+        carla.Rotation(pitch=0.0, yaw=-180.5864, roll=0.0))
 elif scenario == 'mixed_traffic':
     traffic_lights = env.world.get_actors().filter('*traffic_light*')
     for traffic_light in traffic_lights:
@@ -180,6 +206,49 @@ else:
             init_state = carla.Transform(carla.Location(x=sv_init_states[i][0], y=sv_init_states[i][1], z=0.5),
                                         carla.Rotation(yaw=sv_init_states[i][2]))
             transform_list.append(init_state)
+
+    # =====================================================================
+    # S1: 稀疏对向车流 — 1 辆对向直行车（低速 ~20km/h 由 autopilot 控制）
+    # =====================================================================
+    elif scenario == 'unsig_s1':
+        sv_init_states = [
+            [-4.0, -180.0, 91.4],    # 对向车：距路口约 40m，向南行驶
+        ]
+        for s in sv_init_states:
+            transform_list.append(carla.Transform(
+                carla.Location(x=s[0], y=s[1], z=0.3),
+                carla.Rotation(yaw=s[2])))
+
+    # =====================================================================
+    # S2: 中密度对向车流 — 3 辆连续对向直行车（间距 ~15m）
+    # =====================================================================
+    elif scenario == 'unsig_s2':
+        sv_init_states = [
+            [-4.0, -180.0, 91.4],    # 第 1 辆：距路口 ~40m
+            [-4.0, -165.0, 91.4],    # 第 2 辆：距路口 ~25m
+            [-1.0, -150.0, 91.4],    # 第 3 辆：距路口 ~10m（略偏车道）
+        ]
+        for s in sv_init_states:
+            transform_list.append(carla.Transform(
+                carla.Location(x=s[0], y=s[1], z=0.3),
+                carla.Rotation(yaw=s[2])))
+
+    # =====================================================================
+    # S3: 高密度混合车流 + 双车夹击
+    #     2 辆对向直行 + 1 辆从垂直方向驶入 + 额外同向慢车
+    # =====================================================================
+    elif scenario == 'unsig_s3':
+        sv_init_states = [
+            [-4.0, -175.0, 91.4],    # 对向车 1：距路口 ~35m，向南
+            [-1.0, -160.0, 91.4],    # 对向车 2：距路口 ~20m，向南
+            [-46.0, -135.0, 0.86],   # 交叉车：从西侧驶来，向东直行 (yaw≈0°)
+            [5.0, -55.0, -88.6],     # 同向慢车：前方同车道，向北行驶
+        ]
+        for s in sv_init_states:
+            transform_list.append(carla.Transform(
+                carla.Location(x=s[0], y=s[1], z=0.3),
+                carla.Rotation(yaw=s[2])))
+
     # with open('spawnpoints_multilaneACC_2023-07-16 11:59:20.396382.txt', 'r') as csv_file:
     else:
         with open('spawnPoints/spawnpoints_{scenario}.txt'.format(scenario=scenario), 'r') as csv_file:

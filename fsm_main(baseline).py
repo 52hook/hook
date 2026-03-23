@@ -43,12 +43,19 @@ spawn_points = env.world.get_map().get_spawn_points()
 # scenarios
 if len(sys.argv) > 1:
     scenario = sys.argv[1]
+    random_spawn = sys.argv[2] if len(sys.argv) > 2 else 'True'
 else:
     scenario = 'mixed_traffic'
-    random_spawn = False
-if scenario not in ['roundabout', 'multilaneACC', 'crossroad', 'comprehensive', 'unsig_crossroad', 'mixed_traffic']:
+    random_spawn = 'False'
+VALID_SCENARIOS = [
+    'roundabout', 'multilaneACC', 'crossroad', 'comprehensive',
+    'unsig_crossroad', 'mixed_traffic',
+    'unsig_s1', 'unsig_s2', 'unsig_s3',
+]
+if scenario not in VALID_SCENARIOS:
     print('Wrong scenario!')
     exit()
+random_spawn = True if random_spawn == 'True' else False
 # scenario = 'crossroad' # 'roundabout', 'multilaneACC', 'crossroad' and 'trafficControl'
 # Roundabout
 if scenario == 'roundabout':
@@ -85,6 +92,20 @@ elif scenario == 'unsig_crossroad':
     target_v = 25
     start_transform = carla.Transform(carla.Location(x=8.914989, y=-96.977425, z=0.02), carla.Rotation(pitch=0.0, yaw=-88.5864, roll=0.0))
     destination_transform = carla.Transform(carla.Location(x=-46.57, y=-139.27, z=0.00), carla.Rotation(pitch=0.0, yaw=-180.5864, roll=0.0))
+# 对比实验子场景 S1/S2/S3
+elif scenario in ('unsig_s1', 'unsig_s2', 'unsig_s3'):
+    traffic_lights = env.world.get_actors().filter('*traffic_light*')
+    for traffic_light in traffic_lights:
+        traffic_light.set_state(carla.TrafficLightState.Green)
+        traffic_light.freeze(True)
+    random_spawn = False
+    target_v = 25
+    start_transform = carla.Transform(
+        carla.Location(x=8.914989, y=-96.977425, z=0.02),
+        carla.Rotation(pitch=0.0, yaw=-88.5864, roll=0.0))
+    destination_transform = carla.Transform(
+        carla.Location(x=-46.57, y=-139.27, z=0.00),
+        carla.Rotation(pitch=0.0, yaw=-180.5864, roll=0.0))
 elif scenario == 'comprehensive':
     start_transform = carla.Transform(carla.Location(x=-88.33, y=-70, z=0.27), carla.Rotation(pitch=0.0, yaw=90, roll=0.0))
     # start_transform = carla.Transform(carla.Location(x=-88.33, y=-109.94, z=0.27), carla.Rotation(pitch=0.0, yaw=90, roll=0.0))
@@ -148,6 +169,27 @@ else:
             init_state = carla.Transform(carla.Location(x=sv_init_states[i][0], y=sv_init_states[i][1], z=0.5),
                                         carla.Rotation(yaw=sv_init_states[i][2]))
             transform_list.append(init_state)
+
+    # S1: 1 辆对向车
+    elif scenario == 'unsig_s1':
+        for s in [[-4.0, -180.0, 91.4]]:
+            transform_list.append(carla.Transform(
+                carla.Location(x=s[0], y=s[1], z=0.3),
+                carla.Rotation(yaw=s[2])))
+    # S2: 3 辆连续对向车
+    elif scenario == 'unsig_s2':
+        for s in [[-4.0,-180.0,91.4], [-4.0,-165.0,91.4], [-1.0,-150.0,91.4]]:
+            transform_list.append(carla.Transform(
+                carla.Location(x=s[0], y=s[1], z=0.3),
+                carla.Rotation(yaw=s[2])))
+    # S3: 2 对向 + 1 交叉 + 1 同向慢车
+    elif scenario == 'unsig_s3':
+        for s in [[-4.0,-175.0,91.4], [-1.0,-160.0,91.4],
+                  [-46.0,-135.0,0.86], [5.0,-55.0,-88.6]]:
+            transform_list.append(carla.Transform(
+                carla.Location(x=s[0], y=s[1], z=0.3),
+                carla.Rotation(yaw=s[2])))
+
     # with open('spawnpoints_multilaneACC_2023-07-16 11:59:20.396382.txt', 'r') as csv_file:
     else:
         with open('spawnPoints/spawnpoints_{scenario}.txt'.format(scenario=scenario), 'r') as csv_file:
