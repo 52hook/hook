@@ -1,96 +1,99 @@
 #!/usr/bin/env bash
-# =====================================================================
-# 无信号灯交叉口对比实验 — 批量运行脚本（含消融实验）
-# 用法: bash run_experiments.sh
-# 前提: CARLA 0.9.16 服务端已启动 (端口 2001)
-#
-# 消融实验矩阵:
-#   UDMC-X       : 全部启用（默认）
-#   w/o OBCA     : 关闭多边形硬约束
-#   w/o OPP      : 关闭对向车检测
-#   w/o IGPR     : 关闭 IGPR 方差驱动
-#   w/o BSpline  : 关闭 B 样条平滑
-#   原始 UDMC    : 全部关闭
-#   FSM Baseline : BehaviorAgent
-# =====================================================================
-set -e
+# ========================================================================
+# GRIPC 完整实验自动化脚本
+# 覆盖两大实验组：
+#   A) 核心场景深入对比 + 消融（unsig_s1/s2/s3 + round_s1 + cross_s1）
+#   B) 通用性验证（原 5 场景）
+# ========================================================================
+set -euo pipefail
 
-eval "$(conda shell.bash hook)"
-conda activate first1
+CARLA_PORT=2001
+PROJECT_DIR="$HOME/phd/0.9.16udmc_carla-main myfinal"
+RESULTS_DIR="${PROJECT_DIR}/experiment_results"
+REPEATS=3    # 每个配置重复次数
 
-REPO_DIR="$HOME/phd/0.9.16udmc_carla-main myfinal"
-cd "$REPO_DIR"
+mkdir -p "${RESULTS_DIR}"
+cd "${PROJECT_DIR}"
 
-SCENARIOS=("unsig_s1" "unsig_s2" "unsig_s3")
-REPEATS=3
-
-run_udmc() {
-    # $1=方法标签 $2=USE_DUAL $3=ABLATION_OPP $4=ABLATION_IGPR $5=ABLATION_BSPLINE
-    local label="$1"; shift
-    local dual="$1"; shift
-    local opp="$1"; shift
-    local igpr="$1"; shift
-    local bspline="$1"; shift
-
-    echo ""
-    echo ">>> 运行 [$label] (dual=$dual opp=$opp igpr=$igpr bspline=$bspline)"
-
-    # 临时切换 USE_DUAL
-    if [ "$dual" = "0" ]; then
-        sed -i 's/^USE_DUAL = True/USE_DUAL = False/' udmc_main.py
-    fi
-
-    for sc in "${SCENARIOS[@]}"; do
-        for i in $(seq 1 $REPEATS); do
-            echo "  [$sc] 第 $i/$REPEATS 次 ..."
-            CARLA_PORT=2001 ABLATION_OPP=$opp ABLATION_IGPR=$igpr ABLATION_BSPLINE=$bspline \
-                timeout 120 python udmc_main.py "$sc" False 2>&1 | tail -5
-            sleep 2
-        done
-    done
-
-    # 恢复 USE_DUAL
-    if [ "$dual" = "0" ]; then
-        sed -i 's/^USE_DUAL = False/USE_DUAL = True/' udmc_main.py
-    fi
+# -----------------------------------------------------------------------
+# 日志函数
+# -----------------------------------------------------------------------
+log() {
+    echo "[$(date '+%H:%M:%S')] $*"
 }
 
-echo "============================================"
-echo " 无信号灯交叉口对比实验（含消融）"
-echo " 场景: ${SCENARIOS[*]}"
-echo " 每场景重复: $REPEATS 次"
-echo "============================================"
+run_udmc() {
+    local scenario=$1 label=$2 repeat=$3
+    local use_dual=${4:-1} abl_opp=${5:-1} abl_igpr=${6:-1} abl_bspline=${7:-1}
+    local logfile="${RESULTS_DIR}/${label}_${scenario}_r${repeat}.txt"
+    log "运行 ${label} | ${scenario} | repeat=${repeat}"
+    CARLA_PORT=${CARLA_PORT} \
+    USE_DUAL=${use_dual} \
+    ABLATION_OPP=${abl_opp} \
+    ABLATION_IGPR=${abl_igpr} \
+    ABLATION_BSPLINE=${abl_bspline} \
+    timeout 300 python udmc_main.py "${scenario}" False \
+        > "${logfile}" 2>&1 || true
+    sleep 3
+}
 
-# ---- 1) 完整 UDMC-X ----
-run_udmc "UDMC-X"        1 1 1 1
+run_fsm() {
+    local scenario=$1 repeat=$2
+    local logfile="${RESULTS_DIR}/FSM_${scenario}_r${repeat}.txt"
+    log "运行 FSM | ${scenario} | repeat=${repeat}"
+    CARLA_PORT=${CARLA_PORT} \
+    timeout 300 python "fsm_main(baseline).py" "${scenario}" False \
+        > "${logfile}" 2>&1 || true
+    sleep 3
+}
 
-# ---- 2) 消融: w/o OBCA 多边形硬约束 ----
-run_udmc "w/o OBCA"      0 1 1 1
+# ========================================================================
+# A) 核心场景：深入对比 + 消融实验
+# ========================================================================
+CORE_SCENARIOS=("unsig_s1" "unsig_s2" "unsig_s3" "round_s1" "cross_s1")
 
-# ---- 3) 消融: w/o 对向车检测 ----
-run_udmc "w/o OPP"       1 0 1 1
-
-# ---- 4) 消融: w/o IGPR 方差驱动 ----
-run_udmc "w/o IGPR"      1 1 0 1
-
-# ---- 5) 消融: w/o B 样条平滑 ----
-run_udmc "w/o BSpline"   1 1 1 0
-
-# ---- 6) 原始 UDMC（全部关闭）----
-run_udmc "UDMC-orig"     0 0 0 0
-
-# ---- 7) FSM Baseline ----
-echo ""
-echo ">>> 运行 [FSM Baseline]"
-for sc in "${SCENARIOS[@]}"; do
-    for i in $(seq 1 $REPEATS); do
-        echo "  [$sc] 第 $i/$REPEATS 次 ..."
-        CARLA_PORT=2001 timeout 120 python "fsm_main(baseline).py" "$sc" False 2>&1 | tail -5
-        sleep 2
+for r in $(seq 1 ${REPEATS}); do
+    for sc in "${CORE_SCENARIOS[@]}"; do
+        # 1) GRIPC（全部开启）
+        run_udmc "$sc" "GRIPC"      "$r"  1 1 1 1
+        # 2) APF-MPC-ellipsoid（原始 UDMC = 全部关闭）
+        run_udmc "$sc" "UDMC"    "$r"  0 0 0 0
+        # 3) FSM+PID baseline
+        run_fsm  "$sc" "$r"
     done
 done
 
-echo ""
-echo "============================================"
-echo " 所有实验完成！结果已写入 computing_time.txt"
-echo "============================================"
+# ========================================================================
+# A-2) 消融实验：仅在核心场景上
+# ========================================================================
+for r in $(seq 1 ${REPEATS}); do
+    for sc in "${CORE_SCENARIOS[@]}"; do
+        # w/o OBCA 多边形约束
+        run_udmc "$sc" "GRIPC_noOBCA"   "$r"  0 1 1 1
+        # w/o 对向车检测
+        run_udmc "$sc" "GRIPC_noOPP"    "$r"  1 0 1 1
+        # w/o IGPR 方差驱动
+        run_udmc "$sc" "GRIPC_noIGPR"   "$r"  1 1 0 1
+        # w/o B-spline 平滑
+        run_udmc "$sc" "GRIPC_noBSP"    "$r"  1 1 1 0
+    done
+done
+
+# ========================================================================
+# B) 通用性验证：原 5 场景，GRIPC vs APF-MPC vs FSM
+# ========================================================================
+GENERAL_SCENARIOS=("multilaneACC" "roundabout" "mixed_traffic")
+
+for r in $(seq 1 ${REPEATS}); do
+    for sc in "${GENERAL_SCENARIOS[@]}"; do
+        run_udmc "$sc" "GRIPC"      "$r"  1 1 1 1
+        run_udmc "$sc" "UDMC"    "$r"  0 0 0 0
+        run_fsm  "$sc" "$r"
+    done
+done
+
+log "========== 全部实验完成 =========="
+log "结果保存在: ${RESULTS_DIR}"
+log "核心场景: ${#CORE_SCENARIOS[@]} × (3 方法 + 4 消融) × ${REPEATS} 重复 = $(( ${#CORE_SCENARIOS[@]} * 7 * REPEATS )) 次"
+log "通用场景: ${#GENERAL_SCENARIOS[@]} × 3 方法 × ${REPEATS} 重复 = $(( ${#GENERAL_SCENARIOS[@]} * 3 * REPEATS )) 次"
+log "总计: $(( ${#CORE_SCENARIOS[@]} * 7 * REPEATS + ${#GENERAL_SCENARIOS[@]} * 3 * REPEATS )) 次仿真"

@@ -51,6 +51,7 @@ VALID_SCENARIOS = [
     'roundabout', 'multilaneACC', 'crossroad', 'comprehensive',
     'unsig_crossroad', 'mixed_traffic',
     'unsig_s1', 'unsig_s2', 'unsig_s3',
+    'round_s1', 'cross_s1',
 ]
 if scenario not in VALID_SCENARIOS:
     print('Wrong scenario!')
@@ -97,6 +98,30 @@ elif scenario in ('unsig_s1', 'unsig_s2', 'unsig_s3'):
     traffic_lights = env.world.get_actors().filter('*traffic_light*')
     for traffic_light in traffic_lights:
         traffic_light.set_state(carla.TrafficLightState.Green)
+        traffic_light.freeze(True)
+    random_spawn = False
+    target_v = 25
+    start_transform = carla.Transform(
+        carla.Location(x=8.914989, y=-96.977425, z=0.02),
+        carla.Rotation(pitch=0.0, yaw=-88.5864, roll=0.0))
+    destination_transform = carla.Transform(
+        carla.Location(x=-46.57, y=-139.27, z=0.00),
+        carla.Rotation(pitch=0.0, yaw=-180.5864, roll=0.0))
+# round_s1: 环岛入口紧迫场景
+elif scenario == 'round_s1':
+    random_spawn = False
+    target_v = 40
+    start_transform = carla.Transform(
+        carla.Location(x=1.69, y=70.00, z=0.1),
+        carla.Rotation(pitch=0.0, yaw=-87.98, roll=0.0))
+    destination_transform = carla.Transform(
+        carla.Location(x=-6.85, y=37.58, z=0.1),
+        carla.Rotation(pitch=0.0, yaw=90.5864, roll=0.0))
+# cross_s1: 有信号路口对向车逼近场景
+elif scenario == 'cross_s1':
+    traffic_lights = env.world.get_actors().filter('*traffic_light*')
+    for traffic_light in traffic_lights:
+        traffic_light.set_state(carla.TrafficLightState.Red)
         traffic_light.freeze(True)
     random_spawn = False
     target_v = 25
@@ -186,6 +211,18 @@ else:
     elif scenario == 'unsig_s3':
         for s in [[-4.0,-175.0,91.4], [-1.0,-160.0,91.4],
                   [-46.0,-135.0,0.86], [5.0,-55.0,-88.6]]:
+            transform_list.append(carla.Transform(
+                carla.Location(x=s[0], y=s[1], z=0.3),
+                carla.Rotation(yaw=s[2])))
+    # round_s1: 环岛内 2 车 + 汇入 1 车
+    elif scenario == 'round_s1':
+        for s in [[-15.0,55.0,-180.0], [-25.0,42.0,90.0], [10.0,45.0,-88.0]]:
+            transform_list.append(carla.Transform(
+                carla.Location(x=s[0], y=s[1], z=0.3),
+                carla.Rotation(yaw=s[2])))
+    # cross_s1: 对向 2 车 + 侧方 1 车
+    elif scenario == 'cross_s1':
+        for s in [[-4.0,-175.0,91.4], [-1.0,-160.0,91.4], [-35.0,-135.0,0.86]]:
             transform_list.append(carla.Transform(
                 carla.Location(x=s[0], y=s[1], z=0.3),
                 carla.Rotation(yaw=s[2])))
