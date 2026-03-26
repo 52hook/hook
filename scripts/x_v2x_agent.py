@@ -48,19 +48,19 @@ class RoadOption(Enum):
 class Xagent(BasicAgent):
     def __init__(self, env, model, dt=0.1,
                  use_dual=True,
-                 use_opp_detect=True,
                  use_igpr_var=True,
-                 use_bspline=True) -> None:
+                 use_bspline=True,
+                 use_qp_warmstart=True) -> None:
         """
         env   : simulation environment (provides ego_vehicle, get_obs, get_pedes)
         model : Vehicle model (vehicle_obs.Vehicle)
         dt    : controller step time
 
-        消融实验开关（全部 True = 完整 UDMC-X）:
-            use_dual       : 多边形 + 对偶硬约束 (OBCA/QP)
-            use_opp_detect : 对向直行车检测与让行
-            use_igpr_var   : IGPR 方差驱动动态 APF 权重
-            use_bspline    : B 样条全局参考线平滑
+        消融实验开关（全部 True = 完整 GRIPC）:
+            use_dual         : 多边形 + 对偶硬约束 (OBCA)
+            use_igpr_var     : IGPR 方差驱动动态 APF 权重
+            use_bspline      : B 样条全局参考线平滑
+            use_qp_warmstart : 凸 QP 预规划热启动 NMPC
         """
         self._env = env
         self._vehicle = env.ego_vehicle
@@ -102,9 +102,9 @@ class Xagent(BasicAgent):
 
         # ---- 消融实验开关 ----
         self._use_dual = use_dual
-        self._use_opp_detect = use_opp_detect
         self._use_igpr_var = use_igpr_var
         self._use_bspline = use_bspline
+        self._use_qp_warmstart = use_qp_warmstart
 
         # === B 样条全局参考线平滑器 ===
         self._bspline_smoother = BSplineGlobalSmoother(
@@ -114,7 +114,8 @@ class Xagent(BasicAgent):
             w_smooth=50.0     # 可以后面再调
         )
         # 车道半宽（右手系下，Town03 单车道大概 3.5m 左右，半宽 ~1.75m）
-        self._lane_half_width = 4.0
+        # 4.0 太宽会导致 B-spline 外凸到对向车道，收紧到 2.5m
+        self._lane_half_width = 2.5
     
  
     # ======================================================================
@@ -397,7 +398,12 @@ class Xagent(BasicAgent):
 
                 if smooth_path is not None and smooth_path.shape[0] == base_path.shape[0]:
                     # 基准路径和 B 样条做小比例插值（此时 cx0/cy0 已是 ndarray）
-                    alpha_bs = 1.0
+                    # 红灯减速时 MPC 预测窗口会延伸到转弯区，B-spline 提前弯曲导致跨线
+                    # 检测到红灯时大幅降低 B-spline 比例，用原始路径保持直行
+                    if self._last_traffic_light is not None:
+                        alpha_bs = 0.2
+                    else:
+                        alpha_bs = 0.7
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
                     cy = (1.0 - alpha_bs) * cy0 + alpha_bs * smooth_path[:, 1]
 
@@ -515,8 +521,8 @@ class Xagent(BasicAgent):
                     beta_s=250.0   # slack 惩罚
                 )
 
-                # ====== 2.5 调用凸 QP 预规划 ======
-                if use_qp_this_step and hasattr(self._model, "obca_qp_preplan"):
+                # ====== 2.5 调用凸 QP 预规划（消融开关: use_qp_warmstart）======
+                if use_qp_this_step and self._use_qp_warmstart and hasattr(self._model, "obca_qp_preplan"):
                     ok = False
                     try:
                         # ref_traj: 6×N, 取 [x,y,yaw,v]
@@ -592,12 +598,7 @@ class Xagent(BasicAgent):
 
         if obs is not None and len(obs) > 0:
             for k, ob in enumerate(obs):
-                # 如果禁用对向车检测，所有车辆统一当作“同向前车”处理
-                if not self._use_opp_detect:
-                    obs_long.append(ob)
-                    obs_long_infer.append(obs_infer[k])
-                    continue
-
+                # 对向车检测始终启用，不再受消融开关控制
                 ox, oy, oyaw = float(ob[0]), float(ob[1]), float(ob[2])
 
                 yaw_diff = oyaw - ego_yaw
@@ -610,11 +611,11 @@ class Xagent(BasicAgent):
                 rel_y = s_ego * dx + c_ego * dy   # 左侧为 +y
                 d = math.hypot(rel_x, rel_y)
 
-                # ① 对向直行车
+                # ① 对向直行车（收紧检测范围，减少误检）
                 if (abs_yaw > math.radians(140.0)
                         and rel_x > 0.0
-                        and abs(rel_y) < 4.0
-                        and d < 40.0):
+                        and abs(rel_y) < 3.5
+                        and d < 30.0):
                     obs_opp.append(ob)
                     obs_opp_infer.append(obs_infer[k])
                     if (opp_min_dist is None) or (d < opp_min_dist):
@@ -629,10 +630,10 @@ class Xagent(BasicAgent):
                     obs_long_infer.append(obs_infer[k])
 
         # 是否进入“对向直行车减速让行模式”（消融: 禁用时永远不让行）
+        # 对向让行触发距离从 18m 降到 12m，避免路口转弯时过早让行
         yield_for_opp = (
-            self._use_opp_detect
-            and (opp_min_dist is not None)
-            and (opp_min_dist < 18.0)
+            (opp_min_dist is not None)
+            and (opp_min_dist < 12.0)
             and (not is_roundabout_like)
         )
 
@@ -720,8 +721,8 @@ class Xagent(BasicAgent):
         dist_left = left_bound - ego_y_lane
         dist_right = ego_y_lane - right_bound
 
-        th_nc = 0.7
-        th_c = 1.1
+        th_nc = 1.2
+        th_c = 1.4
         close_left_nc = (dist_left < th_nc)
         close_right_nc = (dist_right < th_nc)
         close_left_c = (dist_left < th_c)
@@ -806,7 +807,8 @@ class Xagent(BasicAgent):
             obs_ratio_opp = 30
 
         if yield_for_opp:
-            obs_ratio_opp = 10
+            # 10 太低导致 MPC 对对向车约束力骤降、猛打方向；提高到 25
+            obs_ratio_opp = 25
 
         # === IGPR 方差 → 动态调整 APF 权重（消融开关: use_igpr_var）===
         # k_sigma：方差放大系数；sigma_scale_max：上限（防止对向车等高方差目标过度放大）
@@ -966,10 +968,29 @@ class Xagent(BasicAgent):
 
         cost_time = state[-1]
 
+        # 计算与最近障碍车辆的距离（用于论文几何精度分析）
+        try:
+            actors_all = self._world.get_actors()
+            nearby_vehicles = [
+                a for a in actors_all.filter('vehicle.*')
+                if a.id != self._vehicle.id
+                and veh_location.distance(a.get_location()) < 60.0
+            ]
+            if nearby_vehicles:
+                min_dist_to_obs = min(
+                    veh_location.distance(a.get_location())
+                    for a in nearby_vehicles
+                )
+            else:
+                min_dist_to_obs = 999.0
+        except Exception:
+            min_dist_to_obs = 999.0
+
         self._log_data.append([
             self._simu_time, dist_error, yaw_error, vel_error,
             acc, steer, apf_obs, apf_ttc, apf_pede,
-            apf_nc_road, apf_c_road, apf_traffic, cost_time
+            apf_nc_road, apf_c_road, apf_traffic, cost_time,
+            min_dist_to_obs
         ])
 
         return self._a_cmd, self._delta_cmd, (next_state, height + 0.05)

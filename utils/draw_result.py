@@ -1,3 +1,4 @@
+import glob
 import matplotlib
 import numpy as np
 import matplotlib.pyplot as plt
@@ -12,7 +13,17 @@ plot_mean_error = False
 colors = ['r', 'g', 'b', 'orange', 'mediumblue', 'purple', 'slateblue']
 legend_prop = {'size': 13}
 
-def plot_result(scenario='test', path=os.path.join(os.getcwd(), 'data', str(datetime.datetime.now()))):
+
+def _find_latest_log(log_dir, scenario):
+    """在 log_dir 中找最新的 {scenario}*.txt 文件"""
+    pattern = os.path.join(log_dir, f'{scenario}*.txt')
+    matches = sorted(glob.glob(pattern))
+    if not matches:
+        raise FileNotFoundError(f'找不到日志文件: {pattern}')
+    return matches[-1]  # 按时间戳排序，最后一个最新
+
+
+def plot_result(scenario='test', path=os.path.join(os.getcwd(), 'data', str(datetime.datetime.now())), log_dir='logs'):
     config = {
         "font.family":'Times New Roman',
         "font.size": 20,
@@ -20,7 +31,8 @@ def plot_result(scenario='test', path=os.path.join(os.getcwd(), 'data', str(date
         "font.serif": ['SimSun'],
     }
     plt.rcParams.update(config)
-    data = np.loadtxt(scenario+'.txt')
+    log_file = _find_latest_log(log_dir, scenario)
+    data = np.loadtxt(log_file)
     # fig1 = plt.figure(figsize=(6, 3.5))
     # ax1 = fig1.subplots()
     # ax1.grid(linestyle=":")
@@ -91,7 +103,7 @@ def plot_result(scenario='test', path=os.path.join(os.getcwd(), 'data', str(date
         ax3.set_ylabel('PF Value')
         ax3.legend(loc='upper right', ncol=5, prop = legend_prop)
 
-    elif data.shape[1] == 13:
+    elif data.shape[1] >= 13:
         fig2 = plt.figure(figsize=(8, 3))
         ax2 = fig2.subplots()
         ax2.grid(linestyle=":")

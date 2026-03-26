@@ -22,6 +22,10 @@ veh_num = 100
 
 random_spawn = True
 
+# ---- 随机种子（通用场景可复现）----
+_seed_str = os.environ.get('RANDOM_SEED', '')
+RANDOM_SEED = int(_seed_str) if _seed_str else None
+
 # logging 
 log_level = logging.DEBUG 
 logging.basicConfig(format='%(levelname)s: %(message)s', level=log_level)
@@ -174,6 +178,11 @@ agent = Xagent(env, dynamic_model, dt=simu_step)
 
 # - Spawn other vehicles
 if random_spawn:
+    # 设置随机种子（保证相同 seed 下生成相同交通流）
+    if RANDOM_SEED is not None:
+        random.seed(RANDOM_SEED)
+        np.random.seed(RANDOM_SEED)
+        print(f'[Seed] random_seed={RANDOM_SEED}')
     transform_list = spawn_vehicles_around_ego_vehicles(start_transform, gen_dis_max, gen_dis_min, spawn_points, veh_num)
     # store the transform position of other vehicles to file with scenario name and time stamp
     with open('spawnpoints_{scenario}_{time_stamp}.txt'.format(scenario=scenario, time_stamp=datetime.datetime.now()), 'w') as csv_file:

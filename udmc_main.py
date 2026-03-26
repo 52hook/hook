@@ -30,11 +30,15 @@ veh_num = 100
 
 USE_DUAL = True
 
-# ---- 消融实验开关（通过环境变量控制，默认全部启用 = 完整 UDMC-X）----
-# 设为 "0" 关闭对应改进，例: ABLATION_OPP=0 python udmc_main.py unsig_s1 False
-USE_OPP_DETECT = os.environ.get('ABLATION_OPP', '1') != '0'
-USE_IGPR_VAR   = os.environ.get('ABLATION_IGPR', '1') != '0'
-USE_BSPLINE    = os.environ.get('ABLATION_BSPLINE', '1') != '0'
+# ---- 消融实验开关（通过环境变量控制，默认全部启用 = 完整 GRIPC）----
+# 设为 "0" 关闭对应改进，例: ABLATION_QP=0 python udmc_main.py unsig_s1 False
+USE_IGPR_VAR      = os.environ.get('ABLATION_IGPR', '1') != '0'
+USE_BSPLINE       = os.environ.get('ABLATION_BSPLINE', '1') != '0'
+USE_QP_WARMSTART  = os.environ.get('ABLATION_QP', '1') != '0'
+
+# ---- 随机种子（通用场景可复现）----
+_seed_str = os.environ.get('RANDOM_SEED', '')
+RANDOM_SEED = int(_seed_str) if _seed_str else None
 
 random_spawn = False
 
@@ -214,14 +218,20 @@ dynamic_model = Vehicle(actor=env.ego_vehicle, horizon=10, target_v=target_v, de
 # - Allocate Agent（传入消融开关）
 agent = Xagent(env, dynamic_model, dt=simu_step,
                use_dual=USE_DUAL,
-               use_opp_detect=USE_OPP_DETECT,
                use_igpr_var=USE_IGPR_VAR,
-               use_bspline=USE_BSPLINE)
-print(f'[Config] dual={USE_DUAL} opp={USE_OPP_DETECT} igpr={USE_IGPR_VAR} bspline={USE_BSPLINE}')
+               use_bspline=USE_BSPLINE,
+               use_qp_warmstart=USE_QP_WARMSTART)
+print(f'[Config] dual={USE_DUAL} igpr={USE_IGPR_VAR} bspline={USE_BSPLINE} qp_ws={USE_QP_WARMSTART}')
 
 # - Spawn other vehicles
 if random_spawn:
     os.makedirs('spawnPoints', exist_ok=True)  # 确保目录存在
+
+    # 设置随机种子（保证相同 seed 下生成相同交通流）
+    if RANDOM_SEED is not None:
+        random.seed(RANDOM_SEED)
+        np.random.seed(RANDOM_SEED)
+        print(f'[Seed] random_seed={RANDOM_SEED}')
 
     transform_list = spawn_vehicles_around_ego_vehicles(
         start_transform, gen_dis_max, gen_dis_min, spawn_points, veh_num
@@ -481,7 +491,7 @@ for _ in range(10000):
 
         # record infering time, computing time and their SD to txt file (Keep the original data in the file and write it as an append)
         if True:
-            with open('computing_time.txt', 'a') as f:
+            with open(os.path.join('logs', 'computing_time.txt'), 'a') as f:
                 # record the date and time
                 f.write(f'\n{label}:Date and time: {datetime.datetime.now()}\n')
                 f.write('Scenario: '+scenario+'\n')
@@ -530,5 +540,17 @@ for _ in range(10000):
 if env.recording:
     env.client.stop_recorder()
 # - save log data
-np.savetxt(scenario+'.txt', agent._log_data)
-plot_result(scenario)
+os.makedirs('logs', exist_ok=True)
+_log_output = os.environ.get('LOG_OUTPUT', '')
+if _log_output:
+    # 正式实验: 由 run_experiments.sh 指定输出路径
+    os.makedirs(os.path.dirname(_log_output), exist_ok=True)
+    np.savetxt(_log_output, agent._log_data)
+    _log_file = _log_output
+else:
+    # 调试运行: 带时间戳，不覆盖
+    _ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    _log_file = os.path.join('logs', f'{scenario}_{_ts}.txt')
+    np.savetxt(_log_file, agent._log_data)
+print(f'日志已保存: {_log_file}')
+plot_result(scenario, log_dir=os.path.dirname(_log_file))
