@@ -805,8 +805,8 @@ class Xagent(BasicAgent):
                                                    red_time_ratio=red_time_ratio)
             # 红灯时根据到停车线距离逐渐降低参考速度，在停车线前平滑减速到 0
             ego_tl_dist = self._vehicle.get_location().distance(tl_waypoint.transform.location)
-            v_max = self._model.target_v / 3.6  # km/h → m/s
-            # 距停车线越近参考速度越低，线性衰减
+            v_max = self._model.target_v  # 与 ref_traj 同单位 (km/h)
+            # 距停车线越近参考速度越低，线性衰减：15m 时 v_max，2m 时 0
             v_ref = max(v_max * (ego_tl_dist - 2.0) / 13.0, 0.0)
             v_ref = min(v_ref, v_max)
             ref_traj[3, :] = v_ref
