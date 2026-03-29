@@ -803,8 +803,6 @@ class Xagent(BasicAgent):
                                                           red_time_ratio=red_time_ratio)
             apf_traffic += self._model.traffic_pf(ref_traj, wp_y, wp_yaw, tl_x,
                                                    red_time_ratio=red_time_ratio)
-            # 红灯时将参考速度设为 0，让 MPC 主动减速停车
-            ref_traj[3, :] = 0.0
 
         # ----- APF 障碍 / 行人 / TTC -----
         obs_ratio_front = 150
