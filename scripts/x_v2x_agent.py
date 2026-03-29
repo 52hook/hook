@@ -809,6 +809,8 @@ class Xagent(BasicAgent):
             v_ref = max(v_max * (ego_tl_dist - 2.0) / 13.0, 0.0)
             v_ref = min(v_ref, v_max)
             ref_traj[3, :] = v_ref
+            # 红灯减速时保持当前航向直行，不让 MPC 提前跟踪转弯路径
+            ref_traj[2, :] = current_state[2]
 
         # ----- APF 障碍 / 行人 / TTC -----
         obs_ratio_front = 150
