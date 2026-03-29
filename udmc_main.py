@@ -98,13 +98,10 @@ elif scenario == 'multilaneACC':
     start_transform = carla.Transform(carla.Location(x=48.46, y=7.32, z=0.1), carla.Rotation(pitch=0.0, yaw=0.025, roll=0.0))
     destination_transform = carla.Transform(carla.Location(x=225.20, y=9.39, z=0.1), carla.Rotation(pitch=0.0, yaw=0.53, roll=0.0))
 elif scenario == 'crossroad':
-    # 信号灯正常循环：红灯停车→绿灯起步
     traffic_lights = env.world.get_actors().filter('*traffic_light*')
     for traffic_light in traffic_lights:
-        traffic_light.set_red_time(8.0)
-        traffic_light.set_green_time(12.0)
-        traffic_light.set_yellow_time(3.0)
-        traffic_light.freeze(False)
+        traffic_light.set_state(carla.TrafficLightState.Red)
+        traffic_light.freeze(True)
     gen_dis_min = 5
     gen_dis_max = 150
     veh_num = 100
