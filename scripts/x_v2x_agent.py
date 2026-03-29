@@ -398,10 +398,10 @@ class Xagent(BasicAgent):
 
                 if smooth_path is not None and smooth_path.shape[0] == base_path.shape[0]:
                     # 基准路径和 B 样条做小比例插值（此时 cx0/cy0 已是 ndarray）
-                    # 红灯减速时 MPC 预测窗口会延伸到转弯区，B-spline 提前弯曲导致跨线
-                    # 检测到红灯时大幅降低 B-spline 比例，用原始路径保持直行
+                    # 红灯减速时 MPC 预测窗口延伸到转弯区，B-spline 提前弯曲导致跨线
+                    # 检测到红灯时完全禁用 B-spline，用原始路径保持直行
                     if self._last_traffic_light is not None:
-                        alpha_bs = 0.2
+                        alpha_bs = 0.0
                     else:
                         alpha_bs = 0.7
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
@@ -721,8 +721,8 @@ class Xagent(BasicAgent):
         dist_left = left_bound - ego_y_lane
         dist_right = ego_y_lane - right_bound
 
-        th_nc = 1.2
-        th_c = 1.4
+        th_nc = 0.7
+        th_c = 1.1
         close_left_nc = (dist_left < th_nc)
         close_right_nc = (dist_right < th_nc)
         close_left_c = (dist_left < th_c)

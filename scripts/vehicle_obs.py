@@ -66,8 +66,8 @@ class RuleWeights:
     soft_ttc: float = 1.0
 
     # 车道线规则
-    crossable_lane: float = 8.0
-    noncrossable_lane: float = 80.0
+    crossable_lane: float = 5.0
+    noncrossable_lane: float = 35.0
 
     # 红绿灯 / 停止线区域势场
     traffic_longitudinal: float = 200.0
