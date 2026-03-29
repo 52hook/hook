@@ -236,6 +236,13 @@ if random_spawn:
         start_transform, gen_dis_max, gen_dis_min, spawn_points, veh_num
     )
 
+    # crossroad 场景：确保前方同车道有一辆车（红灯时停下作为 lead vehicle）
+    if scenario == 'crossroad':
+        transform_list.insert(0, carla.Transform(
+            carla.Location(x=5.8, y=-113.2, z=0.02),
+            carla.Rotation(pitch=0.0, yaw=-88.59, roll=0.0)
+        ))
+
     file_name = 'spawnPoints/spawnpoints_{scenario}_{ts}.txt'.format(
         scenario=scenario,
         ts=datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
