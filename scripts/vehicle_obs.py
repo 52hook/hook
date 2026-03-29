@@ -691,11 +691,10 @@ class Vehicle:
             dist_l = 1.5 - (selfc[1] - lane_center_y)
             dist_r = (selfc[1] - lane_center_y) + 1.5
 
-            self.obj += red_time_ratio * (
-                self.w_tr_long * (1 / (dist))
-                + self.w_tr_lat * (1 / (dist_l)) ** 2
-                + self.w_tr_lat * (1 / (dist_r)) ** 2
-            )
+            # red_time_ratio 只衰减纵向停车约束，横向居中约束保持不变
+            self.obj += red_time_ratio * self.w_tr_long * (1 / (dist)) \
+                        + self.w_tr_lat * (1 / (dist_l)) ** 2 \
+                        + self.w_tr_lat * (1 / (dist_r)) ** 2
 
     def traffic_pf(self, ref_traj, lane_center_y, yaw, tl_x, red_time_ratio=1.0):
         selfc = [np.cos(-yaw) * ref_traj[0, 0] - np.sin(-yaw) * ref_traj[1, 0],
