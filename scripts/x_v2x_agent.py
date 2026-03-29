@@ -814,17 +814,20 @@ class Xagent(BasicAgent):
             apf_traffic += self._model.traffic_pf(ref_traj, wp_y, wp_yaw, tl_x,
                                                    red_time_ratio=red_time_ratio)
 
-            # 红灯时参考轨迹：沿当前航向直行到路口停车线前 2m 处停车
+            # 红灯时参考轨迹：从车道中心沿航向直行到路口停车线前 2m 处停车
             ego_yaw = current_state[2]
             stop_loc = _stop_wp.transform.location
             ego_stop_dist = self._vehicle.get_location().distance(stop_loc)
             target_stop = max(ego_stop_dist - 2.0, 0.0)
             v_max = self._model.target_v
             N = ref_traj.shape[1]
+            # 从参考路径起点（车道中心）开始投影，不从自车位置（有偏移）
+            center_x = ref_traj[0, 0]
+            center_y = ref_traj[1, 0]
             for i in range(N):
                 ds = target_stop * (i / max(N - 1, 1))
-                ref_traj[0, i] = current_state[0] + ds * math.cos(ego_yaw)
-                ref_traj[1, i] = current_state[1] + ds * math.sin(ego_yaw)
+                ref_traj[0, i] = center_x + ds * math.cos(ego_yaw)
+                ref_traj[1, i] = center_y + ds * math.sin(ego_yaw)
                 ref_traj[2, i] = ego_yaw
             # 速度：远处保持全速，接近停车线时减到 0
             if ego_stop_dist > 5.0:
