@@ -28,10 +28,9 @@ gen_dis_min = 5
 target_v = 35
 veh_num = 100
 
-USE_DUAL = True
-
 # ---- 消融实验开关（通过环境变量控制，默认全部启用 = 完整 GRIPC）----
 # 设为 "0" 关闭对应改进，例: ABLATION_QP=0 python udmc_main.py unsig_s1 False
+USE_DUAL          = os.environ.get('USE_DUAL', '1') != '0'
 USE_IGPR_VAR      = os.environ.get('ABLATION_IGPR', '1') != '0'
 USE_BSPLINE       = os.environ.get('ABLATION_BSPLINE', '1') != '0'
 USE_QP_WARMSTART  = os.environ.get('ABLATION_QP', '1') != '0'
