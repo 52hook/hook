@@ -796,27 +796,39 @@ class Xagent(BasicAgent):
         # ----- 红灯约束 -----
         tl_bool, tl_waypoint, red_time_ratio = self.check_traffic_light()
         if tl_bool:
-            tl_x = (np.cos(-wp_yaw) * tl_waypoint.transform.location.x -
-                    np.sin(-wp_yaw) * -tl_waypoint.transform.location.y)
+            # 从触发点沿路向前找到路口入口（真正的停车线）
+            _stop_wp = tl_waypoint
+            for _ in range(60):  # 最多找 60 个 waypoint（约 30m）
+                _nxt = _stop_wp.next(0.5)
+                if not _nxt:
+                    break
+                _stop_wp = _nxt[0]
+                if _stop_wp.is_junction:
+                    break
+
+            # APF 用实际停车线位置
+            tl_x = (np.cos(-wp_yaw) * _stop_wp.transform.location.x -
+                    np.sin(-wp_yaw) * -_stop_wp.transform.location.y)
             self._model.solver_add_single_tr_lgt_pf_carla(wp_y, wp_yaw, tl_x,
                                                           red_time_ratio=red_time_ratio)
             apf_traffic += self._model.traffic_pf(ref_traj, wp_y, wp_yaw, tl_x,
                                                    red_time_ratio=red_time_ratio)
-            # 红灯时完全替换参考轨迹：沿当前航向直行到停车线前 2m 处停车
+
+            # 红灯时参考轨迹：沿当前航向直行到路口停车线前 2m 处停车
             ego_yaw = current_state[2]
-            ego_tl_dist = self._vehicle.get_location().distance(tl_waypoint.transform.location)
-            stop_dist = max(ego_tl_dist - 2.0, 0.0)  # 在停车线前 2m 停
+            stop_loc = _stop_wp.transform.location
+            ego_stop_dist = self._vehicle.get_location().distance(stop_loc)
+            target_stop = max(ego_stop_dist - 2.0, 0.0)
             v_max = self._model.target_v
             N = ref_traj.shape[1]
             for i in range(N):
-                # 位置：沿当前航向均匀分布到停车点
-                ds = stop_dist * (i / max(N - 1, 1))
+                ds = target_stop * (i / max(N - 1, 1))
                 ref_traj[0, i] = current_state[0] + ds * math.cos(ego_yaw)
                 ref_traj[1, i] = current_state[1] + ds * math.sin(ego_yaw)
                 ref_traj[2, i] = ego_yaw
-            # 速度：线性衰减到 0
-            if ego_tl_dist > 3.0:
-                ref_traj[3, :] = v_max * min((ego_tl_dist - 2.0) / 13.0, 1.0)
+            # 速度：远处保持全速，接近停车线时减到 0
+            if ego_stop_dist > 5.0:
+                ref_traj[3, :] = v_max * min((ego_stop_dist - 2.0) / 15.0, 1.0)
             else:
                 ref_traj[3, :] = 0.0
 
