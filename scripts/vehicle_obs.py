@@ -71,7 +71,7 @@ class RuleWeights:
 
     # 红绿灯 / 停止线区域势场
     traffic_longitudinal: float = 200.0
-    traffic_lateral: float = 1000.0
+    traffic_lateral: float = 200.0
 
     # 压实线的硬惩罚
     nc_line_over_penalty: float = 1500.0
