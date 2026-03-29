@@ -398,7 +398,7 @@ for _ in range(10000):
         cnt +=1
         if scenario == 'crossroad':
             print('cnt: ', cnt)
-            if cnt > 200 and change_flag:
+            if cnt > 90 and change_flag:
                 print('change traffic light')
                 distances = [np.sqrt((tl.get_location().x - agent._vehicle.get_location().x)**2 + (tl.get_location().y - agent._vehicle.get_location().y)**2) for tl in traffic_lights]
                 sorted_indices = np.argsort(distances)

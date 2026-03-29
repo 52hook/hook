@@ -111,10 +111,11 @@ class Xagent(BasicAgent):
             degree=3,
             n_ctrl=None,      # 让它根据路径长度自适应控制点个数
             w_fit=1.0,
-            w_smooth=5.0      # 降低平滑权重，避免参考线偏离车道中心
+            w_smooth=50.0     # 可以后面再调
         )
-        # 车道半宽（Town03 单车道约 3.5m，半宽 ~1.75m）
-        self._lane_half_width = 1.75
+        # 车道半宽（右手系下，Town03 单车道大概 3.5m 左右，半宽 ~1.75m）
+        # 4.0 太宽会导致 B-spline 外凸到对向车道，收紧到 2.5m
+        self._lane_half_width = 2.5
     
  
     # ======================================================================
@@ -796,44 +797,12 @@ class Xagent(BasicAgent):
         # ----- 红灯约束 -----
         tl_bool, tl_waypoint, red_time_ratio = self.check_traffic_light()
         if tl_bool:
-            # 从触发点沿路向前找到路口入口（真正的停车线）
-            _stop_wp = tl_waypoint
-            for _ in range(60):  # 最多找 60 个 waypoint（约 30m）
-                _nxt = _stop_wp.next(0.5)
-                if not _nxt:
-                    break
-                _stop_wp = _nxt[0]
-                if _stop_wp.is_junction:
-                    break
-
-            # APF 用实际停车线位置
-            tl_x = (np.cos(-wp_yaw) * _stop_wp.transform.location.x -
-                    np.sin(-wp_yaw) * -_stop_wp.transform.location.y)
+            tl_x = (np.cos(-wp_yaw) * tl_waypoint.transform.location.x -
+                    np.sin(-wp_yaw) * -tl_waypoint.transform.location.y)
             self._model.solver_add_single_tr_lgt_pf_carla(wp_y, wp_yaw, tl_x,
                                                           red_time_ratio=red_time_ratio)
             apf_traffic += self._model.traffic_pf(ref_traj, wp_y, wp_yaw, tl_x,
                                                    red_time_ratio=red_time_ratio)
-
-            # 红灯时参考轨迹：从车道中心沿航向直行到路口停车线前 2m 处停车
-            ego_yaw = current_state[2]
-            stop_loc = _stop_wp.transform.location
-            ego_stop_dist = self._vehicle.get_location().distance(stop_loc)
-            target_stop = max(ego_stop_dist - 2.0, 0.0)
-            v_max = self._model.target_v
-            N = ref_traj.shape[1]
-            # 从参考路径起点（车道中心）开始投影，不从自车位置（有偏移）
-            center_x = ref_traj[0, 0]
-            center_y = ref_traj[1, 0]
-            for i in range(N):
-                ds = target_stop * (i / max(N - 1, 1))
-                ref_traj[0, i] = center_x + ds * math.cos(ego_yaw)
-                ref_traj[1, i] = center_y + ds * math.sin(ego_yaw)
-                ref_traj[2, i] = ego_yaw
-            # 速度：远处保持全速，接近停车线时减到 0
-            if ego_stop_dist > 5.0:
-                ref_traj[3, :] = v_max * min((ego_stop_dist - 2.0) / 15.0, 1.0)
-            else:
-                ref_traj[3, :] = 0.0
 
         # ----- APF 障碍 / 行人 / TTC -----
         obs_ratio_front = 150
