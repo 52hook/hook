@@ -211,19 +211,28 @@ else:
 # 将出生点投影到同向车道中心，消除横向偏移
 _wp = env.map.get_waypoint(start_transform.location, project_to_road=True)
 if _wp:
-    # 检查方向是否一致（防止投影到对向车道）
     _intended_yaw = start_transform.rotation.yaw
     _wp_yaw = _wp.transform.rotation.yaw
     _yaw_diff = abs((_intended_yaw - _wp_yaw + 180) % 360 - 180)
+    # 方向不一致：尝试左右车道找同向
     if _yaw_diff > 90:
-        # 方向反了，取右侧车道
-        _right = _wp.get_right_lane()
-        if _right:
-            _wp = _right
-    start_transform.location.x = _wp.transform.location.x
-    start_transform.location.y = _wp.transform.location.y
-    start_transform.location.z = max(start_transform.location.z, 0.02)
-    print(f'[Spawn] 投影到车道中心: x={start_transform.location.x:.2f} y={start_transform.location.y:.2f}')
+        for _cand in [_wp.get_right_lane(), _wp.get_left_lane()]:
+            if _cand:
+                _c_yaw = _cand.transform.rotation.yaw
+                if abs((_intended_yaw - _c_yaw + 180) % 360 - 180) < 90:
+                    _wp = _cand
+                    break
+        else:
+            _wp = None
+    if _wp:
+        # 必须创建新 Transform，就地修改 CARLA 对象可能无效
+        start_transform = carla.Transform(
+            carla.Location(x=_wp.transform.location.x,
+                           y=_wp.transform.location.y,
+                           z=max(start_transform.location.z, 0.02)),
+            start_transform.rotation
+        )
+        print(f'[Spawn] 投影到车道中心: x={start_transform.location.x:.2f} y={start_transform.location.y:.2f}')
 
 # - Reset environment and the ego vehicle's position
 env.reset(start_transform)
