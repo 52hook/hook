@@ -577,7 +577,11 @@ class Xagent(BasicAgent):
         else:
             is_roundabout_like = False
 
-        # 先做“本车道 / 前方”过滤
+        # 判断自车是否在路口内（用于对向车检测）
+        ego_wp = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True)
+        in_junction = ego_wp.is_junction if ego_wp else False
+
+        # 先做”本车道 / 前方”过滤
         obs, heights, obs_infer = self._filter_front_same_lane_obs(
             current_state, obs, heights, obs_infer,
             max_lat_dist=max_lat,
@@ -611,17 +615,21 @@ class Xagent(BasicAgent):
                 rel_y = s_ego * dx + c_ego * dy   # 左侧为 +y
                 d = math.hypot(rel_x, rel_y)
 
-                # ① 对向直行车（收紧检测范围，减少误检）
-                if (abs_yaw > math.radians(140.0)
-                        and rel_x > 0.0
-                        and abs(rel_y) < 3.5
-                        and d < 30.0):
-                    obs_opp.append(ob)
-                    obs_opp_infer.append(obs_infer[k])
-                    if (opp_min_dist is None) or (d < opp_min_dist):
-                        opp_min_dist = d
+                # ① 对向直行车检测
+                is_opposite = abs_yaw > math.radians(140.0)
+
+                if is_opposite:
+                    if (in_junction or is_roundabout_like) and rel_x > 0.0 and abs(rel_y) < 3.5 and d < 30.0:
+                        # 路口内/弯道：纳入对向车障碍列表，触发让行
+                        obs_opp.append(ob)
+                        obs_opp_infer.append(obs_infer[k])
+                        if (opp_min_dist is None) or (d < opp_min_dist):
+                            opp_min_dist = d
+                    # 非路口直道上的对向车：直接跳过，不加入任何障碍列表
+                    continue
+
                 # ② 交叉 / 汇入交通：50°~130°
-                elif math.radians(50.0) <= abs_yaw <= math.radians(130.0):
+                if math.radians(50.0) <= abs_yaw <= math.radians(130.0):
                     obs_cross.append(ob)
                     obs_cross_infer.append(obs_infer[k])
                 # ③ 同向前车 / 慢车
