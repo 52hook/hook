@@ -691,10 +691,8 @@ class Vehicle:
             dist_l = 1.5 - (selfc[1] - lane_center_y)
             dist_r = (selfc[1] - lane_center_y) + 1.5
 
-            # 红灯 APF：与原版一致（纵向 200 + 横向 1000），不乘 red_time_ratio
-            self.obj += self.w_tr_long * (1 / (dist)) \
-                        + self.w_tr_lat * (1 / (dist_l)) ** 2 \
-                        + self.w_tr_lat * (1 / (dist_r)) ** 2
+            # 红灯 APF：仅纵向（横向分量因 B-spline 偏移导致振荡，由车道线 APF 负责居中）
+            self.obj += self.w_tr_long * (1 / (dist))
 
     def traffic_pf(self, ref_traj, lane_center_y, yaw, tl_x, red_time_ratio=1.0):
         selfc = [np.cos(-yaw) * ref_traj[0, 0] - np.sin(-yaw) * ref_traj[1, 0],
