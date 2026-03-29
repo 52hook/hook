@@ -7,7 +7,7 @@
 #   B) 消融实验: 4 场景 × 4 消融 × 40 轮 = 640 次
 #   总计: 1120 次仿真
 #
-# 场景: unsig_crossroad / crossroad / roundabout / multilaneACC
+# 场景: unsig_crossroad / roundabout / multilaneACC / mixed_traffic
 # 全部随机交通流 (100 辆车) + 固定 seed 保证可复现
 # ========================================================================
 set -euo pipefail
@@ -60,7 +60,7 @@ run_fsm() {
 # ========================================================================
 # 场景定义（4 个随机交通场景，与 UDMC 一致）
 # ========================================================================
-SCENARIOS=("unsig_crossroad" "crossroad" "roundabout" "multilaneACC")
+SCENARIOS=("unsig_crossroad" "roundabout" "multilaneACC" "mixed_traffic")
 
 # ========================================================================
 # A) 对比实验: GRIPC vs UDMC vs FSM
