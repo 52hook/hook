@@ -802,15 +802,23 @@ class Xagent(BasicAgent):
                                                           red_time_ratio=red_time_ratio)
             apf_traffic += self._model.traffic_pf(ref_traj, wp_y, wp_yaw, tl_x,
                                                    red_time_ratio=red_time_ratio)
-            # 红灯时根据到停车线距离逐渐降低参考速度，在停车线前平滑减速到 0
+            # 红灯时完全替换参考轨迹：沿当前航向直行到停车线前 2m 处停车
+            ego_yaw = current_state[2]
             ego_tl_dist = self._vehicle.get_location().distance(tl_waypoint.transform.location)
-            v_max = self._model.target_v  # 与 ref_traj 同单位 (km/h)
-            # 距停车线越近参考速度越低，线性衰减：15m 时 v_max，2m 时 0
-            v_ref = max(v_max * (ego_tl_dist - 2.0) / 13.0, 0.0)
-            v_ref = min(v_ref, v_max)
-            ref_traj[3, :] = v_ref
-            # 红灯减速时保持当前航向直行，不让 MPC 提前跟踪转弯路径
-            ref_traj[2, :] = current_state[2]
+            stop_dist = max(ego_tl_dist - 2.0, 0.0)  # 在停车线前 2m 停
+            v_max = self._model.target_v
+            N = ref_traj.shape[1]
+            for i in range(N):
+                # 位置：沿当前航向均匀分布到停车点
+                ds = stop_dist * (i / max(N - 1, 1))
+                ref_traj[0, i] = current_state[0] + ds * math.cos(ego_yaw)
+                ref_traj[1, i] = current_state[1] + ds * math.sin(ego_yaw)
+                ref_traj[2, i] = ego_yaw
+            # 速度：线性衰减到 0
+            if ego_tl_dist > 3.0:
+                ref_traj[3, :] = v_max * min((ego_tl_dist - 2.0) / 13.0, 1.0)
+            else:
+                ref_traj[3, :] = 0.0
 
         # ----- APF 障碍 / 行人 / TTC -----
         obs_ratio_front = 150
