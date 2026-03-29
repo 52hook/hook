@@ -70,7 +70,7 @@ class RuleWeights:
     noncrossable_lane: float = 35.0
 
     # 红绿灯 / 停止线区域势场
-    traffic_longitudinal: float = 200.0
+    traffic_longitudinal: float = 800.0
     traffic_lateral: float = 1000.0
 
     # 压实线的硬惩罚
@@ -691,8 +691,8 @@ class Vehicle:
             dist_l = 1.5 - (selfc[1] - lane_center_y)
             dist_r = (selfc[1] - lane_center_y) + 1.5
 
-            # 红灯 APF：只保留纵向停车约束，移除横向分量（横向居中由车道线 APF 负责）
-            self.obj += red_time_ratio * self.w_tr_long * (1 / (dist))
+            # 红灯 APF：纯纵向停车约束，不乘 red_time_ratio（变绿后 APF 自动消失）
+            self.obj += self.w_tr_long * (1 / (dist))
 
     def traffic_pf(self, ref_traj, lane_center_y, yaw, tl_x, red_time_ratio=1.0):
         selfc = [np.cos(-yaw) * ref_traj[0, 0] - np.sin(-yaw) * ref_traj[1, 0],
