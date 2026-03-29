@@ -208,6 +208,13 @@ else:
     start_transform = random.choice(spawn_points)
     destination_transform = generate_destination(start_transform)
 
+# 将出生点投影到最近车道中心，消除横向偏移
+_wp = env.map.get_waypoint(start_transform.location, project_to_road=True)
+if _wp:
+    start_transform = _wp.transform
+    start_transform.location.z = max(start_transform.location.z, 0.02)
+    print(f'[Spawn] 投影到车道中心: x={start_transform.location.x:.2f} y={start_transform.location.y:.2f}')
+
 # - Reset environment and the ego vehicle's position
 env.reset(start_transform)
 
