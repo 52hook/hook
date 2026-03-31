@@ -1,244 +1,90 @@
-每次都叫我帅哥
+每次都叫我 SCI大王
 
-## 项目概述
+## 0. 硬约束
 
-**GRIPC**（Geometry-Rule Integrated Planning and Control）— 面向城市自动驾驶的几何-规则集成规划与控制框架。基于 CARLA 0.9.16 仿真环境，在 UDMC 框架基础上进行四项核心改进。
+- **修改前必须先备份到 GitHub（强制，无例外）**：每次修改代码或论文文件前，必须先 `git add` + `git commit` + `git push`，确保用户可随时回退；严禁在未 push 的情况下开始任何文件修改；若无未提交更改则跳过。
+- **严禁凭记忆生成 BibTeX**——未经联网核实的引用一律标 `[CITATION NEEDED]`。
+- **专业问题必须验证**：回答学术规范、技术细节、算法原理等专业问题前，必须通过联网搜索或本地文件验证，禁止凭 AI 记忆直接作答，不确定的内容标注不确定。
+- **改文件前先出计划**：输出 3–7 步计划 + 文件清单 + 风险 + 验证方式，等用户说"开始"后再动手。
+- **复杂任务默认多 Agent 并行**：涉及多文件修改、跨模块调研、论文+代码联动等复杂任务时，默认启用多 Agent 并发执行，简单单文件任务无需启用。
+- **`CLAUDE.md` 为唯一项目规则文件**，不在其他地方重复定义项目规则。
 
-### 原始 UDMC 参考资料
+## 1. 语言与风格
 
-- **原版代码**：`udmc_carla-main/`（本仓库子目录）
-- **对应论文**：`UDMC_Unified_Decision-Making_and_Control_Framework_for_Urban_Autonomous_Driving_With_Motion_Prediction_of_Traffic_Participants.pdf`
+- 思考语言用专业流英语，交互语言用中文，代码注释用中文 + ASCII 风格分块注释，使代码看起来像高度优化的顶级开源库作品。
+- 核心信念：代码是写给人看的，只是顺便让机器运行。
+- 文档标题与说明全中文，变量名/函数名/文件名保留英文。
+- Git Commit 格式 `类型: 描述`，描述 ≤ 15 字全中文，类型：`新增`/`修复`/`优化`/`重构`/`移除`。
 
-### GRIPC 四大核心改进（相对于原始 UDMC）
+## 2. 项目概述
 
-1. **OBCA 多边形硬约束** — 替代椭圆近似，消除几何保守性（`utils/geometry_poly.py`）
-2. **对向车检测与让行** — 解决原论文路口左转对向车失败（硬编码于 `scripts/x_v2x_agent.py:581-631`，无消融开关）
-3. **IGPR 方差驱动 APF 权重** — 预测不确定性高时自动增大安全裕度（`IGPR_predict_sv_wps.py` + `scripts/x_v2x_agent.py:807-839`）
-4. **B-spline 全局参考线平滑** — QP 约束优化，C² 连续性（`utils/global_bspline_smoother.py`）
+**GRIPC**（Geometry-Rule Integrated Planning and Control）— 面向城市自动驾驶的几何-规则集成规划与控制框架，基于 CARLA 0.9.16，在 UDMC 基础上做四项改进。
+
+原版代码在 `udmc_carla-main/`，对应论文为 `UDMC_Unified_Decision-Making_and_Control_Framework_for_Urban_Autonomous_Driving_With_Motion_Prediction_of_Traffic_Participants.pdf`（根目录）。
+
+### 四大改进
+
+1. **OBCA 多边形硬约束** — 替代椭圆近似（`utils/geometry_poly.py`）
+2. **对向车检测与让行** — 硬编码于 `scripts/x_v2x_agent.py:581-631`，无消融开关
+3. **IGPR 方差驱动 APF 权重** — 预测不确定性高时增大安全裕度（`IGPR_predict_sv_wps.py` + `scripts/x_v2x_agent.py:807-839`）
+4. **B-spline 全局参考线平滑** — QP 约束优化，C² 连续（`utils/global_bspline_smoother.py`）
 
 ### 消融开关
 
-| 环境变量             | 默认  | 含义                       | 代码位置            |
-| -------------------- | ----- | -------------------------- | ------------------- |
-| `USE_DUAL`         | `1` | OBCA 多边形对偶约束        | `udmc_main.py:31` |
-| `ABLATION_IGPR`    | `1` | IGPR 方差驱动 APF 权重     | `udmc_main.py:33` |
-| `ABLATION_BSPLINE` | `1` | B-spline 平滑              | `udmc_main.py:35` |
-| `ABLATION_QP`      | `1` | QP 凸预规划热启动          | `udmc_main.py:37` |
-| `RANDOM_SEED`      | 无    | 随机交通生成种子（可复现） | `udmc_main.py:40` |
+`USE_DUAL`=1（OBCA）、`ABLATION_IGPR`=1（IGPR）、`ABLATION_BSPLINE`=1（B-spline）、`ABLATION_QP`=1（QP 热启动），均在 `udmc_main.py:31-37`；`RANDOM_SEED` 控制随机交通种子（`udmc_main.py:40`）。
 
-> **注意**：对向车检测与让行（改进 2）为硬编码逻辑，无消融开关。
+## 3. CARLA 环境
 
-## 可用 Skills
+本仓库固定 CARLA 0.9.16，Python 环境 `conda activate first1`，CARLA 目录 `~/CARLA_0.9.16`，默认端口 2001。修改 `scripts/` 前提醒用户确认 CARLA 已启动。
 
-### 项目 Skills
+**注意**：`requirements.txt` 中写的是 `carla==0.9.14`，这是历史遗留，实际运行环境为 0.9.16，不要降级。
 
-| Skill          | 路径                                        | 用途                               |
-| -------------- | ------------------------------------------- | ---------------------------------- |
-| CARLA 服务管理 | `.agents/skills/carla_server/SKILL.md`    | 启动、检查、重启 CARLA 仿真服务    |
-| 实验执行       | `.agents/skills/run_experiments/SKILL.md` | 运行对比/消融实验的完整流程        |
-| 代码导航       | `.agents/skills/code_navigation/SKILL.md` | 核心文件地图、高风险文件、调试技巧 |
+## 4. 实验设计
 
-### 论文写作 Skills
+四个场景：`unsig_crossroad`（无信号路口左转）、`roundabout`（环岛汇入）、`multilaneACC`（多车道巡航）、`mixed_traffic`（车辆+行人混合），均 100 辆随机车。
 
-| Skill          | 路径                                                     | 用途                              |
-| -------------- | -------------------------------------------------------- | --------------------------------- |
-| 科学写作       | `.agents/skills/scientific-writing/SKILL.md`           | IMRAD 结构、两阶段写作法          |
-| 写作 Prompt 集 | `.agents/skills/awesome-writing-prompts/SKILL.md`      | 中转英、润色、去 AI 味实战 prompt |
-| 引用管理       | `.agents/skills/citation-management/SKILL.md`          | 搜索文献、生成 BibTeX、验证引用   |
-| 文献综述       | `.agents/skills/literature-review/SKILL.md`            | 系统化文献搜索、主题综述撰写      |
-| 科学批判思维   | `.agents/skills/scientific-critical-thinking/SKILL.md` | 评估实验设计、证据质量分析        |
-| 同行评审       | `.agents/skills/peer-review/SKILL.md`                  | 模拟审稿人视角审查                |
-| 学术评估       | `.agents/skills/scholar-evaluation/SKILL.md`           | ScholarEval 量化评分框架          |
-| Matplotlib     | `.agents/skills/matplotlib/SKILL.md`                   | 底层绑图，完全自定义              |
-| 科学可视化     | `.agents/skills/scientific-visualization/SKILL.md`     | 出版级图表、色盲友好配色          |
-| 统计分析       | `.agents/skills/statistical-analysis/SKILL.md`         | 选择统计方法、APA 格式报告        |
-| 期刊模板       | `.agents/skills/venue-templates/SKILL.md`              | Elsevier 等期刊格式规范           |
-| ML 论文写作    | `.agents/skills/ml-paper-writing/SKILL.md`             | ML/AI 论文全流程                  |
+三个方法：GRIPC（四开关全开）、UDMC（四开关全关）、FSM（`fsm_main(baseline).py`）。
 
-### Skills 调用策略
+实验矩阵：对比实验 4×3×40=480 次 + 消融实验 4×4×40=640 次 = 总计 1120 次（`run_experiments.sh`）。
 
-根据修改任务类型，自动选择合适的 skill 辅助：
+调试用场景（不纳入正式实验）：`unsig_s1`/`unsig_s2`/`unsig_s3`/`round_s1`/`cross_s1`/`crossroad`。
 
-| 任务类型           | 推荐 Skill                                    | 说明                                       |
-| ------------------ | --------------------------------------------- | ------------------------------------------ |
-| 撰写/重写英文段落  | `scientific-writing`                        | IMRAD 结构、学术写作原则、两阶段写作法     |
-| 中文想法→英文段落 | `awesome-writing-prompts`                   | 中转英、润色、去 AI 味等实战 prompt        |
-| 润色已有英文段落   | `awesome-writing-prompts`                   | 表达润色、缩写/扩写、逻辑检查 prompt       |
-| 添加/验证引用      | `citation-management`                       | 搜索文献、生成 BibTeX、验证引用准确性      |
-| 补充文献综述       | `literature-review`                         | 系统化文献搜索、主题综述撰写               |
-| 回应方法论质疑     | `scientific-critical-thinking`              | 评估实验设计、识别偏差、证据质量分析       |
-| 自查论文质量       | `peer-review`                               | 模拟审稿人视角审查（方法、统计、图表）     |
-| 评估论文整体水平   | `scholar-evaluation`                        | ScholarEval 量化评分框架                   |
-| 绘制科学图表       | `matplotlib` + `scientific-visualization` | 出版级图表，色盲友好配色                   |
-| 统计分析/检验      | `statistical-analysis`                      | 选择合适的统计方法、APA 格式报告           |
-| 会议/期刊格式要求  | `venue-templates`                           | Elsevier 等期刊的格式规范与写作风格指南    |
-| 写完整论文章节     | `ml-paper-writing`                          | ML/AI 论文写作全流程（引用验证、审稿标准） |
+## 5. 核心文件
 
-## 可用 Workflows
+- 入口：`udmc_main.py`（GRIPC 主入口）、`fsm_main(baseline).py`（FSM 基线）、`run_experiments.sh`（批量实验）、`extract_metrics.py`（指标提取）
+- 核心算法：`scripts/x_v2x_agent.py`（主控决策）、`scripts/vehicle_obs.py`（动力学+MPC+APF）、`scripts/env.py`（CARLA 封装）、`scripts/others_agent.py`（周围车辆模型）
+- 工具：`utils/geometry_poly.py`（OBCA）、`utils/global_bspline_smoother.py`（B-spline）、`utils/hybrid_qp_warmstart.py`（QP 热启动）、`utils/carla_utils.py`、`utils/draw.py`
+- 预测：`IGPR_predict_sv_wps.py`（GPR 均值+方差）、`gpr.pkl`/`lstm.pkl`（预训练模型，不可直接编辑）
 
-| 命令                     | 用途                          |
-| ------------------------ | ----------------------------- |
-| `/run_sim`             | 启动 CARLA 并运行单个仿真场景 |
-| `/run_all_experiments` | 运行全部对比实验和消融实验    |
-| `/git_commit`          | 提交代码到 Git 仓库           |
+## 6. 数据文件约定
 
-## 语言规范
+`.npy` 和 `.pkl` 为二进制文件不直接编辑；实验日志在 `logs/`（自动生成）；正式实验数据在 `experiment_results/`（由 `run_experiments.sh` 生成）。
 
-- **代码注释**：全中文
-- **文档标题与说明**：全中文
-- **变量名 / 函数名 / 文件名**：保留英文（机器读取，不翻译）
+## 7. 维护日志
 
-## Git Commit 规范
+每次修改代码前在 `changelogs/` 下创建 `YYYY-MM-DD_HHMMSS.md` 维护日志，包含：修改概述、修改详情（文件+内容+原值→新值）、修改原因、验证结果、关联场景、备注。
 
-格式：`类型: 描述`，描述 ≤ 15 字，全中文。
+## 8. 可用 Workflows
 
-| 类型     | 适用场景             |
-| -------- | -------------------- |
-| `新增` | 新功能、新文件       |
-| `修复` | Bug 修复             |
-| `优化` | 性能或代码质量改进   |
-| `重构` | 不改变功能的结构调整 |
-| `移除` | 删除冗余代码或文件   |
+- `/run_sim` — 启动 CARLA 并运行单个仿真场景
+- `/run_all_experiments` — 运行全部对比实验和消融实验
+- `/git_commit` — 提交代码到 Git 仓库
 
-示例：✅ `优化: 减少 GPR 预测延迟` ❌ `feat: optimize gpr`
+## 9. 其他根目录工具脚本
 
-## CARLA 环境检查
+- `extract_metrics.py` — 从实验日志批量提取 14 列指标（横向误差、航向误差、速度误差、加速度、jerk、APF 值、MPC 求解时间、最小距离等）
+- `carla_nl_system_identification.py` — 车辆动力学参数辨识数据采集
+- `param_est_using_slsqp.py` — SLSQP 优化器拟合车辆动力学参数
+- `mixed_traffic_scenario_generation.py` — 行人+车辆混合场景生成
+- `tele_carla.py` — 遥控驾驶工具
 
-本仓库固定对应 **CARLA 0.9.16**，不要与 `~/phd/udmc_carla-main myfinal`（0.9.14 仓库）混用。
+## 10. 目录结构速查
 
-| 项目        | 0.9.16（本仓库）                        |                  0.9.14（旧仓库） |
-| ----------- | --------------------------------------- | --------------------------------: |
-| 代码仓库    | `~/phd/0.9.16udmc_carla-main myfinal` | `~/phd/udmc_carla-main myfinal` |
-| Python 环境 | `conda activate first1`               |          `conda activate first` |
-| CARLA 目录  | `~/CARLA_0.9.16`                      |                `~/CARLA_0.9.14` |
-| 默认端口    | **2001**                          |                              2000 |
-
-修改 `scripts/` 目录前，提醒用户确认 CARLA 0.9.16 已启动：
-
-```shell
-conda activate first1
-cd ~/CARLA_0.9.16
-./CarlaUE4.sh -carla-rpc-port=2001
-```
-
-## 实验设计
-
-### 实验场景（4 个随机交通场景）
-
-| 场景       | 关键字              | 特点                                 |
-| ---------- | ------------------- | ------------------------------------ |
-| 无信号路口 | `unsig_crossroad` | 常绿灯，100 辆随机车，左转让行最复杂 |
-| 环岛       | `roundabout`      | 环岛汇入，100 辆随机车               |
-| 多车道巡航 | `multilaneACC`    | 直线高速跟车，100 辆随机车           |
-| 混合交通   | `mixed_traffic`   | 车辆+行人混合，100 辆随机车          |
-
-### Baseline
-
-| 方法         | 配置                      | 角色           |
-| ------------ | ------------------------- | -------------- |
-| GRIPC (full) | 四开关全开                | 本文方法       |
-| UDMC         | 四开关全关                | 直接改进基线   |
-| FSM          | `fsm_main(baseline).py` | 传统规则型基线 |
-
-### 实验矩阵（`run_experiments.sh`）
-
-- **对比实验**：4 场景 × 3 方法（GRIPC / UDMC / FSM）× 40 轮 = 480 次
-- **消融实验**：4 场景 × 4 消融（noOBCA / noIGPR / noBSP / noQP）× 40 轮 = 640 次
-- **总计**：1120 次仿真
-
-### 其他可用场景（调试/演示用，不纳入正式实验）
-
-`unsig_s1` / `unsig_s2` / `unsig_s3` / `round_s1` / `cross_s1` / `crossroad`
-
-## 核心文件地图
-
-### 入口文件
-
-| 文件                      | 用途                                   |
-| ------------------------- | -------------------------------------- |
-| `udmc_main.py`          | GRIPC 主入口，消融开关初始化，场景定义 |
-| `fsm_main(baseline).py` | FSM 基线入口，无 GRIPC 改进            |
-| `run_experiments.sh`    | 批量实验自动化脚本                     |
-| `extract_metrics.py`    | 实验数据后处理，支持批量提取 14 列指标 |
-
-### 核心算法（`scripts/`）
-
-| 文件                        | 用途                                            |
-| --------------------------- | ----------------------------------------------- |
-| `scripts/x_v2x_agent.py`  | 主控决策 Agent（ACC、超车、让行、四大改进集成） |
-| `scripts/vehicle_obs.py`  | 车辆动力学模型、MPC OCP、APF 权重配置           |
-| `scripts/env.py`          | CARLA 环境封装                                  |
-| `scripts/others_agent.py` | 周围车辆行为模型                                |
-
-### 工具模块（`utils/`）
-
-| 文件                                         | 用途                                  |
-| -------------------------------------------- | ------------------------------------- |
-| `utils/geometry_poly.py`                   | OBCA 多边形 → 半空间约束 `Ax ≤ b` |
-| `utils/global_bspline_smoother.py`         | B-spline 参考线平滑（OSQP 求解）      |
-| `utils/hybrid_qp_warmstart.py`             | QP 预规划热启动                       |
-| `utils/carla_utils.py`                     | CARLA 通用工具函数                    |
-| `utils/draw.py` / `utils/draw_result.py` | 可视化绘图                            |
-
-### 预测模块
-
-| 文件                       | 用途                           |
-| -------------------------- | ------------------------------ |
-| `IGPR_predict_sv_wps.py` | GPR 轨迹预测，输出均值 + 方差  |
-| `gpr.pkl` / `lstm.pkl` | 预训练模型文件（不可直接编辑） |
-
-## Git 操作规范
-
-- **每次修改代码前**，必须先 `git add -A && git commit && git push`
-- 仓库**必须设为私密**（Private）
-
-## 数据文件约定
-
-`.npy` 和 `.pkl` 为二进制数据 / 模型文件，**不直接编辑**：
-
-- 模型文件（`gpr.pkl` / `lstm.pkl`）→ 重新运行训练脚本
-- 数据文件（`*.npy`）→ 重新运行 `carla_nl_system_identification.py`
-- 实验日志（`logs/` 目录）→ 由仿真自动生成，带时间戳不覆盖
-- 正式实验数据（`experiment_results/` 目录）→ 由 `run_experiments.sh` 生成，用 `extract_metrics.py` 提取指标
-
-## 项目维护日志规范
-
-**日志目录**：`changelogs/`
-
-### 日志规则
-
-每次对项目进行维护（修改代码、调参、修复 bug、新增功能等），**必须**在 `changelogs/` 下创建一份维护日志，格式如下：
-
-- **文件名**：`YYYY-MM-DD_HHMMSS.md`（与维护时间对应）
-- **内容模板**：
-
-```markdown
-# 维护日志 YYYY-MM-DD HH:MM
-
-## 修改概述
-（一句话总结本次维护目标）
-
-## 修改详情
-
-| 文件 | 修改内容 | 原值 → 新值 |
-|------|----------|-------------|
-| ... | ... | ... |
-
-## 修改原因
-（为什么要做这些修改？触发问题是什么？）
-
-## 验证结果
-（修改后的测试结果，是否解决了问题）
-
-## 关联场景
-（受影响的仿真场景）
-
-## 备注
-（其他需要记录的信息，如已知遗留问题、后续计划等）
-```
-
-### 写日志的时机
-
-- 每次 `git commit` 前，先写维护日志
-- 日志粒度：一次完整的维护任务对应一份日志（不要拆得太细，也不要合并多个不相关任务）
-- 日志用中文撰写，技术术语保留英文
+- `scripts/` — 核心算法（决策 Agent、动力学模型、环境封装）
+- `utils/` — 工具模块（OBCA、B-spline、QP 热启动、绘图）
+- `official/` — 修改后的 CARLA 官方示例（basic_agent、behavior_agent、spawn_npc 等）
+- `spawnPoints/` — 固定出生点配置（CSV 格式）
+- `udmc_carla-main/` — 原始 UDMC 代码（对照参考用）
+- `changelogs/` — 维护日志
+- `data/` — 仿真输出数据（时间戳目录）
+- `logs/` — 自动生成的运行日志
