@@ -78,7 +78,30 @@
 - `mixed_traffic_scenario_generation.py` — 行人+车辆混合场景生成
 - `tele_carla.py` — 遥控驾驶工具
 
-## 10. 目录结构速查
+## 10. 日志分析方法
+
+调试问题时应结合 `logs/` 目录下的运行日志辅助分析。日志文件为空格分隔的 14 列浮点数（每行一个仿真步），列定义如下：
+
+| 列号 | 名称 | 含义 |
+|------|------|------|
+| 0 | time | 仿真时间 (s) |
+| 1 | dist_error | 横向跟踪误差 (m) |
+| 2 | yaw_error | 航向误差 (rad) |
+| 3 | vel_error | 速度误差 (km/h) |
+| 4 | acc | 纵向加速度 |
+| 5 | steer | 方向盘转角 |
+| 6 | apf_obs | 障碍车辆 APF |
+| 7 | apf_ttc | TTC 势场 |
+| 8 | apf_pede | 行人 APF |
+| 9 | apf_nc_road | 不可穿越道路 APF |
+| 10 | apf_c_road | 可穿越道路 APF |
+| 11 | apf_traffic | 红灯 APF |
+| 12 | cost_time | MPC 求解时间 (s) |
+| 13 | min_dist_to_obs | 与最近障碍物距离 (m)，来自 CARLA world 全量查询，不受过滤影响 |
+
+用 `extract_metrics.py` 可批量提取统计指标。分析碰撞/别车等问题时重点关注 `min_dist_to_obs`（列13）骤降、`apf_obs`（列7）突变、`steer`（列5）急变。
+
+## 11. 目录结构速查
 
 - `scripts/` — 核心算法（决策 Agent、动力学模型、环境封装）
 - `utils/` — 工具模块（OBCA、B-spline、QP 热启动、绘图）
