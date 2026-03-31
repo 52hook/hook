@@ -898,20 +898,6 @@ class Xagent(BasicAgent):
 
         apf_pede += self._model.soft_obs_apf(pedes, ref_traj, pede=True)
 
-        # ========== 4.5 椭圆硬约束兜底 ==========
-        if hasattr(self._model, "set_ellip_backup_obstacles"):
-            front_like = obs_long_infer + obs_opp_infer + obs_cross_infer + obs_side_infer
-            if len(front_like) > 0:
-                ellip_obs = front_like[:3]
-                self._model.set_ellip_backup_obstacles(
-                    ellip_obs,
-                    a=4.5,
-                    b=2.0,
-                    margin=0.25
-                )
-            else:
-                self._model.set_ellip_backup_obstacles([])
-
         # ========== 5. 构建 NLP 约束边界并求解 ==========
         self._model.solver_add_bounds()
 
