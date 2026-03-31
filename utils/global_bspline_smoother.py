@@ -338,32 +338,14 @@ class BSplineGlobalSmoother(object):
         l = np.concatenate([l_eq, l_ineq])
         u = np.concatenate([u_eq, u_ineq])
 
-        # ---------------- 7. 调用 OSQP 求解（复用 workspace）----------------
-        if (self._osqp_prob is not None
-                and self._osqp_dims == (n_ctrl, N)
-                and A.shape == getattr(self, '_osqp_A_shape', None)):
-            # 维度不变：只更新线性项和约束边界（跳过 KKT 重分解）
-            try:
-                self._osqp_prob.update(q=q, l=l, u=u)
-                res = self._osqp_prob.solve()
-            except Exception:
-                # 更新失败则重建
-                prob = osqp.OSQP()
-                prob.setup(P=P, q=q, A=A, l=l, u=u,
-                           verbose=False, warm_start=True)
-                res = prob.solve()
-                self._osqp_prob = prob
-                self._osqp_dims = (n_ctrl, N)
-                self._osqp_A_shape = A.shape
-        else:
-            # 首次调用或维度变化：完整 setup
-            prob = osqp.OSQP()
-            prob.setup(P=P, q=q, A=A, l=l, u=u,
-                       verbose=False, warm_start=True)
-            res = prob.solve()
-            self._osqp_prob = prob
-            self._osqp_dims = (n_ctrl, N)
-            self._osqp_A_shape = A.shape
+        # ---------------- 7. 调用 OSQP 求解 ----------------
+        # 注意：即使维度不变，P 和 A 的值也可能变化（因为 B-spline 基函数矩阵
+        # 依赖弧长参数 s），所以必须完整 setup。这里只复用 OSQP 对象来保留
+        # warm-start 信息。
+        prob = osqp.OSQP()
+        prob.setup(P=P, q=q, A=A, l=l, u=u,
+                   verbose=False, warm_start=True)
+        res = prob.solve()
 
         if res.info.status_val not in (1,):  # 1: solved
             print("[BSplineGlobalSmoother] OSQP did not converge, status:",
