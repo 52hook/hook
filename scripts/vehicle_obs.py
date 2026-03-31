@@ -1246,8 +1246,11 @@ class Vehicle:
             'ipopt.max_iter': self.maxiter,
             'ipopt.print_level': 0,
             'print_time': 0,
-            'ipopt.acceptable_tol': 1e-8,
-            'ipopt.acceptable_obj_change_tol': 1e-6
+            'ipopt.acceptable_tol': 1e-6,              # 放松容差，加速收敛
+            'ipopt.acceptable_obj_change_tol': 1e-5,    # 放松目标变化容差
+            'ipopt.warm_start_init_point': 'yes',       # 启用热启动（利用上一拍解）
+            'ipopt.warm_start_bound_push': 1e-6,        # 热启动边界推力
+            'ipopt.warm_start_mult_bound_push': 1e-6,   # 热启动乘子推力
         }
 
         self.solver = ca.nlpsol('solver', 'ipopt', nlp_prob, opts_setting)
@@ -1551,5 +1554,512 @@ class Vehicle:
             return u0[:, 0], u0[:, 1], x_m, cost_time
         else:
             return u0, x_m, cost_time
+
+    # ==================================================================
+    #  参数化 NLP：构建一次，后续只更新参数值（消除每步 ca.nlpsol 重编译）
+    # ==================================================================
+
+    # ---- 常量 ----
+    PM_MAX_SOFT   = 14   # 最大软 APF 障碍物（车辆+行人合计）
+    PM_MAX_ELLIP  = 3    # 最大椭圆硬约束兜底
+    PM_MAX_OBCA   = 4    # 最大 OBCA 多边形障碍
+    PM_OBCA_E     = 4    # OBCA 每障碍边数（矩形=4）
+
+    def _ego_circles_sym(self, Xi, radius=1.68):
+        """自车双圆模型（CasADi 符号版）"""
+        cx, cy, cyaw = Xi[0], Xi[1], Xi[2]
+        c1 = [cx + radius * ca.cos(cyaw), cy + radius * ca.sin(cyaw)]
+        c2 = [cx - radius * ca.cos(cyaw), cy - radius * ca.sin(cyaw)]
+        return [c1, c2]
+
+    def setup_parametric_nlp(self):
+        """
+        构建完整的参数化 NLP。只调用一次（init 时），后续求解复用。
+        所有逐步变化的数值（障碍物位置、车道线、红灯等）都通过参数向量传入。
+        """
+        import time as _time
+        t0 = _time.time()
+
+        N = self.horizon
+        ns = self.n_states
+        nc = self.n_controls
+        MAX_SOFT  = self.PM_MAX_SOFT
+        MAX_ELLIP = self.PM_MAX_ELLIP
+        MAX_OBCA  = self.PM_MAX_OBCA
+        OBCA_E    = self.PM_OBCA_E
+
+        # ============ 1. 参数布局 ============
+        N_PER_SOFT  = 3 + 3 * N        # [active, is_pede, ratio, (x,y,yaw)×N]
+        N_LANE      = 9                 # [wp_yaw, L_act, L_bd, L_type, L_dir, R_act, R_bd, R_type, R_dir]
+        N_TL        = 5                 # [active, center_y, yaw, tl_x, ratio]
+        N_TTC       = 4                 # [active, lv_x, lv_y, lv_v]
+        N_PER_ELLIP = 1 + 3 * N        # [active, (x,y,yaw)×N]
+        N_PER_OBCA  = 1 + OBCA_E*2 + OBCA_E  # [active, Am_flat(8), bm_flat(4)]
+        N_CARBOX    = 2                 # [half_L, half_W]
+
+        n_apf = (MAX_SOFT * N_PER_SOFT + N_LANE + N_TL + N_TTC +
+                 MAX_ELLIP * N_PER_ELLIP + MAX_OBCA * N_PER_OBCA + N_CARBOX)
+
+        P_apf = ca.SX.sym('P_apf', n_apf)
+
+        # 存储布局信息
+        self._pm_n_apf = n_apf
+        self._pm_N_PER_SOFT = N_PER_SOFT
+        self._pm_N_PER_ELLIP = N_PER_ELLIP
+        self._pm_N_PER_OBCA = N_PER_OBCA
+        self._pm_P_apf = P_apf
+
+        # 偏移量表
+        idx = 0
+        self._pm_off_soft = idx;   idx += MAX_SOFT * N_PER_SOFT
+        self._pm_off_lane = idx;   idx += N_LANE
+        self._pm_off_tl   = idx;   idx += N_TL
+        self._pm_off_ttc  = idx;   idx += N_TTC
+        self._pm_off_ellip = idx;  idx += MAX_ELLIP * N_PER_ELLIP
+        self._pm_off_obca = idx;   idx += MAX_OBCA * N_PER_OBCA
+        self._pm_off_carbox = idx; idx += N_CARBOX
+        assert idx == n_apf
+
+        # ============ 2. 预分配 OBCA 对偶变量 ============
+        pm_lam, pm_mu, pm_s = [], [], []
+        for k in range(N + 1):
+            for m in range(MAX_OBCA):
+                pm_lam.append(ca.SX.sym(f'pL_{k}_{m}', OBCA_E))
+                pm_mu.append(ca.SX.sym(f'pM_{k}_{m}', 4))
+                pm_s.append(ca.SX.sym(f'pS_{k}_{m}', 1))
+        self._pm_lam = pm_lam
+        self._pm_mu  = pm_mu
+        self._pm_s   = pm_s
+
+        pm_opt = ca.vertcat(
+            ca.reshape(self.U, -1, 1),
+            ca.reshape(self.X, -1, 1),
+            ca.vertcat(*pm_lam),
+            ca.vertcat(*pm_mu),
+            ca.vertcat(*pm_s)
+        )
+
+        # ============ 3. 构建参数化代价函数 ============
+        obj = 0
+        g = []
+
+        # 3.1 初始状态等式约束 + 跟踪代价 + 动力学
+        g.append(self.X[:, 0] - self.P[:, 0])
+        for i in range(N):
+            err = self.X[0:5, i] - self.P[0:5, i]
+            obj += ca.mtimes([err.T, self.Q_o, err]) \
+                 + ca.mtimes([self.U[:, i].T, self.R, self.U[:, i]])
+            if i < N - 1:
+                du = self.U[:, i] - self.U[:, i+1]
+                obj += ca.mtimes([du.T, self.Rd, du])
+            # vy / omega 阻尼
+            obj += 0.5 * self.X[4, i]**2 + 0.2 * self.X[5, i]**2
+            # 动力学约束
+            g.append(self.X[:, i+1] - self.f(self.X[:, i], self.U[:, i]))
+
+        # OBCA 终端代价 + slack 惩罚（仅在 OBCA 有激活槽时生效）
+        obca_any = 0
+        for m in range(MAX_OBCA):
+            obca_any += P_apf[self._pm_off_obca + m * N_PER_OBCA]
+        alpha_e_val = 2.5
+        beta_s_val  = 250.0
+        obj += obca_any * alpha_e_val * ca.sumsqr(self.X[:, N] - self.P[:, N])
+        for idx_s in range(len(pm_s)):
+            m_in = idx_s % MAX_OBCA
+            a_m = P_apf[self._pm_off_obca + m_in * N_PER_OBCA]
+            obj += a_m * beta_s_val * pm_s[idx_s]
+
+        # 3.2 参数化软障碍物 APF
+        rw_veh  = float(self.rule_weights.soft_obs_vehicle)
+        rw_pede = float(self.rule_weights.soft_obs_pedestrian)
+        for m in range(MAX_SOFT):
+            base = self._pm_off_soft + m * N_PER_SOFT
+            active  = P_apf[base]
+            is_pede = P_apf[base + 1]
+            ratio   = P_apf[base + 2]
+            # 规则层权重插值：车辆用 rw_veh，行人用 rw_pede
+            rw = (1 - is_pede) * rw_veh + is_pede * rw_pede
+            for i in range(N):
+                ox   = P_apf[base + 3 + i*3]
+                oy   = P_apf[base + 3 + i*3 + 1]
+                oyaw = P_apf[base + 3 + i*3 + 2]
+                cy = ca.cos(-oyaw); sy = ca.sin(-oyaw)
+                for ego_c in self._ego_circles_sym(self.X[:, i]):
+                    dx = ego_c[0] - ox;  dy = ego_c[1] - oy
+                    xr = dx*cy - dy*sy;  yr = dx*sy + dy*cy
+                    # 椭圆尺寸：车辆 (2.3,1.0) / 行人 (0.5,0.5)
+                    a_e = (1 - is_pede) * 2.3 + is_pede * 0.5
+                    b_e = (1 - is_pede) * 1.0 + is_pede * 0.5
+                    dist = xr**2 / a_e**2 + yr**2 / b_e**2
+                    dist_s = ca.fmax(dist, 1e-4)
+                    veh_c = 12 * (1/dist_s - 0.5) * ratio * rw / (i+1)
+                    ped_c = 12 * ca.exp(-dist_s) * ratio * rw / (i+1)
+                    obj += active * ((1 - is_pede) * veh_c + is_pede * ped_c)
+
+        # 3.3 参数化车道线 APF
+        lb = self._pm_off_lane
+        wp_yaw_p  = P_apf[lb]
+        lanes = [
+            (P_apf[lb+1], P_apf[lb+2], P_apf[lb+3], P_apf[lb+4]),   # left
+            (P_apf[lb+5], P_apf[lb+6], P_apf[lb+7], P_apf[lb+8]),   # right
+        ]
+        for la, bd, lt, ld in lanes:
+            for i in range(N):
+                for ec in self._ego_circles_sym(self.X[:, i]):
+                    sy_lane = ca.sin(-wp_yaw_p)*ec[0] + ca.cos(-wp_yaw_p)*ec[1]
+                    dy_l = sy_lane - bd
+                    dist_l = ca.fabs(dy_l)
+                    # 可跨（lt≈1）：二次势场 within 1m
+                    c_cost = ca.if_else(dist_l < 1.0,
+                                        self.ac_r * (1.0 - dist_l)**2, 0.0)
+                    # 不可跨（lt≈2）：反距离 + 越线硬惩罚
+                    nc_over = ca.if_else(
+                        ld > 0,
+                        ca.if_else(sy_lane > bd - 0.3,
+                                   float(self.rule_weights.nc_line_over_penalty),
+                                   self.anc_r / (dy_l**2 + 1e-6)),
+                        ca.if_else(sy_lane < bd + 0.3,
+                                   float(self.rule_weights.nc_line_over_penalty),
+                                   self.anc_r / (dy_l**2 + 1e-6))
+                    )
+                    nc_cost = ca.if_else(dy_l**2 < 4.0, nc_over, 0.0)
+                    obj += la * ca.if_else(lt > 1.5, nc_cost,
+                                ca.if_else(lt > 0.5, c_cost, 0.0))
+
+        # 3.4 参数化红灯 APF
+        tb = self._pm_off_tl
+        tl_a = P_apf[tb]; tl_cy = P_apf[tb+1]; tl_yaw = P_apf[tb+2]
+        tl_x = P_apf[tb+3]; tl_r = P_apf[tb+4]
+        for i in range(N):
+            sx = ca.cos(-tl_yaw)*self.X[0,i] - ca.sin(-tl_yaw)*self.X[1,i]
+            d_tl = -(sx - tl_x) + 1.5
+            d_tl_s = ca.fmax(d_tl, 0.01)
+            obj += tl_a * tl_r * self.w_tr_long / d_tl_s
+
+        # 3.5 参数化 TTC APF
+        ttcb = self._pm_off_ttc
+        ttc_a = P_apf[ttcb]; lv_x = P_apf[ttcb+1]
+        lv_y = P_apf[ttcb+2]; lv_v = P_apf[ttcb+3]
+        ttc_ratio_val = 80.0 * float(self.rule_weights.soft_ttc)
+        for i in range(N):
+            ex, ey, ev = self.X[0,i], self.X[1,i], self.X[3,i]
+            dx_t = lv_x - ex;  dy_t = lv_y - ey
+            d_t = ca.sqrt(dx_t**2 + dy_t**2)
+            rv = ev - lv_v;    rv_s = ca.fmax(rv, 0.1)
+            ttc_v = d_t / rv_s
+            cond = (rv > 0) * (d_t < 45.0) * (ttc_v < 6.0)
+            b_ttc = ttc_ratio_val * (1.0/ca.fmax(ttc_v, 0.1) - 1.0/6.0)
+            obj += ttc_a * ca.if_else(cond, b_ttc, 0.0)
+
+        # ============ 4. 构建参数化约束 ============
+
+        # 4.1 控制变化率
+        for i in range(N - 1):
+            g.append(self.U[0, i+1] - self.U[0, i])
+            g.append(self.U[1, i+1] - self.U[1, i])
+
+        # 4.2 OBCA 对偶几何约束（预分配 MAX_OBCA 槽）
+        cb = self._pm_off_carbox
+        half_L_p = P_apf[cb];  half_W_p = P_apf[cb+1]
+        G_car = ca.vertcat(ca.hcat([1.,0.]), ca.hcat([-1.,0.]),
+                           ca.hcat([0.,1.]), ca.hcat([0.,-1.]))
+        g_car = ca.vertcat(half_L_p, half_L_p, half_W_p, half_W_p)
+
+        for k in range(N + 1):
+            c_e = ca.cos(self.X[2,k]);  s_e = ca.sin(self.X[2,k])
+            Rk = ca.vertcat(ca.hcat([c_e,-s_e]), ca.hcat([s_e,c_e]))
+            tk = self.X[0:2, k]
+            for m in range(MAX_OBCA):
+                ob = self._pm_off_obca + m * N_PER_OBCA
+                Am = ca.reshape(P_apf[ob+1 : ob+1+OBCA_E*2], OBCA_E, 2)
+                bm = ca.reshape(P_apf[ob+1+OBCA_E*2 : ob+1+OBCA_E*3], OBCA_E, 1)
+                lam = pm_lam[k*MAX_OBCA + m]
+                mu  = pm_mu[k*MAX_OBCA + m]
+                sv  = pm_s[k*MAX_OBCA + m]
+                g.append(ca.sumsqr(Am.T @ lam))                      # ||A^T λ||² ≤ 1
+                g.append(G_car.T @ mu + Rk.T @ (Am.T @ lam))         # = 0 (2D)
+                g.append(-g_car.T @ mu + ((Am @ tk) - bm).T @ lam + sv)  # ≥ 0
+
+        # 4.3 椭圆硬约束兜底（预分配 MAX_ELLIP 槽）
+        ea = 4.5;  eb = 2.0
+        for em in range(MAX_ELLIP):
+            eb_off = self._pm_off_ellip + em * N_PER_ELLIP
+            for i in range(N):
+                ex_p = P_apf[eb_off + 1 + i*3]
+                ey_p = P_apf[eb_off + 1 + i*3 + 1]
+                ey_yaw = P_apf[eb_off + 1 + i*3 + 2]
+                dx_e = self.X[0,i] - ex_p;  dy_e = self.X[1,i] - ey_p
+                ce = ca.cos(ey_yaw); se = ca.sin(ey_yaw)
+                xr_e = dx_e*ce + dy_e*se;  yr_e = -dx_e*se + dy_e*ce
+                phi = (xr_e/ea)**2 + (yr_e/eb)**2
+                g.append(phi)
+
+        # ============ 5. 编译 NLP（只调用一次） ============
+        P_all = ca.vertcat(ca.reshape(self.P, -1, 1), P_apf)
+        nlp = {'f': obj, 'x': pm_opt, 'p': P_all, 'g': ca.vertcat(*g)}
+        opts = {
+            'ipopt.max_iter': self.maxiter,
+            'ipopt.print_level': 0, 'print_time': 0,
+            'ipopt.acceptable_tol': 1e-6,
+            'ipopt.acceptable_obj_change_tol': 1e-5,
+            'ipopt.warm_start_init_point': 'yes',
+            'ipopt.warm_start_bound_push': 1e-6,
+            'ipopt.warm_start_mult_bound_push': 1e-6,
+        }
+        self._pm_solver = ca.nlpsol('pm', 'ipopt', nlp, opts)
+
+        # ---- 存储约束结构信息 ----
+        self._pm_n_g_dyn  = (N+1) * ns
+        self._pm_n_g_rate = (N-1) * 2
+        self._pm_n_g_obca_per_km = 4  # 1 + 2 + 1
+        self._pm_n_g_obca = (N+1) * MAX_OBCA * 4
+        self._pm_n_g_ellip = MAX_ELLIP * N
+        self._pm_n_opt_base = N*nc + (N+1)*ns
+        self._pm_n_opt_lam = (N+1) * MAX_OBCA * OBCA_E
+        self._pm_n_opt_mu  = (N+1) * MAX_OBCA * 4
+        self._pm_n_opt_s   = (N+1) * MAX_OBCA
+
+        # ---- 预计算基础 lbg/ubg ----
+        lbg = [];  ubg = []
+        # dynamics 等式
+        lbg.extend([0.0] * self._pm_n_g_dyn)
+        ubg.extend([0.0] * self._pm_n_g_dyn)
+        # rate 约束
+        for _ in range(N-1):
+            lbg.extend([-0.9, -0.2]);  ubg.extend([0.9, 0.2])
+        # OBCA（默认值，active 时生效）
+        for _k in range(N+1):
+            for _m in range(MAX_OBCA):
+                lbg.append(-2e19);  ubg.append(1.0)      # ||A^Tλ||² ≤ 1
+                lbg.extend([0.0,0.0]); ubg.extend([0.0,0.0])  # = 0
+                lbg.append(0.0);    ubg.append(2e19)      # ≥ 0
+        # Elliptic（默认 inactive: lbg=-inf）
+        for _ in range(MAX_ELLIP * N):
+            lbg.append(-2e19);  ubg.append(2e19)
+        self._pm_base_lbg = np.array(lbg, dtype=float)
+        self._pm_base_ubg = np.array(ubg, dtype=float)
+
+        # ---- 预计算基础 lbx/ubx ----
+        lbx = [];  ubx = []
+        # 控制 [acc, steer]
+        for _ in range(N):
+            lbx.extend([self.acc_lbound, -self.steer_bound])
+            ubx.extend([self.acc_ubound,  self.steer_bound])
+        # 状态
+        for _ in range(N+1):
+            lbx.extend([-1e19, -1e19, -1e19, 0.0, -1e19, -1e19])
+            ubx.extend([ 1e19,  1e19,  1e19, self.target_v, 1e19, 1e19])
+        # 对偶变量 lambda / mu / s（默认 inactive: 固定为 0）
+        n_dual = self._pm_n_opt_lam + self._pm_n_opt_mu + self._pm_n_opt_s
+        lbx.extend([0.0] * n_dual)
+        ubx.extend([0.0] * n_dual)
+        self._pm_base_lbx = np.array(lbx, dtype=float)
+        self._pm_base_ubx = np.array(ubx, dtype=float)
+
+        # ---- warm-start 缓存 ----
+        self._pm_x0_cache = None
+        self._pm_ready = True
+
+        print(f"[Vehicle] 参数化 NLP 编译完成，耗时 {_time.time()-t0:.2f}s，"
+              f"变量数 {pm_opt.shape[0]}，约束数 {len(lbg)}，参数数 {P_all.shape[0]}")
+
+    # ------------------------------------------------------------------
+    def pack_apf_params(self,
+                        soft_obs_list=None,   # [(active, is_pede, ratio, [(x,y,yaw)...]), ...]
+                        lane_data=None,       # (wp_yaw, L_act, L_bd, L_type, L_dir, R_act, R_bd, R_type, R_dir)
+                        tl_data=None,         # (active, center_y, yaw, tl_x, ratio) or None
+                        ttc_data=None,        # (active, lv_x, lv_y, lv_v) or None
+                        ellip_obs_list=None,  # [(active, [(x,y,yaw)×N]), ...]
+                        obca_list=None,       # [(active, Am_flat, bm_flat), ...] or None
+                        carbox=None):         # (half_L, half_W)
+        """将逐步变化的 APF 数据打包为参数向量。"""
+        N = self.horizon
+        p = np.zeros(self._pm_n_apf, dtype=float)
+
+        # 软障碍物
+        if soft_obs_list:
+            for m, (act, is_p, ratio, traj) in enumerate(soft_obs_list):
+                if m >= self.PM_MAX_SOFT:
+                    break
+                base = self._pm_off_soft + m * self._pm_N_PER_SOFT
+                p[base]     = float(act)
+                p[base + 1] = float(is_p)
+                p[base + 2] = float(ratio)
+                for i in range(min(N, len(traj))):
+                    p[base + 3 + i*3]     = float(traj[i][0])
+                    p[base + 3 + i*3 + 1] = float(traj[i][1])
+                    p[base + 3 + i*3 + 2] = float(traj[i][2])
+                # 不足 N 步则用最后一个补齐
+                if len(traj) < N:
+                    last = traj[-1]
+                    for i in range(len(traj), N):
+                        p[base + 3 + i*3]     = float(last[0])
+                        p[base + 3 + i*3 + 1] = float(last[1])
+                        p[base + 3 + i*3 + 2] = float(last[2])
+
+        # 车道线
+        if lane_data is not None:
+            lb = self._pm_off_lane
+            for j, v in enumerate(lane_data):
+                p[lb + j] = float(v)
+
+        # 红灯
+        if tl_data is not None:
+            tb = self._pm_off_tl
+            for j, v in enumerate(tl_data):
+                p[tb + j] = float(v)
+
+        # TTC
+        if ttc_data is not None:
+            tb = self._pm_off_ttc
+            for j, v in enumerate(ttc_data):
+                p[tb + j] = float(v)
+
+        # 椭圆硬约束
+        if ellip_obs_list:
+            for em, (act, traj) in enumerate(ellip_obs_list):
+                if em >= self.PM_MAX_ELLIP:
+                    break
+                eb = self._pm_off_ellip + em * self._pm_N_PER_ELLIP
+                p[eb] = float(act)
+                for i in range(min(N, len(traj))):
+                    p[eb + 1 + i*3]     = float(traj[i][0])
+                    p[eb + 1 + i*3 + 1] = float(traj[i][1])
+                    p[eb + 1 + i*3 + 2] = float(traj[i][2])
+                if len(traj) < N:
+                    last = traj[-1]
+                    for i in range(len(traj), N):
+                        p[eb + 1 + i*3]     = float(last[0])
+                        p[eb + 1 + i*3 + 1] = float(last[1])
+                        p[eb + 1 + i*3 + 2] = float(last[2])
+
+        # OBCA 多边形
+        if obca_list:
+            for m, (act, Am_flat, bm_flat) in enumerate(obca_list):
+                if m >= self.PM_MAX_OBCA:
+                    break
+                ob = self._pm_off_obca + m * self._pm_N_PER_OBCA
+                p[ob] = float(act)
+                for j in range(min(len(Am_flat), self.PM_OBCA_E * 2)):
+                    p[ob + 1 + j] = float(Am_flat[j])
+                for j in range(min(len(bm_flat), self.PM_OBCA_E)):
+                    p[ob + 1 + self.PM_OBCA_E*2 + j] = float(bm_flat[j])
+
+        # 自车包围盒
+        if carbox is not None:
+            cb = self._pm_off_carbox
+            p[cb]   = float(carbox[0])
+            p[cb+1] = float(carbox[1])
+
+        return p
+
+    # ------------------------------------------------------------------
+    def solve_parametric(self, z_ref, z0, next_states, u0, apf_params,
+                         obca_active_mask=None, ellip_active_mask=None):
+        """
+        使用预编译的参数化 NLP 求解 MPC。
+        obca_active_mask: [bool]*PM_MAX_OBCA —— 哪些 OBCA 槽是活跃的
+        ellip_active_mask: [bool]*PM_MAX_ELLIP —— 哪些椭圆槽是活跃的
+        """
+        N = self.horizon
+        ns = self.n_states
+        nc = self.n_controls
+        MAX_OBCA = self.PM_MAX_OBCA
+        OBCA_E   = self.PM_OBCA_E
+        MAX_ELLIP = self.PM_MAX_ELLIP
+
+        xs = np.asarray(z_ref, dtype=float)
+        x_m = np.asarray(next_states, dtype=float).copy()
+
+        # ---- u_ws 形状统一 ----
+        u_ws = np.asarray(u0, dtype=float)
+        if u_ws.ndim == 2 and u_ws.shape == (N, nc):
+            u_ws = u_ws.T
+        elif u_ws.ndim == 1:
+            u_ws = u_ws.reshape(N, nc).T
+        elif u_ws.ndim == 2 and u_ws.shape != (nc, N):
+            u_ws = np.zeros((nc, N))
+
+        # RTI shift
+        u_ws[:, :-1] = u_ws[:, 1:]
+        x_m[:-1, :] = x_m[1:, :]
+
+        # ---- 拼装参数向量 p = [ref_flat, apf_flat] ----
+        c_p_ref = np.vstack((z0.T, xs)).T.flatten()
+        p_all = np.concatenate([c_p_ref, apf_params])
+
+        # ---- 构造初值 x0 ----
+        base_init = np.concatenate([u_ws.flatten(), x_m.flatten()])
+        n_dual = self._pm_n_opt_lam + self._pm_n_opt_mu + self._pm_n_opt_s
+        if self._pm_x0_cache is not None and self._pm_x0_cache.size == base_init.size + n_dual:
+            # RTI shift 对偶变量
+            dual_init = self._pm_x0_cache[base_init.size:]
+            init_control = np.concatenate([base_init, dual_init])
+        else:
+            init_control = np.concatenate([base_init, np.zeros(n_dual)])
+
+        # ---- 设置 lbx/ubx（激活/停用 OBCA 和 elliptic 槽）----
+        lbx = self._pm_base_lbx.copy()
+        ubx = self._pm_base_ubx.copy()
+        lbg = self._pm_base_lbg.copy()
+        ubg = self._pm_base_ubg.copy()
+
+        dual_start = self._pm_n_opt_base
+        s_max = getattr(self, 's_max', 0.10)
+
+        if obca_active_mask is None:
+            obca_active_mask = [False] * MAX_OBCA
+
+        for k in range(N + 1):
+            for m in range(MAX_OBCA):
+                flat_idx = k * MAX_OBCA + m
+                lam_start = dual_start + flat_idx * OBCA_E
+                mu_start  = dual_start + self._pm_n_opt_lam + flat_idx * 4
+                s_start   = dual_start + self._pm_n_opt_lam + self._pm_n_opt_mu + flat_idx
+
+                if m < len(obca_active_mask) and obca_active_mask[m]:
+                    # 激活：允许对偶变量自由
+                    for j in range(OBCA_E):
+                        ubx[lam_start + j] = 2e19
+                    for j in range(4):
+                        ubx[mu_start + j] = 2e19
+                    ubx[s_start] = s_max
+                # else: 保持默认 lbx=ubx=0（已在 base 中设好）
+
+        if ellip_active_mask is None:
+            ellip_active_mask = [False] * MAX_ELLIP
+
+        # 椭圆约束：激活时设 lbg = r²
+        ellip_g_start = self._pm_n_g_dyn + self._pm_n_g_rate + self._pm_n_g_obca
+        r2 = (1.0 + float(getattr(self, '_ellip_margin', 0.1)))**2
+        for em in range(MAX_ELLIP):
+            for i in range(N):
+                gi = ellip_g_start + em * N + i
+                if em < len(ellip_active_mask) and ellip_active_mask[em]:
+                    lbg[gi] = r2
+                # else: lbg=-2e19（无约束，已在 base 中设好）
+
+        # ---- 求解 ----
+        start_t = time.time()
+        res = self._pm_solver(
+            x0=init_control, p=p_all,
+            lbg=lbg, ubg=ubg, lbx=lbx, ubx=ubx
+        )
+        cost_time = time.time() - start_t
+        est = res['x'].full().flatten()
+
+        # ---- 解析 ----
+        size_u = N * nc
+        size_x = (N + 1) * ns
+        u_opt = est[:size_u].reshape(N, nc)
+        x_opt = est[size_u:size_u + size_x].reshape(N + 1, ns)
+
+        # 缓存完整解（含对偶），供下一步 warm-start
+        self._pm_x0_cache = est.copy()
+
+        if self.carla:
+            return u_opt[:, 0], u_opt[:, 1], x_opt, cost_time
+        else:
+            return u_opt, x_opt, cost_time
 
 

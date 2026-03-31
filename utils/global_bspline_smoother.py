@@ -53,6 +53,13 @@ class BSplineGlobalSmoother(object):
         self.w_smooth = w_smooth
         self.curv_bound = curv_bound
 
+        # ---- 缓存机制：避免路径几乎不变时重复求解 ----
+        self._prev_path = None          # 上一次输入路径
+        self._cache_smooth = None       # 缓存的平滑路径
+        self._cache_ctrl = None         # 缓存的控制点
+        self._osqp_prob = None          # 复用 OSQP workspace
+        self._osqp_dims = (None, None)  # (n_ctrl, N) 维度记录
+
     # ------------------------------------------------------------------
     # 结点 & 基函数矩阵
     # ------------------------------------------------------------------
@@ -152,6 +159,14 @@ class BSplineGlobalSmoother(object):
         # 路径太短就不做 B 样条，直接返回
         if N < self.degree + 1 or N < 4:
             return path_xy.copy(), path_xy.copy()
+
+        # ---- 缓存命中：路径变化小于 0.5m 时直接返回上一次结果 ----
+        if (self._prev_path is not None
+                and self._prev_path.shape == path_xy.shape
+                and self._cache_smooth is not None):
+            max_dev = np.max(np.linalg.norm(path_xy - self._prev_path, axis=1))
+            if max_dev < 0.5:
+                return self._cache_smooth.copy(), self._cache_ctrl.copy()
 
         if lane_center_xy is None:
             lane_center_xy = path_xy.copy()
@@ -323,17 +338,37 @@ class BSplineGlobalSmoother(object):
         l = np.concatenate([l_eq, l_ineq])
         u = np.concatenate([u_eq, u_ineq])
 
-        # ---------------- 7. 调用 OSQP 求解 ----------------
-        prob = osqp.OSQP()
-        prob.setup(P=P, q=q, A=A, l=l, u=u,
-                   verbose=False, warm_start=True)
-
-        res = prob.solve()
+        # ---------------- 7. 调用 OSQP 求解（复用 workspace）----------------
+        if (self._osqp_prob is not None
+                and self._osqp_dims == (n_ctrl, N)
+                and A.shape == getattr(self, '_osqp_A_shape', None)):
+            # 维度不变：只更新线性项和约束边界（跳过 KKT 重分解）
+            try:
+                self._osqp_prob.update(q=q, l=l, u=u)
+                res = self._osqp_prob.solve()
+            except Exception:
+                # 更新失败则重建
+                prob = osqp.OSQP()
+                prob.setup(P=P, q=q, A=A, l=l, u=u,
+                           verbose=False, warm_start=True)
+                res = prob.solve()
+                self._osqp_prob = prob
+                self._osqp_dims = (n_ctrl, N)
+                self._osqp_A_shape = A.shape
+        else:
+            # 首次调用或维度变化：完整 setup
+            prob = osqp.OSQP()
+            prob.setup(P=P, q=q, A=A, l=l, u=u,
+                       verbose=False, warm_start=True)
+            res = prob.solve()
+            self._osqp_prob = prob
+            self._osqp_dims = (n_ctrl, N)
+            self._osqp_A_shape = A.shape
 
         if res.info.status_val not in (1,):  # 1: solved
             print("[BSplineGlobalSmoother] OSQP did not converge, status:",
                   res.info.status)
-            # 退化处理：返回原始路径和“伪”控制点序列
+            # 退化处理：返回原始路径和"伪"控制点序列
             return path_xy.copy(), path_xy.copy()
 
         sol = res.x  # (2*n_ctrl,)
@@ -345,5 +380,10 @@ class BSplineGlobalSmoother(object):
         smooth_x = B @ cx
         smooth_y = B @ cy
         smooth_path_xy = np.stack([smooth_x, smooth_y], axis=1)
+
+        # ---- 写入缓存 ----
+        self._prev_path = path_xy.copy()
+        self._cache_smooth = smooth_path_xy.copy()
+        self._cache_ctrl = ctrl_pts_xy.copy()
 
         return smooth_path_xy, ctrl_pts_xy

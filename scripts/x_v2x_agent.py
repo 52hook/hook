@@ -92,6 +92,8 @@ class Xagent(BasicAgent):
             Rd=np.diag([2000.0, 8000.0])                    # [Δa, Δδ]
         )
         self.Q_origin = copy.deepcopy(self._model.Q)
+        # 构建参数化 NLP（只编译一次，后续复用）
+        self._model.setup_parametric_nlp()
         self._log_data = []
         self._simu_time = 0
 
@@ -693,10 +695,9 @@ class Xagent(BasicAgent):
         # APF diagnostics
         apf_obs = apf_pede = apf_nc_road = apf_c_road = apf_traffic = apf_ttc = 0.0
 
-        # ========== 4. 构建代价函数和约束（在 model 内部） ==========
-        self._model.solver_add_cost()
+        # ========== 4. 收集 APF 数据并打包参数（参数化 NLP 路径） ==========
 
-        # ----- 车道线相关约束 / 代价 -----
+        # ----- 车道线参数 -----
         lane_location = self._vehicle.get_location()
         lane_location.z += 2.0
         wp = self._map.get_waypoint(lane_location, project_to_road=True)
@@ -748,63 +749,70 @@ class Xagent(BasicAgent):
         wq1 = self._wq(1)
         wq3 = self._wq(3)
 
-        # ------------ 左车道线 ------------
+        # 判断左车道线类型：0=无, 1=可跨, 2=不可跨
+        l_active, l_type, l_dir = 0.0, 0.0, 1.0
         if wq0[1].value == 2 or wq3[1].value == 2:
             if self.lat_dis_wp_ev(wq1[0], self._env.ego_vehicle) < 1.7:
                 if close_left_nc:
-                    self._model.solver_add_nc_road_pf([[left_bound, 1]], wp_yaw, carla=True)
+                    l_active, l_type, l_dir = 1.0, 2.0, 1.0
                     apf_nc_road += self._model.nc_road_pf([[left_bound, 1]], ref_traj, wp_yaw)
             elif wp.left_lane_marking.type in lcrossable_list:
                 if close_left_c:
-                    self._model.solver_add_c_road_pf([left_bound], wp_yaw, carla=True)
+                    l_active, l_type, l_dir = 1.0, 1.0, 1.0
                     apf_c_road += self._model.c_road_pf([left_bound], ref_traj, wp_yaw)
             elif wp.left_lane_marking.type in lncrossable_list:
                 if close_left_nc:
-                    self._model.solver_add_nc_road_pf([[left_bound, 1]], wp_yaw, carla=True)
+                    l_active, l_type, l_dir = 1.0, 2.0, 1.0
                     apf_nc_road += self._model.nc_road_pf([[left_bound, 1]], ref_traj, wp_yaw)
         elif wp.left_lane_marking.type in lcrossable_list:
             if close_left_c:
-                self._model.solver_add_c_road_pf([left_bound], wp_yaw, carla=True)
+                l_active, l_type, l_dir = 1.0, 1.0, 1.0
                 apf_c_road += self._model.c_road_pf([left_bound], ref_traj, wp_yaw)
         elif wp.left_lane_marking.type in lncrossable_list:
             if close_left_nc:
-                self._model.solver_add_nc_road_pf([[left_bound, 1]], wp_yaw, carla=True)
+                l_active, l_type, l_dir = 1.0, 2.0, 1.0
                 apf_nc_road += self._model.nc_road_pf([[left_bound, 1]], ref_traj, wp_yaw)
 
-        # ------------ 右车道线 ------------
+        # 判断右车道线类型
+        r_active, r_type, r_dir = 0.0, 0.0, -1.0
         if wq0[1].value == 1 or wq3[1].value == 1:
             if self.lat_dis_wp_ev(wq0[0], self._env.ego_vehicle) < 1.7:
                 if close_right_nc:
-                    self._model.solver_add_nc_road_pf([[right_bound, -1]], wp_yaw, carla=True)
+                    r_active, r_type, r_dir = 1.0, 2.0, -1.0
                     apf_nc_road += self._model.nc_road_pf([[right_bound, -1]], ref_traj, wp_yaw)
             elif wp.right_lane_marking.type in rcrossable_list:
                 if close_right_c:
-                    self._model.solver_add_c_road_pf([right_bound], wp_yaw, carla=True)
+                    r_active, r_type, r_dir = 1.0, 1.0, -1.0
                     apf_c_road += self._model.c_road_pf([right_bound], ref_traj, wp_yaw)
             elif wp.right_lane_marking.type in rncrossable_list:
                 if close_right_nc:
-                    self._model.solver_add_nc_road_pf([[right_bound, -1]], wp_yaw, carla=True)
+                    r_active, r_type, r_dir = 1.0, 2.0, -1.0
                     apf_nc_road += self._model.nc_road_pf([[right_bound, -1]], ref_traj, wp_yaw)
         elif wp.right_lane_marking.type in rcrossable_list:
             if close_right_c:
-                self._model.solver_add_c_road_pf([right_bound], wp_yaw, carla=True)
+                r_active, r_type, r_dir = 1.0, 1.0, -1.0
                 apf_c_road += self._model.c_road_pf([right_bound], ref_traj, wp_yaw)
         elif wp.right_lane_marking.type in rncrossable_list:
             if close_right_nc:
-                self._model.solver_add_nc_road_pf([[right_bound, -1]], wp_yaw, carla=True)
+                r_active, r_type, r_dir = 1.0, 2.0, -1.0
                 apf_nc_road += self._model.nc_road_pf([[right_bound, -1]], ref_traj, wp_yaw)
 
-        # ----- 红灯约束 -----
+        lane_data = (wp_yaw, l_active, left_bound, l_type, l_dir,
+                     r_active, right_bound, r_type, r_dir)
+
+        # ----- 红灯参数 -----
         tl_bool, tl_waypoint, red_time_ratio = self.check_traffic_light()
+        tl_data = None
         if tl_bool:
             tl_x = (np.cos(-wp_yaw) * tl_waypoint.transform.location.x -
                     np.sin(-wp_yaw) * -tl_waypoint.transform.location.y)
-            self._model.solver_add_single_tr_lgt_pf_carla(wp_y, wp_yaw, tl_x,
-                                                          red_time_ratio=red_time_ratio)
+            tl_data = (1.0, wp_y, wp_yaw, tl_x, red_time_ratio)
             apf_traffic += self._model.traffic_pf(ref_traj, wp_y, wp_yaw, tl_x,
                                                    red_time_ratio=red_time_ratio)
+        else:
+            tl_data = (0.0, 0.0, 0.0, 0.0, 0.0)
 
-        # ----- APF 障碍 / 行人 / TTC -----
+        # ----- APF 障碍 / 行人 / TTC 参数 -----
         obs_ratio_front = 150
         obs_ratio_cross = 60
         obs_ratio_opp = 40
@@ -815,86 +823,116 @@ class Xagent(BasicAgent):
             obs_ratio_opp = 30
 
         if yield_for_opp:
-            # 10 太低导致 MPC 对对向车约束力骤降、猛打方向；提高到 25
             obs_ratio_opp = 25
 
         # === IGPR 方差 → 动态调整 APF 权重（消融开关: use_igpr_var）===
-        # k_sigma：方差放大系数；sigma_scale_max：上限（防止对向车等高方差目标过度放大）
         if self._use_igpr_var:
             k_sigma = 2.0
-            sigma_scale_max = 1.5  # ratio 最多放大到 1.5 倍
+            sigma_scale_max = 1.5
             obs_sigma_mean = float(np.mean(obs_stds)) if len(obs_stds) > 0 else 0.0
             sigma_scale = min(1.0 + k_sigma * obs_sigma_mean, sigma_scale_max)
         else:
-            sigma_scale = 1.0     # 关闭方差驱动，ratio 固定为 1.0
+            sigma_scale = 1.0
+            k_sigma = 2.0
+            sigma_scale_max = 1.5
 
-        # 前向车辆（方差放大）
-        if len(obs_long_infer) > 0:
-            self._model.solver_add_soft_obs(
-                obs_long_infer, ratio=obs_ratio_front * sigma_scale, carla=True
-            )
-
-        # 对向直行车辆（不乘方差：对向车方差天然高但不代表更危险）
-        if len(obs_opp_infer) > 0:
-            self._model.solver_add_soft_obs(
-                obs_opp_infer, ratio=obs_ratio_opp, carla=True
-            )
-
-        # 横向 / 交叉车辆（方差放大）
-        if len(obs_cross_infer) > 0:
-            self._model.solver_add_soft_obs(
-                obs_cross_infer, ratio=obs_ratio_cross * sigma_scale, carla=True
-            )
-
-        # 行人 APF（单独用行人方差）
+        # 收集所有软 APF 障碍物到统一列表
+        soft_obs_list = []
+        # 前向车辆
+        for ob_traj in obs_long_infer:
+            soft_obs_list.append((1.0, 0.0, obs_ratio_front * sigma_scale, ob_traj))
+        # 对向车辆（不乘方差）
+        for ob_traj in obs_opp_infer:
+            soft_obs_list.append((1.0, 0.0, obs_ratio_opp, ob_traj))
+        # 横向车辆
+        for ob_traj in obs_cross_infer:
+            soft_obs_list.append((1.0, 0.0, obs_ratio_cross * sigma_scale, ob_traj))
+        # 行人
         if len(pedes) > 0:
             pede_sigma_mean = float(np.mean(pede_stds)) if len(pede_stds) > 0 else 0.0
             pede_sigma_scale = min(1.0 + k_sigma * pede_sigma_mean, sigma_scale_max)
-            self._model.solver_add_soft_obs(
-                pedes_infer, ratio=600 * pede_sigma_scale, carla=True, pede=True
-            )
+            for p_traj in pedes_infer:
+                soft_obs_list.append((1.0, 1.0, 600 * pede_sigma_scale, p_traj))
 
-        # TTC 势场
+        # TTC 参数
+        ttc_data = (0.0, 0.0, 0.0, 0.0)
         if lv is not None:
+            v_lv = np.sqrt(lv.get_velocity().x**2 + lv.get_velocity().y**2)
             if not is_roundabout_like:
-                self._model.solver_add_soft_ttc(lv, ratio=80)
+                ttc_data = (1.0, lv.get_location().x, -lv.get_location().y, v_lv)
                 ttc_val = self._model.soft_ttc_apf(lv, ref_traj, ratio=300)
             else:
                 ttc_val = self._model.soft_ttc_apf(lv, ref_traj, ratio=150)
-
             apf_ttc += ttc_val
             if ttc_val > 1e-3:
                 print("---------------the apf for ttc is attached-----------------")
 
-        # APF 诊断值
+        # APF 诊断值（数值计算，不影响求解）
         apf_obs += self._model.soft_obs_apf(obs_long, ref_traj)
         if len(obs_opp) > 0:
             apf_obs += 0.5 * self._model.soft_obs_apf(obs_opp, ref_traj)
         if len(obs_cross) > 0:
             apf_obs += 0.5 * self._model.soft_obs_apf(obs_cross, ref_traj)
-
         apf_pede += self._model.soft_obs_apf(pedes, ref_traj, pede=True)
 
         # ========== 4.5 椭圆硬约束兜底 ==========
-        if hasattr(self._model, "set_ellip_backup_obstacles"):
-            front_like = obs_long_infer + obs_opp_infer + obs_cross_infer
-            if len(front_like) > 0:
-                ellip_obs = front_like[:3]
-                self._model.set_ellip_backup_obstacles(
-                    ellip_obs,
-                    a=4.5,
-                    b=2.0,
-                    margin=0.25
-                )
-            else:
-                self._model.set_ellip_backup_obstacles([])
+        front_like = obs_long_infer + obs_opp_infer + obs_cross_infer
+        ellip_obs_list = []
+        ellip_active_mask = [False, False, False]
+        if len(front_like) > 0:
+            for ei, ob_traj in enumerate(front_like[:3]):
+                # 补齐长度
+                padded = list(ob_traj)
+                while len(padded) < self._model.horizon:
+                    padded.append(padded[-1])
+                ellip_obs_list.append((1.0, padded))
+                ellip_active_mask[ei] = True
 
-        # ========== 5. 构建 NLP 约束边界并求解 ==========
-        self._model.solver_add_bounds()
+        # ========== 4.6 OBCA 数据收集 ==========
+        obca_list = []
+        obca_active_mask = [False] * self._model.PM_MAX_OBCA
+        carbox = (2.5, 1.2)  # 默认值
+        if self._use_dual and hasattr(self, '_last_obs_Am_list'):
+            # 使用 section 2 中已经计算好的 OBCA 数据
+            pass
+        if self._use_dual:
+            # OBCA 数据在 section 2 中通过 enable_dual_collision 设置
+            # 从 model 中取回
+            if getattr(self._model, 'dual_enabled', False) and self._model.num_obs > 0:
+                bb_ego = self._vehicle.bounding_box
+                ego_L = 2.0 * float(bb_ego.extent.x) + 0.6
+                ego_W = 2.0 * float(bb_ego.extent.y) + 0.4
+                carbox = (ego_L / 2.0, ego_W / 2.0)
+                for m in range(self._model.num_obs):
+                    Am = np.array(self._model.obs_Am_list[m])
+                    bm = np.array(self._model.obs_bm_list[m]).flatten()
+                    # 对齐到 OBCA_E=4 边
+                    Am_flat = Am.flatten()
+                    if Am_flat.size < self._model.PM_OBCA_E * 2:
+                        Am_flat = np.pad(Am_flat, (0, self._model.PM_OBCA_E*2 - Am_flat.size))
+                    if bm.size < self._model.PM_OBCA_E:
+                        bm = np.pad(bm, (0, self._model.PM_OBCA_E - bm.size))
+                    obca_list.append((1.0, Am_flat[:self._model.PM_OBCA_E*2],
+                                     bm[:self._model.PM_OBCA_E]))
+                    obca_active_mask[m] = True
+
+        # ========== 5. 参数化求解 ==========
+        apf_params = self._model.pack_apf_params(
+            soft_obs_list=soft_obs_list,
+            lane_data=lane_data,
+            tl_data=tl_data,
+            ttc_data=ttc_data,
+            ellip_obs_list=ellip_obs_list,
+            obca_list=obca_list,
+            carbox=carbox
+        )
 
         tick = time.time()
-        state = self._model.solve_MPC(
-            ref_traj.T, current_state, self._next_states, u0
+        state = self._model.solve_parametric(
+            ref_traj.T, current_state, self._next_states, u0,
+            apf_params,
+            obca_active_mask=obca_active_mask,
+            ellip_active_mask=ellip_active_mask
         )
         time_2 = time.time() - tick
         self._env.computing_times.append(time_2)
