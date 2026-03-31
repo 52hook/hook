@@ -127,8 +127,7 @@ class Xagent(BasicAgent):
                                     heights,
                                     obs_infer,
                                     max_lat_dist=2.0,
-                                    min_long_dist=-2.0,
-                                    is_roundabout_like=False):
+                                    min_long_dist=-2.0):
         """
         过滤“明显在后方 / 另一条车道”的车辆，
         但保留交叉路口、环岛等场景里横向/斜向驶来的车。
@@ -193,11 +192,7 @@ class Xagent(BasicAgent):
                 keep_idx.append(i)
             else:
                 # === ③ 同向 / 近似同向 ===
-                # 环岛中 8m 内的近距离车辆一律保留，防止侧方车被过滤
-                if is_roundabout_like and dist < 8.0:
-                    keep_idx.append(i)
-                    continue
-                # 用”在前方 + 车道附近”过滤掉无关的对向车、后车
+                # 用“在前方 + 车道附近”过滤掉无关的对向车、后车
                 if rel_x < min_long_dist:
                     continue
                 if abs(rel_y) > max_lat_dist:
@@ -598,8 +593,7 @@ class Xagent(BasicAgent):
         obs, heights, obs_infer = self._filter_front_same_lane_obs(
             current_state, obs, heights, obs_infer,
             max_lat_dist=max_lat,
-            min_long_dist=min_long,
-            is_roundabout_like=is_roundabout_like
+            min_long_dist=min_long
         )
 
         # === 按航向把障碍拆成“纵向前车 / 交叉来车 / 对向直行车”（消融开关: use_opp_detect）===
