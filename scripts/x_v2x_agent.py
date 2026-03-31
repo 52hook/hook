@@ -387,15 +387,7 @@ class Xagent(BasicAgent):
         cx, cy = cx0.copy(), cy0.copy()
         cyaw, ck = cyaw0.copy(), ck0.copy()
 
-        # -------- 1.2 B 样条小幅”修饰”（消融开关: use_bspline）--------
-        # 判断当前是否在环岛弯道（非 junction 的高曲率路段）
-        _ego_wp_bs = self._map.get_waypoint(
-            self._vehicle.get_location(), project_to_road=True)
-        _in_junction_bs = _ego_wp_bs.is_junction if _ego_wp_bs else False
-        _k_abs_pre = np.abs(ck0)
-        _k_max_pre = float(np.max(_k_abs_pre)) if len(_k_abs_pre) > 0 else 0.0
-        _is_roundabout_curve = (_k_max_pre > 0.015) and (not _in_junction_bs)
-
+        # -------- 1.2 B 样条小幅“修饰”（消融开关: use_bspline）--------
         if self._use_bspline and base_path.shape[0] >= 4:
             try:
                 smooth_path, ctrl_pts = self._bspline_smoother.smooth(
@@ -410,9 +402,6 @@ class Xagent(BasicAgent):
                     # 检测到红灯时完全禁用 B-spline，用原始路径保持直行
                     if self._last_traffic_light is not None:
                         alpha_bs = 0.0
-                    elif _is_roundabout_curve:
-                        # 环岛弯道（非 junction）：降低 B-spline 权重防参考线外凸
-                        alpha_bs = 0.2
                     else:
                         alpha_bs = 0.7
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
