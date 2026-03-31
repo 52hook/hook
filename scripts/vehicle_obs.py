@@ -143,6 +143,14 @@ class Vehicle:
         self.dual_damping = 0.7        # λ/μ 缓存阻尼系数
         self.qp_blend_alpha = 0.95     # QP 混合比例（上一拍 MPC 占 95%，QP 仅占 5%）
 
+        # === 额外：椭圆硬约束兜底（可选） ===
+        # 外面通过 set_ellip_backup_obstacles() 配置
+        self._ellip_obs_infer = None   # 形如 [[ [x,y,yaw], ... ],  ... ]
+        self._ellip_a = 4.5            # 椭圆长半轴（米），近似车长 + 安全裕度
+        self._ellip_b = 2.0            # 椭圆短半轴（米），近似车宽 + 安全裕度
+        self._ellip_margin = 0.1       # 再往外扩一点，（1+margin)^2 就是约束右边界
+        self._ellip_constraints = 0    # 实际生成了多少个椭圆约束，用来配 lbg/ubg
+
         # === Warm-start caches ===
         self._u_cache = None
         self._x_cache = None
@@ -784,6 +792,33 @@ class Vehicle:
             ca.reshape(self.X, -1, 1)
         )
 
+    def set_ellip_backup_obstacles(self, obs_infer, a=4.5, b=2.0, margin=0.1):
+        """
+        配置“椭圆硬约束兜底”的动态障碍物（在构造 solver 时调用一次即可）
+
+        参数：
+        ----------
+        obs_infer : list
+            形如：
+                [
+                  [ [x0,y0,yaw0], [x1,y1,yaw1], ... ],  # 障碍车 1 的预测轨迹
+                  [ [x0,y0,yaw0], [x1,y1,yaw1], ... ],  # 障碍车 2 ...
+                  ...
+                ]
+            时间步长度可以 < horizon，不够会自动用最后一个点补齐。
+            坐标系要求和 z_ref / self.X 一致（右手系，yaw 为弧度）。
+        a, b : float
+            椭圆的长半轴 / 短半轴（米）。建议略大于“自车 + 障碍车”的总包络尺寸。
+        margin : float
+            额外的尺度裕度，实际约束是：
+                ((x')^2 / a^2 + (y')^2 / b^2) >= (1 + margin)^2
+        """
+        self._ellip_obs_infer = obs_infer
+        self._ellip_a = float(a)
+        self._ellip_b = float(b)
+        self._ellip_margin = float(margin)
+
+
     # ========= 以下 QP 相关接口保留占位，但不再在 agent 中调用 =========
 
     def obca_qp_preplan(self, ref_traj, current_state,
@@ -1155,6 +1190,50 @@ class Vehicle:
                     #    （注意：这里保持你原来的形式，不再强行加 d_safe）
                     self.g.append(-g.T @ mu + ((Am @ tk) - bm).T @ lam + s_var)
 
+        # === 椭圆硬约束兜底（如果已经配置） ===
+        self._ellip_constraints = 0
+        ellip_obs = getattr(self, "_ellip_obs_infer", None)
+        if ellip_obs is not None and len(ellip_obs) > 0:
+            a_e = float(getattr(self, "_ellip_a", 4.5))
+            b_e = float(getattr(self, "_ellip_b", 2.0))
+
+            # 保证每个障碍的预测长度 >= horizon
+            for ob in ellip_obs:
+                if len(ob) < self.horizon:
+                    last = ob[-1]
+                    for _ in range(self.horizon - len(ob)):
+                        ob.append(last)
+
+            # 对每个障碍、每个预测步，加一个椭圆外约束
+            for ob in ellip_obs:
+                for i in range(self.horizon):
+                    ob_i = ob[i]
+                    ox = float(ob_i[0])
+                    oy = float(ob_i[1])
+                    yaw = float(ob_i[2])  # 假设为弧度
+
+                    c_y = math.cos(yaw)
+                    s_y = math.sin(yaw)
+
+                    # 自车质心（当前预测步 i）
+                    x_e = self.X[0, i]
+                    y_e = self.X[1, i]
+
+                    dx = x_e - ox
+                    dy = y_e - oy
+
+                    # 旋转到障碍车的局部坐标系（绕其 yaw）
+                    x_rot =  dx * c_y + dy * s_y
+                    y_rot = -dx * s_y + dy * c_y
+
+                    # 椭圆距离函数（不用开根号）
+                    phi = (x_rot / a_e) ** 2 + (y_rot / b_e) ** 2
+
+                    # 约束形式：phi >= (1 + margin)^2
+                    self.g.append(phi)
+                    self._ellip_constraints += 1
+
+
         # 3) 构建 NLP
         nlp_prob = {
             'f': self.obj,
@@ -1219,6 +1298,14 @@ class Vehicle:
                     self.ubg.append(np.inf)
                     self.ubg.append(np.inf)
                 
+        # (4) 椭圆硬约束兜底：phi >= (1 + margin)^2
+        if getattr(self, "_ellip_constraints", 0) > 0:
+            r2 = (1.0 + float(getattr(self, "_ellip_margin", 0.1))) ** 2
+            for _ in range(self._ellip_constraints):
+                self.lbg.append(r2)
+                self.ubg.append(2e19)
+
+
         # 5) 变量的上下界 lbx / ubx
 
         # (a) 控制输入 [acc, steer]
