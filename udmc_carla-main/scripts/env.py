@@ -169,7 +169,7 @@ class PIDAccelerationController():
 
 
 class Env:
-    def __init__(self, host="localhost", port=2000, map_id='05', birdeye_view=False, 
+    def __init__(self, host="localhost", port=int(os.environ.get('CARLA_PORT', 2001)), map_id='05', birdeye_view=False,
                  display_method='spec',recording=True, dt=0.05, is_Leaderboard=False) -> None:
         self.client = carla.Client(host, port)
         self.client.set_timeout(10.0)
