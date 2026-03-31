@@ -127,7 +127,8 @@ class Xagent(BasicAgent):
                                     heights,
                                     obs_infer,
                                     max_lat_dist=2.0,
-                                    min_long_dist=-2.0):
+                                    min_long_dist=-2.0,
+                                    is_roundabout_like=False):
         """
         过滤“明显在后方 / 另一条车道”的车辆，
         但保留交叉路口、环岛等场景里横向/斜向驶来的车。
@@ -192,7 +193,11 @@ class Xagent(BasicAgent):
                 keep_idx.append(i)
             else:
                 # === ③ 同向 / 近似同向 ===
-                # 用“在前方 + 车道附近”过滤掉无关的对向车、后车
+                # 环岛中 8m 内的近距离车辆一律保留，防止侧方车被过滤
+                if is_roundabout_like and dist < 8.0:
+                    keep_idx.append(i)
+                    continue
+                # 用”在前方 + 车道附近”过滤掉无关的对向车、后车
                 if rel_x < min_long_dist:
                     continue
                 if abs(rel_y) > max_lat_dist:
@@ -579,8 +584,8 @@ class Xagent(BasicAgent):
 
         # 紧弯 / 环岛：横向多留一点，后方多看一点
         if k_window_max > 0.015:
-            max_lat = 4.0
-            min_long = -6.0
+            max_lat = 3.5
+            min_long = -4.0
             is_roundabout_like = True
         else:
             is_roundabout_like = False
@@ -593,12 +598,13 @@ class Xagent(BasicAgent):
         obs, heights, obs_infer = self._filter_front_same_lane_obs(
             current_state, obs, heights, obs_infer,
             max_lat_dist=max_lat,
-            min_long_dist=min_long
+            min_long_dist=min_long,
+            is_roundabout_like=is_roundabout_like
         )
 
         # === 按航向把障碍拆成“纵向前车 / 交叉来车 / 对向直行车”（消融开关: use_opp_detect）===
-        obs_long, obs_cross, obs_opp, obs_side = [], [], [], []
-        obs_long_infer, obs_cross_infer, obs_opp_infer, obs_side_infer = [], [], [], []
+        obs_long, obs_cross, obs_opp = [], [], []
+        obs_long_infer, obs_cross_infer, obs_opp_infer = [], [], []
 
         ego_x = float(current_state[0])
         ego_y = float(current_state[1])
@@ -640,15 +646,10 @@ class Xagent(BasicAgent):
                 if math.radians(50.0) <= abs_yaw <= math.radians(130.0):
                     obs_cross.append(ob)
                     obs_cross_infer.append(obs_infer[k])
-                # ③ 同向车：区分"侧方并行"与"纵向前车"
+                # ③ 同向前车 / 慢车
                 else:
-                    # 环岛中侧方并行车：|rel_x| < 4m 且 |rel_y| > 1.0m
-                    if is_roundabout_like and abs(rel_x) < 4.0 and abs(rel_y) > 1.0:
-                        obs_side.append(ob)
-                        obs_side_infer.append(obs_infer[k])
-                    else:
-                        obs_long.append(ob)
-                        obs_long_infer.append(obs_infer[k])
+                    obs_long.append(ob)
+                    obs_long_infer.append(obs_infer[k])
 
         # 是否进入“对向直行车减速让行模式”（消融: 禁用时永远不让行）
         # 对向让行触发距离从 18m 降到 12m，避免路口转弯时过早让行
@@ -822,11 +823,9 @@ class Xagent(BasicAgent):
         obs_ratio_cross = 60
         obs_ratio_opp = 40
 
-        obs_ratio_side = 200   # 侧方并行车：高权重防碰擦
-
         if is_roundabout_like:
-            obs_ratio_front = 120
-            obs_ratio_cross = 60
+            obs_ratio_front = 80
+            obs_ratio_cross = 40
             obs_ratio_opp = 30
 
         if yield_for_opp:
@@ -861,12 +860,6 @@ class Xagent(BasicAgent):
                 obs_cross_infer, ratio=obs_ratio_cross * sigma_scale, carla=True
             )
 
-        # 侧方并行车（环岛防别车，高权重）
-        if len(obs_side_infer) > 0:
-            self._model.solver_add_soft_obs(
-                obs_side_infer, ratio=obs_ratio_side * sigma_scale, carla=True
-            )
-
         # 行人 APF（单独用行人方差）
         if len(pedes) > 0:
             pede_sigma_mean = float(np.mean(pede_stds)) if len(pede_stds) > 0 else 0.0
@@ -893,14 +886,12 @@ class Xagent(BasicAgent):
             apf_obs += 0.5 * self._model.soft_obs_apf(obs_opp, ref_traj)
         if len(obs_cross) > 0:
             apf_obs += 0.5 * self._model.soft_obs_apf(obs_cross, ref_traj)
-        if len(obs_side) > 0:
-            apf_obs += self._model.soft_obs_apf(obs_side, ref_traj)
 
         apf_pede += self._model.soft_obs_apf(pedes, ref_traj, pede=True)
 
         # ========== 4.5 椭圆硬约束兜底 ==========
         if hasattr(self._model, "set_ellip_backup_obstacles"):
-            front_like = obs_long_infer + obs_opp_infer + obs_cross_infer + obs_side_infer
+            front_like = obs_long_infer + obs_opp_infer + obs_cross_infer
             if len(front_like) > 0:
                 ellip_obs = front_like[:3]
                 self._model.set_ellip_backup_obstacles(
