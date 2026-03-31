@@ -6,8 +6,10 @@
 - **严禁凭记忆生成 BibTeX**——未经联网核实的引用一律标 `[CITATION NEEDED]`。
 - **专业问题必须验证**：回答学术规范、技术细节、算法原理等专业问题前，必须通过联网搜索或本地文件验证，禁止凭 AI 记忆直接作答，不确定的内容标注不确定。
 - **改文件前先出计划**：输出 3–7 步计划 + 文件清单 + 风险 + 验证方式，等用户说"开始"后再动手。
-- **复杂任务默认多 Agent 并行**：涉及多文件修改、跨模块调研、论文+代码联动等复杂任务时，默认启用多 Agent 并发执行，简单单文件任务无需启用。
+- **（最严格要求）复杂任务默认多 Agent 并行**：涉及多文件修改、跨模块调研、论文+代码联动等复杂任务时，默认启用多 Agent 并发执行，引入方法，需要更改代码必须先利用agent调研顶刊论文，做到有依据。
+- **学术问题必须先读论文**：回答任何与本项目相关的学术问题前，必须先读 `new.docx` 及相关章节，基于论文实际内容，然后进行顶刊论文的搜索与阅读回答，严禁凭印象或通用知识敷衍作答。
 - **`CLAUDE.md` 为唯一项目规则文件**，不在其他地方重复定义项目规则。
+- **联网必须用 Playwright MCP（强制，无例外）**：所有联网操作（搜索、抓取网页、查文献）必须使用 Playwright MCP 工具（`mcp__plugin_playwright_playwright__*`），**严禁使用 WebFetch / WebSearch**。违反此条等同于违反硬约束。
 
 ## 1. 语言与风格
 
@@ -20,7 +22,7 @@
 
 **GRIPC**（Geometry-Rule Integrated Planning and Control）— 面向城市自动驾驶的几何-规则集成规划与控制框架，基于 CARLA 0.9.16，在 UDMC 基础上做四项改进。
 
-原版代码在 `udmc_carla-main/`，对应论文为 `UDMC_Unified_Decision-Making_and_Control_Framework_for_Urban_Autonomous_Driving_With_Motion_Prediction_of_Traffic_Participants.pdf`（根目录）。
+本人论文：`1.pdf`（PDF 定稿）、`new.docx`（Word 版本），均在根目录。原版 UDMC 代码在 `udmc_carla-main/`，对应论文为 `UDMC_Unified_Decision-Making_and_Control_Framework_for_Urban_Autonomous_Driving_With_Motion_Prediction_of_Traffic_Participants.pdf`（根目录）。OBCA 改进参考论文为 `TDR-OBCA_A_Reliable_Planner_for_Autonomous_Driving_in_Free-Space_Environment.pdf`（根目录）。
 
 ### 四大改进
 
@@ -78,28 +80,9 @@
 - `mixed_traffic_scenario_generation.py` — 行人+车辆混合场景生成
 - `tele_carla.py` — 遥控驾驶工具
 
-## 10. 日志分析方法
+## 10. 调试提示
 
-调试问题时应结合 `logs/` 目录下的运行日志辅助分析。日志文件为空格分隔的 14 列浮点数（每行一个仿真步），列定义如下：
-
-| 列号 | 名称 | 含义 |
-|------|------|------|
-| 0 | time | 仿真时间 (s) |
-| 1 | dist_error | 横向跟踪误差 (m) |
-| 2 | yaw_error | 航向误差 (rad) |
-| 3 | vel_error | 速度误差 (km/h) |
-| 4 | acc | 纵向加速度 |
-| 5 | steer | 方向盘转角 |
-| 6 | apf_obs | 障碍车辆 APF |
-| 7 | apf_ttc | TTC 势场 |
-| 8 | apf_pede | 行人 APF |
-| 9 | apf_nc_road | 不可穿越道路 APF |
-| 10 | apf_c_road | 可穿越道路 APF |
-| 11 | apf_traffic | 红灯 APF |
-| 12 | cost_time | MPC 求解时间 (s) |
-| 13 | min_dist_to_obs | 与最近障碍物距离 (m)，来自 CARLA world 全量查询，不受过滤影响 |
-
-用 `extract_metrics.py` 可批量提取统计指标。分析碰撞/别车等问题时重点关注 `min_dist_to_obs`（列13）骤降、`apf_obs`（列7）突变、`steer`（列5）急变。
+调试问题时应主动读取 `logs/` 目录下的运行日志（空格分隔 14 列浮点数，列定义见 `extract_metrics.py`）辅助分析。
 
 ## 11. 目录结构速查
 
