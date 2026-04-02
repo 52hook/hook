@@ -1872,8 +1872,136 @@ class Vehicle:
         self._pm_lam_g_cache = None   # 约束 Lagrange multipliers
         self._pm_ready = True
 
-        print(f"[Vehicle] 参数化 NLP 编译完成，耗时 {_time.time()-t0:.2f}s，"
+        t1 = _time.time()
+        print(f"[Vehicle] 完整 NLP 编译完成，耗时 {t1-t0:.2f}s，"
               f"变量数 {pm_opt.shape[0]}，约束数 {len(lbg)}，参数数 {P_all.shape[0]}")
+
+        # ============ 6. 编译轻量版 NLP（无 OBCA 对偶，仅 U+X） ============
+        # 大部分时间步没有近距离 OBCA 障碍，用这个更快的 solver
+        pm_opt_lite = ca.vertcat(
+            ca.reshape(self.U, -1, 1),
+            ca.reshape(self.X, -1, 1),
+        )
+        # 轻量版约束 = 动力学 + rate + 椭圆（无 OBCA）
+        g_lite = []
+        g_lite.append(self.X[:, 0] - self.P[:, 0])
+        for i in range(N):
+            err = self.X[0:5, i] - self.P[0:5, i]
+            # 代价函数复用完整版的 obj（编译时已固定）
+            g_lite.append(self.X[:, i+1] - self.f(self.X[:, i], self.U[:, i]))
+        for i in range(N - 1):
+            g_lite.append(self.U[0, i+1] - self.U[0, i])
+            g_lite.append(self.U[1, i+1] - self.U[1, i])
+        # 椭圆约束（复用相同参数）
+        for em in range(MAX_ELLIP):
+            eb_off = self._pm_off_ellip + em * N_PER_ELLIP
+            for i in range(N):
+                ex_p = P_apf[eb_off + 1 + i*3]
+                ey_p = P_apf[eb_off + 1 + i*3 + 1]
+                ey_yaw = P_apf[eb_off + 1 + i*3 + 2]
+                dx_e = self.X[0,i] - ex_p;  dy_e = self.X[1,i] - ey_p
+                ce = ca.cos(ey_yaw); se = ca.sin(ey_yaw)
+                xr_e = dx_e*ce + dy_e*se;  yr_e = -dx_e*se + dy_e*ce
+                phi = (xr_e/ea)**2 + (yr_e/eb)**2
+                g_lite.append(phi)
+
+        # 轻量版目标函数（复用相同 APF 代价，但去掉 OBCA 终端代价和 slack）
+        obj_lite = 0
+        for i in range(N):
+            err = self.X[0:5, i] - self.P[0:5, i]
+            obj_lite += ca.mtimes([err.T, self.Q_o, err]) \
+                 + ca.mtimes([self.U[:, i].T, self.R, self.U[:, i]])
+            if i < N - 1:
+                du = self.U[:, i] - self.U[:, i+1]
+                obj_lite += ca.mtimes([du.T, self.Rd, du])
+            obj_lite += 0.5 * self.X[4, i]**2 + 0.2 * self.X[5, i]**2
+        # 复用软障碍物 APF
+        for m in range(MAX_SOFT):
+            base = self._pm_off_soft + m * N_PER_SOFT
+            active  = P_apf[base]
+            is_pede = P_apf[base + 1]
+            ratio   = P_apf[base + 2]
+            rw = (1 - is_pede) * rw_veh + is_pede * rw_pede
+            for i in range(N):
+                ox   = P_apf[base + 3 + i*3]
+                oy   = P_apf[base + 3 + i*3 + 1]
+                oyaw = P_apf[base + 3 + i*3 + 2]
+                cy = ca.cos(-oyaw); sy = ca.sin(-oyaw)
+                for ego_c in self._ego_circles_sym(self.X[:, i]):
+                    dx = ego_c[0] - ox;  dy = ego_c[1] - oy
+                    xr = dx*cy - dy*sy;  yr = dx*sy + dy*cy
+                    a_e = (1 - is_pede) * 2.3 + is_pede * 0.5
+                    b_e = (1 - is_pede) * 1.0 + is_pede * 0.5
+                    dist = xr**2 / a_e**2 + yr**2 / b_e**2
+                    dist_s = ca.fmax(dist, 1e-4)
+                    veh_c = 12 * (1/dist_s - 0.5) * ratio * rw / (i+1)
+                    ped_c = 12 * ca.exp(-dist_s) * ratio * rw / (i+1)
+                    obj_lite += active * ((1 - is_pede) * veh_c + is_pede * ped_c)
+        # 车道线 APF
+        for la, bd, lt, ld in lanes:
+            for i in range(N):
+                for ec in self._ego_circles_sym(self.X[:, i]):
+                    sy_lane = ca.sin(-wp_yaw_p)*ec[0] + ca.cos(-wp_yaw_p)*ec[1]
+                    dy_l = sy_lane - bd
+                    dist_l = ca.fabs(dy_l)
+                    c_cost = ca.if_else(dist_l < 1.0, self.ac_r * (1.0 - dist_l)**2, 0.0)
+                    nc_over = ca.if_else(
+                        ld > 0,
+                        ca.if_else(sy_lane > bd - 0.3, float(self.rule_weights.nc_line_over_penalty),
+                                   self.anc_r / (dy_l**2 + 1e-6)),
+                        ca.if_else(sy_lane < bd + 0.3, float(self.rule_weights.nc_line_over_penalty),
+                                   self.anc_r / (dy_l**2 + 1e-6))
+                    )
+                    nc_cost = ca.if_else(dy_l**2 < 4.0, nc_over, 0.0)
+                    obj_lite += la * ca.if_else(lt > 1.5, nc_cost,
+                                ca.if_else(lt > 0.5, c_cost, 0.0))
+        # 红灯 APF
+        for i in range(N):
+            sx = ca.cos(-tl_yaw)*self.X[0,i] - ca.sin(-tl_yaw)*self.X[1,i]
+            d_tl = -(sx - tl_x) + 1.5
+            d_tl_s = ca.fmax(d_tl, 0.01)
+            obj_lite += tl_a * tl_r * self.w_tr_long / d_tl_s
+        # TTC APF
+        for i in range(N):
+            ex, ey, ev = self.X[0,i], self.X[1,i], self.X[3,i]
+            dx_t = lv_x - ex;  dy_t = lv_y - ey
+            d_t = ca.sqrt(dx_t**2 + dy_t**2 + 1e-6)
+            rv = ev - lv_v;    rv_s = ca.fmax(rv, 0.1)
+            ttc_v = d_t / rv_s
+            cond = (rv > 0) * (d_t < 45.0) * (ttc_v < 6.0)
+            b_ttc = ttc_ratio_val * (1.0/ca.fmax(ttc_v, 0.1) - 1.0/6.0)
+            obj_lite += ttc_a * ca.if_else(cond, b_ttc, 0.0)
+
+        nlp_lite = {'f': obj_lite, 'x': pm_opt_lite, 'p': P_all, 'g': ca.vertcat(*g_lite)}
+        self._pm_solver_lite = ca.nlpsol('pm_lite', 'ipopt', nlp_lite, opts)
+
+        # 轻量版 lbg/ubg
+        lbg_l = [0.0] * ((N+1)*ns)  # 动力学等式
+        ubg_l = [0.0] * ((N+1)*ns)
+        for _ in range(N-1):
+            lbg_l.extend([-0.9, -0.2]);  ubg_l.extend([0.9, 0.2])
+        for _ in range(MAX_ELLIP * N):
+            lbg_l.append(-2e19);  ubg_l.append(2e19)
+        self._pm_lite_lbg = np.array(lbg_l, dtype=float)
+        self._pm_lite_ubg = np.array(ubg_l, dtype=float)
+        # 轻量版 lbx/ubx
+        lbx_l = [];  ubx_l = []
+        for _ in range(N):
+            lbx_l.extend([self.acc_lbound, -self.steer_bound])
+            ubx_l.extend([self.acc_ubound,  self.steer_bound])
+        for _ in range(N+1):
+            lbx_l.extend([-1e19, -1e19, -1e19, 0.0, -1e19, -1e19])
+            ubx_l.extend([ 1e19,  1e19,  1e19, self.target_v, 1e19, 1e19])
+        self._pm_lite_lbx = np.array(lbx_l, dtype=float)
+        self._pm_lite_ubx = np.array(ubx_l, dtype=float)
+
+        # 轻量版 warm-start 缓存
+        self._pm_lite_x0_cache = None
+        self._pm_lite_lam_x_cache = None
+        self._pm_lite_lam_g_cache = None
+
+        print(f"[Vehicle] 轻量 NLP 编译完成，耗时 {_time.time()-t1:.2f}s，"
+              f"变量数 {pm_opt_lite.shape[0]}，约束数 {len(lbg_l)}")
 
     # ------------------------------------------------------------------
     def pack_apf_params(self,
@@ -2106,32 +2234,63 @@ class Vehicle:
                     lbg[gi] = r2
                 # else: lbg=-2e19（无约束，已在 base 中设好）
 
-        # ---- 求解 (Quirynen 2024: active-set warm-start via lam_x0/lam_g0) ----
-        solver_args = dict(
-            x0=init_control, p=p_all,
-            lbg=lbg, ubg=ubg, lbx=lbx, ubx=ubx
-        )
-        # Lagrange multiplier warm-start: 传递上一拍的对偶信息给 qpOASES
-        if hasattr(self, '_pm_lam_x_cache') and self._pm_lam_x_cache is not None:
-            solver_args['lam_x0'] = self._pm_lam_x_cache
-        if hasattr(self, '_pm_lam_g_cache') and self._pm_lam_g_cache is not None:
-            solver_args['lam_g0'] = self._pm_lam_g_cache
-
-        start_t = time.time()
-        res = self._pm_solver(**solver_args)
-        cost_time = time.time() - start_t
-        est = res['x'].full().flatten()
-
-        # ---- 解析 ----
+        # ---- 选择 solver：有 OBCA 激活 → 完整版，无 OBCA → 轻量版 ----
+        any_obca = any(obca_active_mask) if obca_active_mask else False
         size_u = N * nc
         size_x = (N + 1) * ns
-        u_opt = est[:size_u].reshape(N, nc)
-        x_opt = est[size_u:size_u + size_x].reshape(N + 1, ns)
 
-        # 缓存完整解（含对偶）+ Lagrange multipliers，供下一步 warm-start
-        self._pm_x0_cache = est.copy()
-        self._pm_lam_x_cache = res['lam_x'].full().flatten()
-        self._pm_lam_g_cache = res['lam_g'].full().flatten()
+        if any_obca:
+            # 完整版（含 OBCA 对偶变量）
+            solver_args = dict(x0=init_control, p=p_all,
+                               lbg=lbg, ubg=ubg, lbx=lbx, ubx=ubx)
+            if self._pm_lam_x_cache is not None:
+                solver_args['lam_x0'] = self._pm_lam_x_cache
+            if self._pm_lam_g_cache is not None:
+                solver_args['lam_g0'] = self._pm_lam_g_cache
+
+            start_t = time.time()
+            res = self._pm_solver(**solver_args)
+            cost_time = time.time() - start_t
+            est = res['x'].full().flatten()
+            u_opt = est[:size_u].reshape(N, nc)
+            x_opt = est[size_u:size_u + size_x].reshape(N + 1, ns)
+            self._pm_x0_cache = est.copy()
+            self._pm_lam_x_cache = res['lam_x'].full().flatten()
+            self._pm_lam_g_cache = res['lam_g'].full().flatten()
+        else:
+            # 轻量版（无 OBCA 对偶，86 变量，更快）
+            base_only = base_init  # [U_flat, X_flat]，无对偶
+            lite_lbg = self._pm_lite_lbg.copy()
+            lite_ubg = self._pm_lite_ubg.copy()
+            # 激活椭圆约束
+            ellip_g_start_lite = (N+1)*ns + (N-1)*2
+            for em in range(MAX_ELLIP):
+                for i in range(N):
+                    gi = ellip_g_start_lite + em * N + i
+                    if ellip_active_mask is not None and em < len(ellip_active_mask) and ellip_active_mask[em]:
+                        lite_lbg[gi] = r2
+
+            solver_args = dict(x0=base_only, p=p_all,
+                               lbg=lite_lbg, ubg=lite_ubg,
+                               lbx=self._pm_lite_lbx, ubx=self._pm_lite_ubx)
+            if self._pm_lite_lam_x_cache is not None:
+                solver_args['lam_x0'] = self._pm_lite_lam_x_cache
+            if self._pm_lite_lam_g_cache is not None:
+                solver_args['lam_g0'] = self._pm_lite_lam_g_cache
+
+            start_t = time.time()
+            res = self._pm_solver_lite(**solver_args)
+            cost_time = time.time() - start_t
+            est = res['x'].full().flatten()
+            u_opt = est[:size_u].reshape(N, nc)
+            x_opt = est[size_u:size_u + size_x].reshape(N + 1, ns)
+            self._pm_lite_x0_cache = est.copy()
+            self._pm_lite_lam_x_cache = res['lam_x'].full().flatten()
+            self._pm_lite_lam_g_cache = res['lam_g'].full().flatten()
+            # 清除完整版缓存（solver 切换时尺寸不匹配）
+            self._pm_x0_cache = None
+            self._pm_lam_x_cache = None
+            self._pm_lam_g_cache = None
 
         if self.carla:
             return u_opt[:, 0], u_opt[:, 1], x_opt, cost_time

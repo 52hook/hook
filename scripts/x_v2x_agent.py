@@ -480,14 +480,14 @@ class Xagent(BasicAgent):
             )
 
             # Gratzer et al. 2024 (IEEE T-ITS): 双层距离筛选
-            # <8m → OBCA 精确多边形, 8-25m → 椭圆兜底, >25m → 仅 APF
+            # <15m → OBCA 精确多边形, 15-32m → 椭圆/APF
             max_dual_veh = 2   # 与 PM_MAX_OBCA=2 对齐 (Richards & How 2005)
-            max_range = 25.0
+            max_range = 32.0
             others_for_dual = []
             min_obs_dist = None
             for a in others_sorted:
                 d = veh_location.distance(a.get_location())
-                if d <= 8.0 and len(others_for_dual) < max_dual_veh:
+                if d <= 15.0 and len(others_for_dual) < max_dual_veh:
                     others_for_dual.append(a)
                 if d <= max_range:
                     if (min_obs_dist is None) or (d < min_obs_dist):
@@ -948,9 +948,6 @@ class Xagent(BasicAgent):
 
         self._a_opt = state[0]
         self._delta_opt = state[1]
-
-        # 调试：打印 MPC 求解结果
-        print(f"[DBG] solve_time={state[-1]*1000:.1f}ms a_opt[0]={float(state[0][0]):.3f} delta_opt[0]={float(state[1][0]):.4f} x_opt[1]={state[2][1,:3]}")
 
         # ====== 6. 对 a / δ 做一阶低通滤波 + 安全防倒车 ======
         raw_a = float(self._a_opt[0])
