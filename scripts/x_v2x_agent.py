@@ -489,6 +489,8 @@ class Xagent(BasicAgent):
                         min_obs_dist = d
                 if len(others_for_dual) >= max_dual_veh:
                     break
+            # 限制实际送入 OBCA 的数量为 2，在 section 4.6 中截断
+            # 这样 enable_dual_collision 仍用完整列表，但参数化时只取最近 2 个
 
             # 只有最近障碍物 < 25m 时，这一拍才用 QP 预规划
             use_qp_this_step = (min_obs_dist is not None) and (min_obs_dist < 25.0)
@@ -502,7 +504,7 @@ class Xagent(BasicAgent):
                     include_types=('vehicle.',),   # 行人只用 APF
                     inflate_vehicle=0.6,
                     inflate_walker=0.45,
-                    max_obs=max_dual_veh,
+                    max_obs=2,                     # 只取最近 2 个送 OBCA，减少求解规模
                     y_flip=True
                 )
 
@@ -625,7 +627,11 @@ class Xagent(BasicAgent):
                         obs_opp_infer.append(obs_infer[k])
                         if (opp_min_dist is None) or (d < opp_min_dist):
                             opp_min_dist = d
-                    # 非路口直道上的对向车：直接跳过，不加入任何障碍列表
+                    elif d < 10.0:
+                        # 近距离对向车即使不满足空间条件，也作为普通障碍保留 APF
+                        obs_long.append(ob)
+                        obs_long_infer.append(obs_infer[k])
+                    # 远距离非路口对向车：跳过
                     continue
 
                 # ② 交叉 / 汇入交通：50°~130°
