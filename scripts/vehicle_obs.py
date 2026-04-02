@@ -2023,7 +2023,8 @@ class Vehicle:
         x_m[:-1, :] = x_m[1:, :]
 
         # ---- 拼装参数向量 p = [ref_flat, apf_flat] ----
-        c_p_ref = np.vstack((z0.T, xs)).T.flatten()
+        # 注意：CasADi ca.reshape 是列优先（Fortran order），numpy 必须匹配
+        c_p_ref = np.vstack((z0.T, xs)).T.flatten(order='F')
         p_all = np.concatenate([c_p_ref, apf_params])
 
         # ---- 构造初值 x0 (He et al. 2021 TDR-OBCA: 时间平移+对偶热启动) ----
