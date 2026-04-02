@@ -627,11 +627,7 @@ class Xagent(BasicAgent):
                         obs_opp_infer.append(obs_infer[k])
                         if (opp_min_dist is None) or (d < opp_min_dist):
                             opp_min_dist = d
-                    elif d < 10.0:
-                        # 近距离对向车即使不满足空间条件，也作为普通障碍保留 APF
-                        obs_long.append(ob)
-                        obs_long_infer.append(obs_infer[k])
-                    # 远距离非路口对向车：跳过
+                    # 非路口直道上的对向车：直接跳过，不加入任何障碍列表
                     continue
 
                 # ② 交叉 / 汇入交通：50°~130°
