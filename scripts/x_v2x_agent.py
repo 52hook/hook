@@ -479,18 +479,19 @@ class Xagent(BasicAgent):
                 key=lambda a: veh_location.distance(a.get_location())
             )
 
-            max_dual_veh = 4
-            max_range = 32.0
+            # Gratzer et al. 2024 (IEEE T-ITS): 双层距离筛选
+            # <8m → OBCA 精确多边形, 8-25m → 椭圆兜底, >25m → 仅 APF
+            max_dual_veh = 2   # 与 PM_MAX_OBCA=2 对齐 (Richards & How 2005)
+            max_range = 25.0
             others_for_dual = []
             min_obs_dist = None
             for a in others_sorted:
                 d = veh_location.distance(a.get_location())
-                if d <= max_range:
+                if d <= 8.0 and len(others_for_dual) < max_dual_veh:
                     others_for_dual.append(a)
+                if d <= max_range:
                     if (min_obs_dist is None) or (d < min_obs_dist):
                         min_obs_dist = d
-                if len(others_for_dual) >= max_dual_veh:
-                    break
 
             # 只有最近障碍物 < 25m 时，这一拍才用 QP 预规划
             use_qp_this_step = (min_obs_dist is not None) and (min_obs_dist < 25.0)
@@ -903,7 +904,9 @@ class Xagent(BasicAgent):
                 ego_L = 2.0 * float(bb_ego.extent.x) + 0.6
                 ego_W = 2.0 * float(bb_ego.extent.y) + 0.4
                 carbox = (ego_L / 2.0, ego_W / 2.0)
-                for m in range(self._model.num_obs):
+                # 只取最近的 PM_MAX_OBCA 个障碍（已按距离排序）
+                n_obca = min(self._model.num_obs, self._model.PM_MAX_OBCA)
+                for m in range(n_obca):
                     Am = np.array(self._model.obs_Am_list[m])
                     bm = np.array(self._model.obs_bm_list[m]).flatten()
                     # 对齐到 OBCA_E=4 边

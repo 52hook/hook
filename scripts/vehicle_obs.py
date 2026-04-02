@@ -1561,9 +1561,10 @@ class Vehicle:
 
     # ---- 常量 ----
     PM_MAX_SOFT   = 14   # 最大软 APF 障碍物（车辆+行人合计）
-    PM_MAX_ELLIP  = 3    # 最大椭圆硬约束兜底
-    PM_MAX_OBCA   = 4    # 最大 OBCA 多边形障碍
+    PM_MAX_ELLIP  = 2    # 最大椭圆硬约束兜底 (Richards & How 2005: 距离预筛选)
+    PM_MAX_OBCA   = 2    # 最大 OBCA 多边形障碍 (Richards & How 2005: 按距离取最近)
     PM_OBCA_E     = 4    # OBCA 每障碍边数（矩形=4）
+    PM_K_OBCA     = 4    # Multi-phase: OBCA 仅施加前 K 步 (Frey et al. 2025 OCAM)
 
     def _ego_circles_sym(self, Xi, radius=1.68):
         """自车双圆模型（CasADi 符号版）"""
@@ -1587,6 +1588,7 @@ class Vehicle:
         MAX_ELLIP = self.PM_MAX_ELLIP
         MAX_OBCA  = self.PM_MAX_OBCA
         OBCA_E    = self.PM_OBCA_E
+        K_obca    = self.PM_K_OBCA  # Multi-phase: OBCA 仅前 K 步 (Frey 2025)
 
         # ============ 1. 参数布局 ============
         N_PER_SOFT  = 3 + 3 * N        # [active, is_pede, ratio, (x,y,yaw)×N]
@@ -1620,9 +1622,10 @@ class Vehicle:
         self._pm_off_carbox = idx; idx += N_CARBOX
         assert idx == n_apf
 
-        # ============ 2. 预分配 OBCA 对偶变量 ============
+        # ============ 2. 预分配 OBCA 对偶变量（仅前 K_obca 步） ============
+        # Frey et al. 2025: Multi-phase OCP，近处精确约束、远处简化约束
         pm_lam, pm_mu, pm_s = [], [], []
-        for k in range(N + 1):
+        for k in range(K_obca):
             for m in range(MAX_OBCA):
                 pm_lam.append(ca.SX.sym(f'pL_{k}_{m}', OBCA_E))
                 pm_mu.append(ca.SX.sym(f'pM_{k}_{m}', 4))
@@ -1765,7 +1768,8 @@ class Vehicle:
                            ca.hcat([0.,1.]), ca.hcat([0.,-1.]))
         g_car = ca.vertcat(half_L_p, half_L_p, half_W_p, half_W_p)
 
-        for k in range(N + 1):
+        # Frey et al. 2025: OBCA 约束仅施加前 K_obca 步（近处精确），远处用椭圆兜底
+        for k in range(K_obca):
             c_e = ca.cos(self.X[2,k]);  s_e = ca.sin(self.X[2,k])
             Rk = ca.vertcat(ca.hcat([c_e,-s_e]), ca.hcat([s_e,c_e]))
             tk = self.X[0:2, k]
@@ -1795,29 +1799,39 @@ class Vehicle:
                 g.append(phi)
 
         # ============ 5. 编译 NLP（只调用一次） ============
+        # Frasch et al. 2013 (ECC, 303引): active-set solver 天然忽略 inactive 约束
+        # Quirynen et al. 2024 (IEEE T-ITS): active-set warm start 减少迭代
         P_all = ca.vertcat(ca.reshape(self.P, -1, 1), P_apf)
         nlp = {'f': obj, 'x': pm_opt, 'p': P_all, 'g': ca.vertcat(*g)}
         opts = {
-            'ipopt.max_iter': self.maxiter,
-            'ipopt.print_level': 0, 'print_time': 0,
-            'ipopt.acceptable_tol': 1e-6,
-            'ipopt.acceptable_obj_change_tol': 1e-5,
-            'ipopt.warm_start_init_point': 'yes',
-            'ipopt.warm_start_bound_push': 1e-6,
-            'ipopt.warm_start_mult_bound_push': 1e-6,
+            'print_time': 0,
+            'print_header': 0,
+            'max_iter': 50,           # Numerow et al. 2024 (RA-L): 实时 MPC 迭代上限
+            'tol_pr': 1e-5,           # 原始可行性容差
+            'tol_du': 1e-5,           # 对偶可行性容差
+            'hessian_approximation': 'limited-memory',  # L-BFGS 避免精确 Hessian 计算
+            'lbfgs_memory': 10,
+            'max_iter_ls': 3,         # line-search 最大步数
+            'qpsol': 'qpoases',
+            'qpsol_options': {
+                'printLevel': 'none',
+                'enableRegularisation': 'BT_TRUE',  # Hessian 正则化（处理非凸）
+                'enableEqualities': 'BT_TRUE',      # 等式约束始终 active
+            },
         }
-        self._pm_solver = ca.nlpsol('pm', 'ipopt', nlp, opts)
+        self._pm_solver = ca.nlpsol('pm', 'sqpmethod', nlp, opts)
 
-        # ---- 存储约束结构信息 ----
+        # ---- 存储约束结构信息（Multi-phase: OBCA 仅前 K_obca 步） ----
+        self._pm_K_obca = K_obca
         self._pm_n_g_dyn  = (N+1) * ns
         self._pm_n_g_rate = (N-1) * 2
         self._pm_n_g_obca_per_km = 4  # 1 + 2 + 1
-        self._pm_n_g_obca = (N+1) * MAX_OBCA * 4
+        self._pm_n_g_obca = K_obca * MAX_OBCA * 4
         self._pm_n_g_ellip = MAX_ELLIP * N
         self._pm_n_opt_base = N*nc + (N+1)*ns
-        self._pm_n_opt_lam = (N+1) * MAX_OBCA * OBCA_E
-        self._pm_n_opt_mu  = (N+1) * MAX_OBCA * 4
-        self._pm_n_opt_s   = (N+1) * MAX_OBCA
+        self._pm_n_opt_lam = K_obca * MAX_OBCA * OBCA_E
+        self._pm_n_opt_mu  = K_obca * MAX_OBCA * 4
+        self._pm_n_opt_s   = K_obca * MAX_OBCA
 
         # ---- 预计算基础 lbg/ubg ----
         lbg = [];  ubg = []
@@ -1827,8 +1841,8 @@ class Vehicle:
         # rate 约束
         for _ in range(N-1):
             lbg.extend([-0.9, -0.2]);  ubg.extend([0.9, 0.2])
-        # OBCA（默认值，active 时生效）
-        for _k in range(N+1):
+        # OBCA（默认值，active 时生效；仅前 K_obca 步）
+        for _k in range(K_obca):
             for _m in range(MAX_OBCA):
                 lbg.append(-2e19);  ubg.append(1.0)      # ||A^Tλ||² ≤ 1
                 lbg.extend([0.0,0.0]); ubg.extend([0.0,0.0])  # = 0
@@ -1856,8 +1870,10 @@ class Vehicle:
         self._pm_base_lbx = np.array(lbx, dtype=float)
         self._pm_base_ubx = np.array(ubx, dtype=float)
 
-        # ---- warm-start 缓存 ----
+        # ---- warm-start 缓存 (Quirynen 2024: active-set warm-start) ----
         self._pm_x0_cache = None
+        self._pm_lam_x_cache = None   # 变量 Lagrange multipliers
+        self._pm_lam_g_cache = None   # 约束 Lagrange multipliers
         self._pm_ready = True
 
         print(f"[Vehicle] 参数化 NLP 编译完成，耗时 {_time.time()-t0:.2f}s，"
@@ -2014,12 +2030,38 @@ class Vehicle:
         c_p_ref = np.vstack((z0.T, xs)).T.flatten()
         p_all = np.concatenate([c_p_ref, apf_params])
 
-        # ---- 构造初值 x0 ----
+        # ---- 构造初值 x0 (He et al. 2021 TDR-OBCA: 时间平移+对偶热启动) ----
         base_init = np.concatenate([u_ws.flatten(), x_m.flatten()])
+        K_obca = self._pm_K_obca
         n_dual = self._pm_n_opt_lam + self._pm_n_opt_mu + self._pm_n_opt_s
+        n_lam = self._pm_n_opt_lam     # K_obca * MAX_OBCA * OBCA_E
+        n_mu  = self._pm_n_opt_mu      # K_obca * MAX_OBCA * 4
+        n_s   = self._pm_n_opt_s       # K_obca * MAX_OBCA
+        per_step_lam = MAX_OBCA * OBCA_E
+        per_step_mu  = MAX_OBCA * 4
+        per_step_s   = MAX_OBCA
+
         if self._pm_x0_cache is not None and self._pm_x0_cache.size == base_init.size + n_dual:
-            # RTI shift 对偶变量
-            dual_init = self._pm_x0_cache[base_init.size:]
+            # TDR-OBCA 时间平移：上一拍 step[k+1] → 本拍 step[k]，末尾补零
+            dual_old = self._pm_x0_cache[base_init.size:]
+            lam_old = dual_old[:n_lam]
+            mu_old  = dual_old[n_lam:n_lam+n_mu]
+            s_old   = dual_old[n_lam+n_mu:]
+            # 左移一步（丢弃 step 0，末尾补零）
+            lam_shifted = np.zeros(n_lam)
+            mu_shifted  = np.zeros(n_mu)
+            s_shifted   = np.zeros(n_s)
+            if K_obca > 1:
+                lam_shifted[:(K_obca-1)*per_step_lam] = lam_old[per_step_lam:]
+                mu_shifted[:(K_obca-1)*per_step_mu]   = mu_old[per_step_mu:]
+                s_shifted[:(K_obca-1)*per_step_s]     = s_old[per_step_s:]
+            # 轻度阻尼，稳定热启动
+            dual_damping = 0.8
+            dual_init = np.concatenate([
+                lam_shifted * dual_damping,
+                mu_shifted * dual_damping,
+                s_shifted * 0.0   # slack 从 0 开始，鼓励严格满足约束
+            ])
             init_control = np.concatenate([base_init, dual_init])
         else:
             init_control = np.concatenate([base_init, np.zeros(n_dual)])
@@ -2036,7 +2078,9 @@ class Vehicle:
         if obca_active_mask is None:
             obca_active_mask = [False] * MAX_OBCA
 
-        for k in range(N + 1):
+        # Multi-phase (Frey 2025): OBCA 对偶变量仅在前 K_obca 步
+        K_obca = self._pm_K_obca
+        for k in range(K_obca):
             for m in range(MAX_OBCA):
                 flat_idx = k * MAX_OBCA + m
                 lam_start = dual_start + flat_idx * OBCA_E
@@ -2065,12 +2109,19 @@ class Vehicle:
                     lbg[gi] = r2
                 # else: lbg=-2e19（无约束，已在 base 中设好）
 
-        # ---- 求解 ----
-        start_t = time.time()
-        res = self._pm_solver(
+        # ---- 求解 (Quirynen 2024: active-set warm-start via lam_x0/lam_g0) ----
+        solver_args = dict(
             x0=init_control, p=p_all,
             lbg=lbg, ubg=ubg, lbx=lbx, ubx=ubx
         )
+        # Lagrange multiplier warm-start: 传递上一拍的对偶信息给 qpOASES
+        if hasattr(self, '_pm_lam_x_cache') and self._pm_lam_x_cache is not None:
+            solver_args['lam_x0'] = self._pm_lam_x_cache
+        if hasattr(self, '_pm_lam_g_cache') and self._pm_lam_g_cache is not None:
+            solver_args['lam_g0'] = self._pm_lam_g_cache
+
+        start_t = time.time()
+        res = self._pm_solver(**solver_args)
         cost_time = time.time() - start_t
         est = res['x'].full().flatten()
 
@@ -2080,8 +2131,10 @@ class Vehicle:
         u_opt = est[:size_u].reshape(N, nc)
         x_opt = est[size_u:size_u + size_x].reshape(N + 1, ns)
 
-        # 缓存完整解（含对偶），供下一步 warm-start
+        # 缓存完整解（含对偶）+ Lagrange multipliers，供下一步 warm-start
         self._pm_x0_cache = est.copy()
+        self._pm_lam_x_cache = res['lam_x'].full().flatten()
+        self._pm_lam_g_cache = res['lam_g'].full().flatten()
 
         if self.carla:
             return u_opt[:, 0], u_opt[:, 1], x_opt, cost_time
