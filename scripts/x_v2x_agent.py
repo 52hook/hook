@@ -949,6 +949,9 @@ class Xagent(BasicAgent):
         self._a_opt = state[0]
         self._delta_opt = state[1]
 
+        # 调试：打印 MPC 求解结果
+        print(f"[DBG] solve_time={state[-1]*1000:.1f}ms a_opt[0]={float(state[0][0]):.3f} delta_opt[0]={float(state[1][0]):.4f} x_opt[1]={state[2][1,:3]}")
+
         # ====== 6. 对 a / δ 做一阶低通滤波 + 安全防倒车 ======
         raw_a = float(self._a_opt[0])
         raw_delta = float(self._delta_opt[0])
