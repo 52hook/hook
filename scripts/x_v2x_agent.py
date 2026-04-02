@@ -616,21 +616,24 @@ class Xagent(BasicAgent):
                 rel_y = s_ego * dx + c_ego * dy   # 左侧为 +y
                 d = math.hypot(rel_x, rel_y)
 
-                # ① 对向直行车检测
-                is_opposite = abs_yaw > math.radians(140.0)
+                # ① 对向直行车检测（航向差 > 120° 即视为对向）
+                is_opposite = abs_yaw > math.radians(120.0)
 
                 if is_opposite:
-                    if (in_junction or is_roundabout_like) and rel_x > 0.0 and abs(rel_y) < 3.5 and d < 30.0:
-                        # 路口内/弯道：纳入对向车障碍列表，触发让行
+                    if (in_junction or is_roundabout_like) and d < 30.0:
+                        # 路口内/弯道：放宽空间条件，避免转弯中途对向车消失
                         obs_opp.append(ob)
                         obs_opp_infer.append(obs_infer[k])
                         if (opp_min_dist is None) or (d < opp_min_dist):
                             opp_min_dist = d
-                    # 非路口直道上的对向车：直接跳过，不加入任何障碍列表
+                    # 非路口直道上的对向车：也加入同向列表作为普通障碍
+                    else:
+                        obs_long.append(ob)
+                        obs_long_infer.append(obs_infer[k])
                     continue
 
-                # ② 交叉 / 汇入交通：50°~130°
-                if math.radians(50.0) <= abs_yaw <= math.radians(130.0):
+                # ② 交叉 / 汇入交通：50°~120°
+                if math.radians(50.0) <= abs_yaw <= math.radians(120.0):
                     obs_cross.append(ob)
                     obs_cross_infer.append(obs_infer[k])
                 # ③ 同向前车 / 慢车
