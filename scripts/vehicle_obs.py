@@ -1744,7 +1744,7 @@ class Vehicle:
         for i in range(N):
             ex, ey, ev = self.X[0,i], self.X[1,i], self.X[3,i]
             dx_t = lv_x - ex;  dy_t = lv_y - ey
-            d_t = ca.sqrt(dx_t**2 + dy_t**2)
+            d_t = ca.sqrt(dx_t**2 + dy_t**2 + 1e-6)  # +ε 防 sqrt(0) 梯度 NaN
             rv = ev - lv_v;    rv_s = ca.fmax(rv, 0.1)
             ttc_v = d_t / rv_s
             cond = (rv > 0) * (d_t < 45.0) * (ttc_v < 6.0)
@@ -1875,6 +1875,32 @@ class Vehicle:
         """将逐步变化的 APF 数据打包为参数向量。"""
         N = self.horizon
         p = np.zeros(self._pm_n_apf, dtype=float)
+
+        # ---- inactive 槽位安全默认值（防止 sqrt(0)/除零等梯度 NaN） ----
+        # TTC: 前车放在极远处，避免 sqrt(0)
+        ttcb = self._pm_off_ttc
+        p[ttcb + 1] = 1e4    # lv_x = 远处
+        p[ttcb + 2] = 1e4    # lv_y = 远处
+        # carbox: 保持合理的自车尺寸
+        cb = self._pm_off_carbox
+        p[cb]     = 2.5      # half_L
+        p[cb + 1] = 1.1      # half_W
+        # OBCA: inactive 槽位用非退化 Am/bm（远处虚拟障碍）
+        for m in range(self.PM_MAX_OBCA):
+            ob = self._pm_off_obca + m * self._pm_N_PER_OBCA
+            # Am = 单位方向矩阵（4×2 展平）
+            Am_def = [1.0, 0.0,  0.0, 1.0,  -1.0, 0.0,  0.0, -1.0]
+            for j, v in enumerate(Am_def):
+                p[ob + 1 + j] = v
+            # bm = 极大值（障碍在极远处，约束自动满足）
+            for j in range(self.PM_OBCA_E):
+                p[ob + 1 + self.PM_OBCA_E * 2 + j] = 1e6
+        # 椭圆: inactive 槽位的障碍放在远处
+        for em in range(self.PM_MAX_ELLIP):
+            eb = self._pm_off_ellip + em * self._pm_N_PER_ELLIP
+            for i in range(N):
+                p[eb + 1 + i*3]     = 1e4  # x = 远处
+                p[eb + 1 + i*3 + 1] = 1e4  # y = 远处
 
         # 软障碍物
         if soft_obs_list:
