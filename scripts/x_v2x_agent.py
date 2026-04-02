@@ -923,14 +923,14 @@ class Xagent(BasicAgent):
         # 车道线 APF
         if l_active > 0.5:
             if l_type > 1.5:
-                self._model.solver_add_nc_road_pf_carla([[left_bound, int(l_dir)]], wp_yaw)
+                self._model.solver_add_nc_road_pf([[left_bound, int(l_dir)]], wp_yaw, carla=True)
             else:
-                self._model.solver_add_c_road_pf_carla([left_bound], wp_yaw)
+                self._model.solver_add_c_road_pf([left_bound], wp_yaw, carla=True)
         if r_active > 0.5:
             if r_type > 1.5:
-                self._model.solver_add_nc_road_pf_carla([[right_bound, int(r_dir)]], wp_yaw)
+                self._model.solver_add_nc_road_pf([[right_bound, int(r_dir)]], wp_yaw, carla=True)
             else:
-                self._model.solver_add_c_road_pf_carla([right_bound], wp_yaw)
+                self._model.solver_add_c_road_pf([right_bound], wp_yaw, carla=True)
 
         # 红灯 APF
         if tl_data[0] > 0.5:
