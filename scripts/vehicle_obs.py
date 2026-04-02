@@ -1806,17 +1806,18 @@ class Vehicle:
         opts = {
             'print_time': 0,
             'print_header': 0,
+            'print_iteration': 0,
             'max_iter': 50,           # Numerow et al. 2024 (RA-L): 实时 MPC 迭代上限
             'tol_pr': 1e-5,           # 原始可行性容差
             'tol_du': 1e-5,           # 对偶可行性容差
-            'hessian_approximation': 'limited-memory',  # L-BFGS 避免精确 Hessian 计算
-            'lbfgs_memory': 10,
+            'hessian_approximation': 'exact',  # 精确 Hessian（CasADi 符号计算）
             'max_iter_ls': 3,         # line-search 最大步数
             'qpsol': 'qpoases',
             'qpsol_options': {
                 'printLevel': 'none',
-                'enableRegularisation': True,   # Hessian 正则化（处理非凸）
+                'enableRegularisation': True,   # Hessian 正则化（处理非凸/半正定）
                 'enableEqualities': True,       # 等式约束始终 active
+                'error_on_fail': False,         # QP 失败时不崩溃，返回次优解
             },
         }
         self._pm_solver = ca.nlpsol('pm', 'sqpmethod', nlp, opts)
