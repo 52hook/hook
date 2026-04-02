@@ -477,19 +477,18 @@ class Xagent(BasicAgent):
                 key=lambda a: veh_location.distance(a.get_location())
             )
 
-            # Gratzer et al. 2024 (IEEE T-ITS): 双层距离筛选
-            # <15m → OBCA 精确多边形, 15-32m → 椭圆/APF
-            max_dual_veh = 2   # 与 PM_MAX_OBCA=2 对齐 (Richards & How 2005)
+            max_dual_veh = 4
             max_range = 32.0
             others_for_dual = []
             min_obs_dist = None
             for a in others_sorted:
                 d = veh_location.distance(a.get_location())
-                if d <= 15.0 and len(others_for_dual) < max_dual_veh:
-                    others_for_dual.append(a)
                 if d <= max_range:
+                    others_for_dual.append(a)
                     if (min_obs_dist is None) or (d < min_obs_dist):
                         min_obs_dist = d
+                if len(others_for_dual) >= max_dual_veh:
+                    break
 
             # 只有最近障碍物 < 25m 时，这一拍才用 QP 预规划
             use_qp_this_step = (min_obs_dist is not None) and (min_obs_dist < 25.0)
@@ -616,24 +615,21 @@ class Xagent(BasicAgent):
                 rel_y = s_ego * dx + c_ego * dy   # 左侧为 +y
                 d = math.hypot(rel_x, rel_y)
 
-                # ① 对向直行车检测（航向差 > 120° 即视为对向）
-                is_opposite = abs_yaw > math.radians(120.0)
+                # ① 对向直行车检测
+                is_opposite = abs_yaw > math.radians(140.0)
 
                 if is_opposite:
-                    if (in_junction or is_roundabout_like) and d < 30.0:
-                        # 路口内/弯道：放宽空间条件，避免转弯中途对向车消失
+                    if (in_junction or is_roundabout_like) and rel_x > 0.0 and abs(rel_y) < 3.5 and d < 30.0:
+                        # 路口内/弯道：纳入对向车障碍列表，触发让行
                         obs_opp.append(ob)
                         obs_opp_infer.append(obs_infer[k])
                         if (opp_min_dist is None) or (d < opp_min_dist):
                             opp_min_dist = d
-                    # 非路口直道上的对向车：也加入同向列表作为普通障碍
-                    else:
-                        obs_long.append(ob)
-                        obs_long_infer.append(obs_infer[k])
+                    # 非路口直道上的对向车：直接跳过，不加入任何障碍列表
                     continue
 
-                # ② 交叉 / 汇入交通：50°~120°
-                if math.radians(50.0) <= abs_yaw <= math.radians(120.0):
+                # ② 交叉 / 汇入交通：50°~130°
+                if math.radians(50.0) <= abs_yaw <= math.radians(130.0):
                     obs_cross.append(ob)
                     obs_cross_infer.append(obs_infer[k])
                 # ③ 同向前车 / 慢车
@@ -957,14 +953,13 @@ class Xagent(BasicAgent):
             self._model.solver_add_soft_ttc(lv)
 
         # 椭圆硬约束兜底
-        if len(front_like) > 0:
-            padded_trajs = []
-            for ob_traj in front_like[:3]:
-                padded = list(ob_traj)
-                while len(padded) < self._model.horizon:
-                    padded.append(padded[-1])
-                padded_trajs.append(padded)
-            self._model.set_ellip_backup_obstacles(padded_trajs)
+        if hasattr(self._model, "set_ellip_backup_obstacles"):
+            if len(front_like) > 0:
+                ellip_obs = front_like[:3]
+                self._model.set_ellip_backup_obstacles(
+                    ellip_obs, a=4.5, b=2.0, margin=0.25)
+            else:
+                self._model.set_ellip_backup_obstacles([])
 
         # 编译并求解
         self._model.solver_add_bounds()
