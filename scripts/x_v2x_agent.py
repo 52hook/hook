@@ -92,8 +92,6 @@ class Xagent(BasicAgent):
             Rd=np.diag([2000.0, 8000.0])                    # [Δa, Δδ]
         )
         self.Q_origin = copy.deepcopy(self._model.Q)
-        # 构建参数化 NLP（只编译一次，后续复用）
-        self._model.setup_parametric_nlp()
         self._log_data = []
         self._simu_time = 0
 
@@ -919,24 +917,58 @@ class Xagent(BasicAgent):
                                      bm[:self._model.PM_OBCA_E]))
                     obca_active_mask[m] = True
 
-        # ========== 5. 参数化求解 ==========
-        apf_params = self._model.pack_apf_params(
-            soft_obs_list=soft_obs_list,
-            lane_data=lane_data,
-            tl_data=tl_data,
-            ttc_data=ttc_data,
-            ellip_obs_list=ellip_obs_list,
-            obca_list=obca_list,
-            carbox=carbox
-        )
+        # ========== 5. 原始求解流程（每步重编译，轻量高效） ==========
+        self._model.solver_add_cost()
+
+        # 车道线 APF
+        if l_active > 0.5:
+            if l_type > 1.5:
+                self._model.solver_add_nc_road_pf_carla([[left_bound, int(l_dir)]], wp_yaw)
+            else:
+                self._model.solver_add_c_road_pf_carla([left_bound], wp_yaw)
+        if r_active > 0.5:
+            if r_type > 1.5:
+                self._model.solver_add_nc_road_pf_carla([[right_bound, int(r_dir)]], wp_yaw)
+            else:
+                self._model.solver_add_c_road_pf_carla([right_bound], wp_yaw)
+
+        # 红灯 APF
+        if tl_data[0] > 0.5:
+            self._model.solver_add_single_tr_lgt_pf_carla(
+                tl_data[1], tl_data[2], tl_data[3], red_time_ratio=tl_data[4])
+
+        # 软障碍物 APF（车辆+行人）
+        if len(obs_long_infer) > 0:
+            self._model.solver_add_soft_obs(obs_long_infer, ratio=obs_ratio_front * sigma_scale, carla=True)
+        if len(obs_opp_infer) > 0:
+            self._model.solver_add_soft_obs(obs_opp_infer, ratio=obs_ratio_opp, carla=True)
+        if len(obs_cross_infer) > 0:
+            self._model.solver_add_soft_obs(obs_cross_infer, ratio=obs_ratio_cross * sigma_scale, carla=True)
+        if len(pedes) > 0:
+            pede_sigma_mean = float(np.mean(pede_stds)) if len(pede_stds) > 0 else 0.0
+            pede_sigma_scale = min(1.0 + k_sigma * pede_sigma_mean, sigma_scale_max)
+            self._model.solver_add_soft_obs(pedes_infer, ratio=600 * pede_sigma_scale, carla=True, pede=True)
+
+        # TTC APF
+        if lv is not None and not is_roundabout_like:
+            self._model.solver_add_soft_ttc(lv)
+
+        # 椭圆硬约束兜底
+        if len(front_like) > 0:
+            padded_trajs = []
+            for ob_traj in front_like[:3]:
+                padded = list(ob_traj)
+                while len(padded) < self._model.horizon:
+                    padded.append(padded[-1])
+                padded_trajs.append(padded)
+            self._model.set_ellip_backup_obstacles(padded_trajs)
+
+        # 编译并求解
+        self._model.solver_add_bounds()
 
         tick = time.time()
-        state = self._model.solve_parametric(
-            ref_traj.T, current_state, self._next_states, u0,
-            apf_params,
-            obca_active_mask=obca_active_mask,
-            ellip_active_mask=ellip_active_mask
-        )
+        state = self._model.solve_MPC(
+            ref_traj.T, current_state, self._next_states, u0)
         time_2 = time.time() - tick
         self._env.computing_times.append(time_2)
 
