@@ -1803,24 +1803,19 @@ class Vehicle:
         # Quirynen et al. 2024 (IEEE T-ITS): active-set warm start 减少迭代
         P_all = ca.vertcat(ca.reshape(self.P, -1, 1), P_apf)
         nlp = {'f': obj, 'x': pm_opt, 'p': P_all, 'g': ca.vertcat(*g)}
+        # IPOPT interior-point 求解器（OBCA 非凸问题 SQP 不收敛，IPOPT 更鲁棒）
+        # 问题规模已通过 Multi-phase + MAX 缩减降到 158 变量 / 136 约束
         opts = {
-            'print_time': 0,
-            'print_header': 0,
-            'print_iteration': 0,
-            'max_iter': 50,           # Numerow et al. 2024 (RA-L): 实时 MPC 迭代上限
-            'tol_pr': 1e-5,           # 原始可行性容差
-            'tol_du': 1e-5,           # 对偶可行性容差
-            'hessian_approximation': 'exact',  # 精确 Hessian（CasADi 符号计算）
-            'max_iter_ls': 3,         # line-search 最大步数
-            'qpsol': 'qpoases',
-            'qpsol_options': {
-                'printLevel': 'none',
-                'enableRegularisation': True,   # Hessian 正则化（处理非凸/半正定）
-                'enableEqualities': True,       # 等式约束始终 active
-                'error_on_fail': False,         # QP 失败时不崩溃，返回次优解
-            },
+            'ipopt.max_iter': 50,                       # 实时 MPC 迭代上限
+            'ipopt.print_level': 0, 'print_time': 0,
+            'ipopt.acceptable_tol': 1e-5,               # 放松容差加速收敛
+            'ipopt.acceptable_obj_change_tol': 1e-4,
+            'ipopt.warm_start_init_point': 'yes',       # 热启动
+            'ipopt.warm_start_bound_push': 1e-6,
+            'ipopt.warm_start_mult_bound_push': 1e-6,
+            'ipopt.mu_init': 1e-3,                      # 较小初始 barrier 参数加速
         }
-        self._pm_solver = ca.nlpsol('pm', 'sqpmethod', nlp, opts)
+        self._pm_solver = ca.nlpsol('pm', 'ipopt', nlp, opts)
 
         # ---- 存储约束结构信息（Multi-phase: OBCA 仅前 K_obca 步） ----
         self._pm_K_obca = K_obca
