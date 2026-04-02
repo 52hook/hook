@@ -1815,8 +1815,8 @@ class Vehicle:
             'qpsol': 'qpoases',
             'qpsol_options': {
                 'printLevel': 'none',
-                'enableRegularisation': 'BT_TRUE',  # Hessian 正则化（处理非凸）
-                'enableEqualities': 'BT_TRUE',      # 等式约束始终 active
+                'enableRegularisation': True,   # Hessian 正则化（处理非凸）
+                'enableEqualities': True,       # 等式约束始终 active
             },
         }
         self._pm_solver = ca.nlpsol('pm', 'sqpmethod', nlp, opts)
