@@ -50,7 +50,8 @@ class Xagent(BasicAgent):
                  use_dual=True,
                  use_igpr_var=True,
                  use_bspline=True,
-                 use_qp_warmstart=True) -> None:
+                 use_qp_warmstart=True,
+                 scenario='unsig_crossroad') -> None:
         """
         env   : simulation environment (provides ego_vehicle, get_obs, get_pedes)
         model : Vehicle model (vehicle_obs.Vehicle)
@@ -65,6 +66,7 @@ class Xagent(BasicAgent):
         self._env = env
         self._vehicle = env.ego_vehicle
         self._model = model
+        self._scenario = scenario
 
         self._world = self._vehicle.get_world()
         self._map = self._world.get_map()
@@ -477,20 +479,25 @@ class Xagent(BasicAgent):
                 key=lambda a: veh_location.distance(a.get_location())
             )
 
-            max_dual_veh = 4
+            # ACC 直线工况不需要 OBCA 多边形精确避让，椭圆 APF 足够
+            if self._scenario == 'multilaneACC':
+                max_dual_veh = 2
+                max_obca_range = 10.0   # 仅极近距离才启用 OBCA
+            else:
+                max_dual_veh = 4
+                max_obca_range = 32.0
             max_range = 32.0
             others_for_dual = []
             min_obs_dist = None
             for a in others_sorted:
                 d = veh_location.distance(a.get_location())
-                if d <= max_range:
+                if d <= max_obca_range:
                     others_for_dual.append(a)
+                if d <= max_range:
                     if (min_obs_dist is None) or (d < min_obs_dist):
                         min_obs_dist = d
                 if len(others_for_dual) >= max_dual_veh:
                     break
-            # 限制实际送入 OBCA 的数量为 2，在 section 4.6 中截断
-            # 这样 enable_dual_collision 仍用完整列表，但参数化时只取最近 2 个
 
             # 只有最近障碍物 < 25m 时，这一拍才用 QP 预规划
             use_qp_this_step = (min_obs_dist is not None) and (min_obs_dist < 25.0)

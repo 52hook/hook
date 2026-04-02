@@ -219,7 +219,8 @@ agent = Xagent(env, dynamic_model, dt=simu_step,
                use_dual=USE_DUAL,
                use_igpr_var=USE_IGPR_VAR,
                use_bspline=USE_BSPLINE,
-               use_qp_warmstart=USE_QP_WARMSTART)
+               use_qp_warmstart=USE_QP_WARMSTART,
+               scenario=scenario)
 print(f'[Config] dual={USE_DUAL} igpr={USE_IGPR_VAR} bspline={USE_BSPLINE} qp_ws={USE_QP_WARMSTART}')
 
 # - Spawn other vehicles
