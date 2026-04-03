@@ -277,15 +277,9 @@ class Xagent(BasicAgent):
         z_ref[3, 0] = ref_path.cyaw[ind]
 
         dist_move = copy.copy(self.dist_move)
-        # 曲率自适应系数：高曲率处缩短预瞄步长，防止预测窗口横跨弯→直过渡
-        _kappa_gain = 8.0
 
         for i in range(1, T + 1):
-            # 当前预瞄点曲率
-            prev_index = min(ind + int(round(dist_move / self._d_dist)), length - 1)
-            kappa = abs(ref_path.ck[prev_index]) if hasattr(ref_path, 'ck') else 0.0
-            adaptive_step = self.dist_step / (1.0 + _kappa_gain * kappa)
-            dist_move += adaptive_step * abs(self._model.get_v()) * self._dt
+            dist_move += self.dist_step * abs(self._model.get_v()) * self._dt
             ind_move = int(round(dist_move / self._d_dist))
             index = min(ind + ind_move, length - 1)
 
