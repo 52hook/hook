@@ -32,17 +32,8 @@ def residuals(p, X, U):
         res[i] = np.linalg.norm(X[i + 1] - x_next)
     return np.sum(res)
 
-# Initial parameters
-# p0 = np.array([-128916, -85944, 1.08, 1.81, 1412, 1536.7])
-p0 = np.array([-120000, -90000, 1.50, 1.39, 1700, 2700])
-# p0 = np.array([-4.248e+04, -9.548e+04,  1.339e+00,  1.568e+00,  1.614e+03, 1.538e+03])
-# kf = -120232.69753427865
-# kr = -72253.17399326632
-# lf = 1.3694773400676927
-# lr = 1.500522659932285
-# m = 1614.008272336204
-# Iz = 1826.9103372232407
-# p0 = np.array([kf, kr, lf, lr, m, Iz])
+# 初始值：用原版 UDMC 已验证参数，让 SLSQP 在附近搜索
+p0 = np.array([-102130, -90000, 1.287, 1.603, 1700, 2700])
 
 # ===== 约束条件（SLSQP 约定: fun(p) >= 0）=====
 # 轴距约束: lf + lr = 2.89m（CARLA Model 3）
@@ -50,15 +41,15 @@ con_wb = {'type': 'eq', 'fun': lambda p: p[2] + p[3] - 2.89}
 # 侧偏刚度为负: kf <= 0, kr <= 0
 con_kf = {'type': 'ineq', 'fun': lambda p: -p[0]}          # -kf >= 0 → kf <= 0
 con_kr = {'type': 'ineq', 'fun': lambda p: -p[1]}          # -kr >= 0 → kr <= 0
-# 前后轴距重心距不低于 0.8m（物理约束，防止退化）
-con_lf_lo = {'type': 'ineq', 'fun': lambda p: p[2] - 0.8}  # lf >= 0.8m
-con_lr_lo = {'type': 'ineq', 'fun': lambda p: p[3] - 0.8}  # lr >= 0.8m
-# 车重: 1000 <= m <= 2200 kg
-con_m_lo = {'type': 'ineq', 'fun': lambda p: p[4] - 1000}   # m >= 1000
-con_m_hi = {'type': 'ineq', 'fun': lambda p: 2200 - p[4]}   # m <= 2200
-# 转动惯量: 500 <= Iz <= 5000 kg·m²
-con_Iz_lo = {'type': 'ineq', 'fun': lambda p: p[5] - 500}   # Iz >= 500
-con_Iz_hi = {'type': 'ineq', 'fun': lambda p: 5000 - p[5]}  # Iz <= 5000
+# lf/lr: CARLA Model 3 重心在轴距中偏前，lf∈[1.0,1.6], lr∈[1.2,2.0]
+con_lf_lo = {'type': 'ineq', 'fun': lambda p: p[2] - 1.0}   # lf >= 1.0m
+con_lr_lo = {'type': 'ineq', 'fun': lambda p: p[3] - 1.0}   # lr >= 1.0m
+# 车重: 1200 <= m <= 1900 kg（CARLA Model 3 约 1700kg）
+con_m_lo = {'type': 'ineq', 'fun': lambda p: p[4] - 1200}    # m >= 1200
+con_m_hi = {'type': 'ineq', 'fun': lambda p: 1900 - p[4]}    # m <= 1900
+# 转动惯量: 1000 <= Iz <= 3500 kg·m²
+con_Iz_lo = {'type': 'ineq', 'fun': lambda p: p[5] - 1000}   # Iz >= 1000
+con_Iz_hi = {'type': 'ineq', 'fun': lambda p: 3500 - p[5]}   # Iz <= 3500
 
 # Perform optimization
 tick = time.time()
