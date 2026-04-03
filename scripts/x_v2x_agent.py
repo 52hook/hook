@@ -413,13 +413,8 @@ class Xagent(BasicAgent):
                     # 基准路径和 B 样条做小比例插值（此时 cx0/cy0 已是 ndarray）
                     # 红灯减速时 MPC 预测窗口延伸到转弯区，B-spline 提前弯曲导致跨线
                     # 检测到红灯时完全禁用 B-spline，用原始路径保持直行
-                    # 环岛/紧弯时 B-spline QP 平滑天然"截弯取直" → 完全禁用
-                    k_abs_raw = np.abs(ck0)
-                    k_max_local = float(np.max(k_abs_raw)) if len(k_abs_raw) > 0 else 0.0
                     if self._last_traffic_light is not None:
                         alpha_bs = 0.0
-                    elif k_max_local > 0.012:
-                        alpha_bs = 0.0   # 紧弯/环岛完全用原始路径
                     else:
                         alpha_bs = 0.7
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
@@ -445,18 +440,20 @@ class Xagent(BasicAgent):
         sp = itp.calc_speed_profile(cx, cy, cyaw, self._model.target_v)
         ref_path = itp.PATH(cx, cy, cyaw, ck)
 
-        # --- yaw 连续化：逐点与自车 yaw 做最短弧归一化，避免 ±π 跳变 ---
-        ego_yaw = float(current_state[2])
-        cyaw_arr = np.array(ref_path.cyaw, dtype=float)
-        # 先让第一个点与自车 yaw 对齐到 [-π, π)
-        cyaw_arr[0] = ego_yaw + math.atan2(
-            math.sin(cyaw_arr[0] - ego_yaw),
-            math.cos(cyaw_arr[0] - ego_yaw))
-        # 后续逐点 unwrap（相邻差值限制在 [-π, π)）
-        for i in range(1, len(cyaw_arr)):
-            d = cyaw_arr[i] - cyaw_arr[i - 1]
-            cyaw_arr[i] = cyaw_arr[i - 1] + math.atan2(math.sin(d), math.cos(d))
-        ref_path.cyaw = cyaw_arr.tolist()
+        # --- [FIX START] 强制对齐参考路径的 Yaw 周期 ---
+        # 找到最近点
+        ind_nearest, _ = ref_path.nearest_index([current_state[0], current_state[1], current_state[2]])
+        # 获取最近点的参考 yaw
+        ref_yaw_nearest = ref_path.cyaw[ind_nearest]
+        
+        # 计算自车 yaw 与 参考 yaw 的差值倍数
+        diff = current_state[2] - ref_yaw_nearest
+        k_cycle = round(diff / (2 * np.pi))
+        
+        # 将整个参考路径的 cyaw 平移 2*pi*k，使其与自车对齐
+        if k_cycle != 0:
+            ref_path.cyaw = [y + k_cycle * 2 * np.pi for y in ref_path.cyaw]
+        # --- [FIX END] ---
 
         z_ref, target_ind = self.calc_ref_trajectory_in_T_step(
             [current_state[0], current_state[1], v, current_state[2]],
@@ -582,17 +579,15 @@ class Xagent(BasicAgent):
         # ========== 3. 环境感知：APF 用的障碍 / 行人 ==========
         obs, heights, obs_infer, obs_stds = self._env.get_obs(current_state)
 
-        # === 根据前方一段路径的”最大曲率”判断：是否进入环岛 / 紧弯区域 ===
-        # 窗口同时覆盖”当前位置之前 5 点 + 之后 25 点”，避免出弯时前方已直但车还在弯上
+        # === 根据前方一段路径的“最大曲率”判断：是否进入环岛 / 紧弯区域 ===
         try:
             k_abs = np.abs(ck)
-            idx_cur = max(int(target_ind), 0)
-            idx0 = max(idx_cur - 5, 0)              # 回看 5 点（~2m）
-            idx1 = min(len(k_abs), idx_cur + 25)     # 前看 25 点（~10m）
+            idx0 = max(int(target_ind), 0)
+            idx1 = min(len(k_abs), idx0 + 20)
             if idx0 < idx1:
                 k_window_max = float(np.max(k_abs[idx0:idx1]))
             else:
-                k_window_max = float(k_abs[idx_cur])
+                k_window_max = float(k_abs[idx0])
         except Exception:
             k_window_max = 0.0
 
@@ -601,21 +596,12 @@ class Xagent(BasicAgent):
         min_long = -2.0
 
         # 紧弯 / 环岛：横向多留一点，后方多看一点
-        # 阈值分离：进入用 0.015，退出用 0.010（迟滞防抖）
-        if not hasattr(self, '_was_roundabout_like'):
-            self._was_roundabout_like = False
-
-        k_enter = 0.015
-        k_exit  = 0.010   # 退出阈值更低 → 延迟退出弯道模式
-        if self._was_roundabout_like:
-            is_roundabout_like = (k_window_max > k_exit)
-        else:
-            is_roundabout_like = (k_window_max > k_enter)
-        self._was_roundabout_like = is_roundabout_like
-
-        if is_roundabout_like:
+        if k_window_max > 0.015:
             max_lat = 3.5
             min_long = -4.0
+            is_roundabout_like = True
+        else:
+            is_roundabout_like = False
 
         # 判断自车是否在路口内（用于对向车检测）
         ego_wp = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True)
