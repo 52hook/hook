@@ -114,7 +114,7 @@ class Vehicle:
         # param of car state_dot
         self.omega = 0.0
         # in parameter identification, we use steer_bound = 1.22
-        self.steer_bound = 0.55
+        self.steer_bound = 0.7       # 恢复原版UDMC
         self.acc_lbound = -6.0
         self.acc_ubound = 3.0
         self.target_v = target_v / 3.6
@@ -337,11 +337,7 @@ class Vehicle:
                 # control smoothness cost
                 self.obj = self.obj + ca.mtimes([control_diff.T, self.Rd, control_diff])
 
-            # ===== 新增：对侧向速度 vy 和偏航角速度 omega 加阻尼，抑制左右摆动 =====
-            vy_i = self.X[4, i]
-            omega_i = self.X[5, i]
-            # 这两个权重可以之后再微调，先用 0.5 和 0.2 试一下
-            self.obj = self.obj + 0.5 * (vy_i ** 2) + 0.2 * (omega_i ** 2)
+            # vy/omega 阻尼已移除：lf 修正后 MPC 预测准确，不再需要额外阻尼
 
             # predict the next state using bicycle dynamic model
             x_next_ = self.f(self.X[:, i], self.U[:, i])

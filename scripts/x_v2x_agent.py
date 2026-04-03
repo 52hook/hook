@@ -91,7 +91,7 @@ class Xagent(BasicAgent):
         self._model.solver_basis(
             Q=np.diag([5.0, 15.0, 10.0, 2.0, 2.5]),      # [x, y, yaw, vx, vy]
             R=np.diag([0.8, 2.5]),                      # [a, δ]
-            Rd=np.diag([2000.0, 8000.0])                    # [Δa, Δδ]
+            Rd=np.diag([1.0, 1000.0])                       # [Δa, Δδ] 恢复原版UDMC
         )
         self.Q_origin = copy.deepcopy(self._model.Q)
         self._log_data = []
@@ -1014,21 +1014,8 @@ class Xagent(BasicAgent):
         alpha_a = self._dt / (tau_a + self._dt)
         self._a_cmd = self._a_cmd + alpha_a * (raw_a - self._a_cmd)
 
-        # 6.2 横向 δ
-        if safe_and_straight:
-            alpha_delta = 0.20
-            max_delta_step = 0.03
-        elif is_roundabout_like or k_window_max > 0.015:
-            alpha_delta = 0.70
-            max_delta_step = 0.25
-        else:
-            alpha_delta = 0.50
-            max_delta_step = 0.15
-
-        delta_lp = alpha_delta * raw_delta + (1.0 - alpha_delta) * self._delta_cmd
-        delta_step = np.clip(delta_lp - self._delta_cmd,
-                             -max_delta_step, max_delta_step)
-        self._delta_cmd = self._delta_cmd + delta_step
+        # 6.2 横向 δ — 直接使用 MPC 输出（与原版 UDMC 一致）
+        self._delta_cmd = raw_delta
 
         v_ref = ref_traj[3, 0]
         v_err = cur_v - v_ref
