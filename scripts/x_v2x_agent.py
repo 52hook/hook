@@ -389,7 +389,18 @@ class Xagent(BasicAgent):
         cx, cy = cx0.copy(), cy0.copy()
         cyaw, ck = cyaw0.copy(), ck0.copy()
 
-        # -------- 1.2 B 样条小幅“修饰”（消融开关: use_bspline）--------
+        # -------- 1.1b 无 B-spline 时从位置梯度重算 yaw/曲率 --------
+        # calc_yaw_carla 的 ratio=0.1 导致 yaw 严重滞后，弯道处 MPC 参考航向失真
+        # B-spline 路径在 1.2 中会重算，这里只修复 B-spline 关闭的情况
+        if (not self._use_bspline) and len(cx) >= 3:
+            dx = np.gradient(cx)
+            dy = np.gradient(cy)
+            cyaw = np.unwrap(np.arctan2(dy, dx + 1e-9))
+            ddx = np.gradient(dx)
+            ddy = np.gradient(dy)
+            ck = (dx * ddy - dy * ddx) / (dx**2 + dy**2 + 1e-6) ** 1.5
+
+        # -------- 1.2 B 样条小幅”修饰”（消融开关: use_bspline）--------
         if self._use_bspline and base_path.shape[0] >= 4:
             try:
                 smooth_path, ctrl_pts = self._bspline_smoother.smooth(
@@ -479,10 +490,16 @@ class Xagent(BasicAgent):
                 key=lambda a: veh_location.distance(a.get_location())
             )
 
-            # ACC 直线工况不需要 OBCA 多边形精确避让，椭圆 APF 足够
+            # 场景自适应 OBCA 检测范围：
+            # - ACC 直线：椭圆 APF 足够，OBCA 仅极近距离兜底
+            # - roundabout：环岛内循环车 32m 被 OBCA 捕获导致 MPC 汇入震荡，缩小范围
+            # - 其他：默认全量
             if self._scenario == 'multilaneACC':
                 max_dual_veh = 2
-                max_obca_range = 10.0   # 仅极近距离才启用 OBCA
+                max_obca_range = 10.0
+            elif self._scenario in ('roundabout', 'round_s1'):
+                max_dual_veh = 2
+                max_obca_range = 12.0   # 环岛车速低，12m 内才启用 OBCA 硬约束
             else:
                 max_dual_veh = 4
                 max_obca_range = 32.0
