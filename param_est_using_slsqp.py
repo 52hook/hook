@@ -44,23 +44,27 @@ p0 = np.array([-120000, -90000, 1.50, 1.39, 1700, 2700])
 # Iz = 1826.9103372232407
 # p0 = np.array([kf, kr, lf, lr, m, Iz])
 
-# Constraints
-con_1 = {'type': 'eq', 'fun': lambda p: p[2] + p[3] - 2.89}
-con_2 = {'type': 'ineq', 'fun': lambda p: p[2]-2}
-con_22 = {'type': 'ineq', 'fun': lambda p: -p[2]}
-con_3 = {'type': 'ineq', 'fun': lambda p: p[3]-2}
-con_33 = {'type': 'ineq', 'fun': lambda p: -p[3]}
-con_4  = {'type': 'ineq', 'fun': lambda p: p[4]-2200}
-con_5  = {'type': 'ineq', 'fun': lambda p: 1000-p[4]}
-con_6  = {'type': 'ineq', 'fun': lambda p: p[5]-10000}
-con_7  = {'type': 'ineq', 'fun': lambda p: -p[5]}
-con_8  = {'type': 'ineq', 'fun': lambda p: p[0]-0}
-con_9  = {'type': 'ineq', 'fun': lambda p: p[1]-0}
+# ===== 约束条件（SLSQP 约定: fun(p) >= 0）=====
+# 轴距约束: lf + lr = 2.89m（CARLA Model 3）
+con_wb = {'type': 'eq', 'fun': lambda p: p[2] + p[3] - 2.89}
+# 侧偏刚度为负: kf <= 0, kr <= 0
+con_kf = {'type': 'ineq', 'fun': lambda p: -p[0]}          # -kf >= 0 → kf <= 0
+con_kr = {'type': 'ineq', 'fun': lambda p: -p[1]}          # -kr >= 0 → kr <= 0
+# 前后轴距重心距不低于 0.8m（物理约束，防止退化）
+con_lf_lo = {'type': 'ineq', 'fun': lambda p: p[2] - 0.8}  # lf >= 0.8m
+con_lr_lo = {'type': 'ineq', 'fun': lambda p: p[3] - 0.8}  # lr >= 0.8m
+# 车重: 1000 <= m <= 2200 kg
+con_m_lo = {'type': 'ineq', 'fun': lambda p: p[4] - 1000}   # m >= 1000
+con_m_hi = {'type': 'ineq', 'fun': lambda p: 2200 - p[4]}   # m <= 2200
+# 转动惯量: 500 <= Iz <= 5000 kg·m²
+con_Iz_lo = {'type': 'ineq', 'fun': lambda p: p[5] - 500}   # Iz >= 500
+con_Iz_hi = {'type': 'ineq', 'fun': lambda p: 5000 - p[5]}  # Iz <= 5000
 
 # Perform optimization
 tick = time.time()
-result = minimize(residuals, p0, args=(X, U), method='SLSQP', options={'maxiter': 500}, constraints=[con_1, \
-                 con_22, con_33, con_4, con_5, con_7, con_8, con_9])
+result = minimize(residuals, p0, args=(X, U), method='SLSQP', options={'maxiter': 500},
+                 constraints=[con_wb, con_kf, con_kr, con_lf_lo, con_lr_lo,
+                              con_m_lo, con_m_hi, con_Iz_lo, con_Iz_hi])
 tock = time.time()
 print(f'Optimization time: {tock - tick} seconds')
 
