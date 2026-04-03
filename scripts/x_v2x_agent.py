@@ -91,7 +91,7 @@ class Xagent(BasicAgent):
         self._model.solver_basis(
             Q=np.diag([5.0, 15.0, 10.0, 2.0, 2.5]),      # [x, y, yaw, vx, vy]
             R=np.diag([0.8, 2.5]),                      # [a, δ]
-            Rd=np.diag([2000.0, 2000.0])                    # [Δa, Δδ] 原8000→2000，出弯需快速回正
+            Rd=np.diag([2000.0, 8000.0])                    # [Δa, Δδ]
         )
         self.Q_origin = copy.deepcopy(self._model.Q)
         self._log_data = []
@@ -389,18 +389,7 @@ class Xagent(BasicAgent):
         cx, cy = cx0.copy(), cy0.copy()
         cyaw, ck = cyaw0.copy(), ck0.copy()
 
-        # -------- 1.1b 无 B-spline 时从位置梯度重算 yaw/曲率 --------
-        # calc_yaw_carla 的 ratio=0.1 导致 yaw 严重滞后，弯道处 MPC 参考航向失真
-        # B-spline 路径在 1.2 中会重算，这里只修复 B-spline 关闭的情况
-        if (not self._use_bspline) and len(cx) >= 3:
-            dx = np.gradient(cx)
-            dy = np.gradient(cy)
-            cyaw = np.unwrap(np.arctan2(dy, dx + 1e-9))
-            ddx = np.gradient(dx)
-            ddy = np.gradient(dy)
-            ck = (dx * ddy - dy * ddx) / (dx**2 + dy**2 + 1e-6) ** 1.5
-
-        # -------- 1.2 B 样条小幅”修饰”（消融开关: use_bspline）--------
+        # -------- 1.2 B 样条小幅“修饰”（消融开关: use_bspline）--------
         if self._use_bspline and base_path.shape[0] >= 4:
             try:
                 smooth_path, ctrl_pts = self._bspline_smoother.smooth(
@@ -413,13 +402,8 @@ class Xagent(BasicAgent):
                     # 基准路径和 B 样条做小比例插值（此时 cx0/cy0 已是 ndarray）
                     # 红灯减速时 MPC 预测窗口延伸到转弯区，B-spline 提前弯曲导致跨线
                     # 检测到红灯时完全禁用 B-spline，用原始路径保持直行
-                    # 弯道时降权：B-spline QP 平滑天然截弯取直，环岛出口偏外
-                    k_abs_raw = np.abs(ck0)
-                    k_max_local = float(np.max(k_abs_raw)) if len(k_abs_raw) > 0 else 0.0
                     if self._last_traffic_light is not None:
                         alpha_bs = 0.0
-                    elif k_max_local > 0.015:
-                        alpha_bs = 0.3   # 紧弯/环岛降权
                     else:
                         alpha_bs = 0.7
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
@@ -495,16 +479,10 @@ class Xagent(BasicAgent):
                 key=lambda a: veh_location.distance(a.get_location())
             )
 
-            # 场景自适应 OBCA 检测范围：
-            # - ACC 直线：椭圆 APF 足够，OBCA 仅极近距离兜底
-            # - roundabout：环岛内循环车 32m 被 OBCA 捕获导致 MPC 汇入震荡，缩小范围
-            # - 其他：默认全量
+            # ACC 直线工况不需要 OBCA 多边形精确避让，椭圆 APF 足够
             if self._scenario == 'multilaneACC':
                 max_dual_veh = 2
-                max_obca_range = 10.0
-            elif self._scenario in ('roundabout', 'round_s1'):
-                max_dual_veh = 2
-                max_obca_range = 12.0   # 环岛车速低，12m 内才启用 OBCA 硬约束
+                max_obca_range = 10.0   # 仅极近距离才启用 OBCA
             else:
                 max_dual_veh = 4
                 max_obca_range = 32.0
@@ -1036,8 +1014,8 @@ class Xagent(BasicAgent):
             alpha_delta = 0.20
             max_delta_step = 0.03
         elif is_roundabout_like or k_window_max > 0.015:
-            alpha_delta = 0.85
-            max_delta_step = 0.35
+            alpha_delta = 0.70
+            max_delta_step = 0.25
         else:
             alpha_delta = 0.50
             max_delta_step = 0.15
