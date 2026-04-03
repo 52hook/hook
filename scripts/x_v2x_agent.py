@@ -579,15 +579,17 @@ class Xagent(BasicAgent):
         # ========== 3. 环境感知：APF 用的障碍 / 行人 ==========
         obs, heights, obs_infer, obs_stds = self._env.get_obs(current_state)
 
-        # === 根据前方一段路径的“最大曲率”判断：是否进入环岛 / 紧弯区域 ===
+        # === 根据前方一段路径的”最大曲率”判断：是否进入环岛 / 紧弯区域 ===
+        # 窗口同时覆盖”当前位置之前 5 点 + 之后 25 点”，避免出弯时前方已直但车还在弯上
         try:
             k_abs = np.abs(ck)
-            idx0 = max(int(target_ind), 0)
-            idx1 = min(len(k_abs), idx0 + 20)
+            idx_cur = max(int(target_ind), 0)
+            idx0 = max(idx_cur - 5, 0)              # 回看 5 点（~2m）
+            idx1 = min(len(k_abs), idx_cur + 25)     # 前看 25 点（~10m）
             if idx0 < idx1:
                 k_window_max = float(np.max(k_abs[idx0:idx1]))
             else:
-                k_window_max = float(k_abs[idx0])
+                k_window_max = float(k_abs[idx_cur])
         except Exception:
             k_window_max = 0.0
 
@@ -596,12 +598,21 @@ class Xagent(BasicAgent):
         min_long = -2.0
 
         # 紧弯 / 环岛：横向多留一点，后方多看一点
-        if k_window_max > 0.015:
+        # 阈值分离：进入用 0.015，退出用 0.010（迟滞防抖）
+        if not hasattr(self, '_was_roundabout_like'):
+            self._was_roundabout_like = False
+
+        k_enter = 0.015
+        k_exit  = 0.010   # 退出阈值更低 → 延迟退出弯道模式
+        if self._was_roundabout_like:
+            is_roundabout_like = (k_window_max > k_exit)
+        else:
+            is_roundabout_like = (k_window_max > k_enter)
+        self._was_roundabout_like = is_roundabout_like
+
+        if is_roundabout_like:
             max_lat = 3.5
             min_long = -4.0
-            is_roundabout_like = True
-        else:
-            is_roundabout_like = False
 
         # 判断自车是否在路口内（用于对向车检测）
         ego_wp = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True)
