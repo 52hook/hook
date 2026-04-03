@@ -583,9 +583,9 @@ class Xagent(BasicAgent):
         max_lat = 2.0
         min_long = -2.0
 
-        # 紧弯 / 环岛：横向适度放宽，但不过大以免捕获分流车道车辆
+        # 紧弯 / 环岛：横向多留一点，后方多看一点
         if k_window_max > 0.015:
-            max_lat = 2.8
+            max_lat = 3.5
             min_long = -4.0
             is_roundabout_like = True
         else:
@@ -648,14 +648,8 @@ class Xagent(BasicAgent):
                     obs_cross_infer.append(obs_infer[k])
                 # ③ 同向前车 / 慢车
                 else:
-                    # 环岛分流区：左侧偏置且非正前方的同向车 → 降级为 cross（低权重）
-                    # 防止出环岛车辆的 APF 把自车"别"出环岛
-                    if is_roundabout_like and rel_y > 1.0 and rel_x < 2.0:
-                        obs_cross.append(ob)
-                        obs_cross_infer.append(obs_infer[k])
-                    else:
-                        obs_long.append(ob)
-                        obs_long_infer.append(obs_infer[k])
+                    obs_long.append(ob)
+                    obs_long_infer.append(obs_infer[k])
 
         # 是否进入“对向直行车减速让行模式”（消融: 禁用时永远不让行）
         # 对向让行触发距离从 18m 降到 12m，避免路口转弯时过早让行
