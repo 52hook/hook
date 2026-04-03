@@ -479,10 +479,15 @@ class Xagent(BasicAgent):
                 key=lambda a: veh_location.distance(a.get_location())
             )
 
-            # ACC 直线工况不需要 OBCA 多边形精确避让，椭圆 APF 足够
+            # 场景自适应 OBCA 检测范围：
+            # - ACC 直线：椭圆 APF 足够，OBCA 仅极近距离兜底
+            # - roundabout：环岛内循环车 32m 被 OBCA 捕获导致 MPC 汇入震荡，缩小范围
             if self._scenario == 'multilaneACC':
                 max_dual_veh = 2
-                max_obca_range = 10.0   # 仅极近距离才启用 OBCA
+                max_obca_range = 10.0
+            elif self._scenario in ('roundabout', 'round_s1'):
+                max_dual_veh = 2
+                max_obca_range = 12.0
             else:
                 max_dual_veh = 4
                 max_obca_range = 32.0
