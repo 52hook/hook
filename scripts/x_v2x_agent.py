@@ -277,9 +277,15 @@ class Xagent(BasicAgent):
         z_ref[3, 0] = ref_path.cyaw[ind]
 
         dist_move = copy.copy(self.dist_move)
+        # 曲率自适应系数：高曲率处缩短预瞄步长，防止预测窗口横跨弯→直过渡
+        _kappa_gain = 8.0
 
         for i in range(1, T + 1):
-            dist_move += self.dist_step * abs(self._model.get_v()) * self._dt
+            # 当前预瞄点曲率
+            prev_index = min(ind + int(round(dist_move / self._d_dist)), length - 1)
+            kappa = abs(ref_path.ck[prev_index]) if hasattr(ref_path, 'ck') else 0.0
+            adaptive_step = self.dist_step / (1.0 + _kappa_gain * kappa)
+            dist_move += adaptive_step * abs(self._model.get_v()) * self._dt
             ind_move = int(round(dist_move / self._d_dist))
             index = min(ind + ind_move, length - 1)
 
@@ -413,13 +419,13 @@ class Xagent(BasicAgent):
                     # 基准路径和 B 样条做小比例插值（此时 cx0/cy0 已是 ndarray）
                     # 红灯减速时 MPC 预测窗口延伸到转弯区，B-spline 提前弯曲导致跨线
                     # 检测到红灯时完全禁用 B-spline，用原始路径保持直行
-                    # 环岛/紧弯时 B-spline 会"截弯取直"偏离真实弯道 → 降权
+                    # 环岛/紧弯时 B-spline QP 平滑天然"截弯取直" → 完全禁用
                     k_abs_raw = np.abs(ck0)
                     k_max_local = float(np.max(k_abs_raw)) if len(k_abs_raw) > 0 else 0.0
                     if self._last_traffic_light is not None:
                         alpha_bs = 0.0
-                    elif k_max_local > 0.015:
-                        alpha_bs = 0.2   # 紧弯时几乎用原始路径，避免截弯取直
+                    elif k_max_local > 0.012:
+                        alpha_bs = 0.0   # 紧弯/环岛完全用原始路径
                     else:
                         alpha_bs = 0.7
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
@@ -445,20 +451,18 @@ class Xagent(BasicAgent):
         sp = itp.calc_speed_profile(cx, cy, cyaw, self._model.target_v)
         ref_path = itp.PATH(cx, cy, cyaw, ck)
 
-        # --- [FIX START] 强制对齐参考路径的 Yaw 周期 ---
-        # 找到最近点
-        ind_nearest, _ = ref_path.nearest_index([current_state[0], current_state[1], current_state[2]])
-        # 获取最近点的参考 yaw
-        ref_yaw_nearest = ref_path.cyaw[ind_nearest]
-        
-        # 计算自车 yaw 与 参考 yaw 的差值倍数
-        diff = current_state[2] - ref_yaw_nearest
-        k_cycle = round(diff / (2 * np.pi))
-        
-        # 将整个参考路径的 cyaw 平移 2*pi*k，使其与自车对齐
-        if k_cycle != 0:
-            ref_path.cyaw = [y + k_cycle * 2 * np.pi for y in ref_path.cyaw]
-        # --- [FIX END] ---
+        # --- yaw 连续化：逐点与自车 yaw 做最短弧归一化，避免 ±π 跳变 ---
+        ego_yaw = float(current_state[2])
+        cyaw_arr = np.array(ref_path.cyaw, dtype=float)
+        # 先让第一个点与自车 yaw 对齐到 [-π, π)
+        cyaw_arr[0] = ego_yaw + math.atan2(
+            math.sin(cyaw_arr[0] - ego_yaw),
+            math.cos(cyaw_arr[0] - ego_yaw))
+        # 后续逐点 unwrap（相邻差值限制在 [-π, π)）
+        for i in range(1, len(cyaw_arr)):
+            d = cyaw_arr[i] - cyaw_arr[i - 1]
+            cyaw_arr[i] = cyaw_arr[i - 1] + math.atan2(math.sin(d), math.cos(d))
+        ref_path.cyaw = cyaw_arr.tolist()
 
         z_ref, target_ind = self.calc_ref_trajectory_in_T_step(
             [current_state[0], current_state[1], v, current_state[2]],
