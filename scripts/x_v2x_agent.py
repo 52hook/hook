@@ -413,8 +413,13 @@ class Xagent(BasicAgent):
                     # 基准路径和 B 样条做小比例插值（此时 cx0/cy0 已是 ndarray）
                     # 红灯减速时 MPC 预测窗口延伸到转弯区，B-spline 提前弯曲导致跨线
                     # 检测到红灯时完全禁用 B-spline，用原始路径保持直行
+                    # 环岛/紧弯时 B-spline 会"截弯取直"偏离真实弯道 → 降权
+                    k_abs_raw = np.abs(ck0)
+                    k_max_local = float(np.max(k_abs_raw)) if len(k_abs_raw) > 0 else 0.0
                     if self._last_traffic_light is not None:
                         alpha_bs = 0.0
+                    elif k_max_local > 0.015:
+                        alpha_bs = 0.2   # 紧弯时几乎用原始路径，避免截弯取直
                     else:
                         alpha_bs = 0.7
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
