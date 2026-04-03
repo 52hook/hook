@@ -1036,6 +1036,18 @@ class Xagent(BasicAgent):
         if (not danger) and abs(v_err) < 0.4 and abs(self._a_cmd) < 0.25 and apf_ttc < 1e-3:
             self._a_cmd = 0.0
 
+        # 6.3 环岛前方静止/慢车：优先停车，不打转向绕行（空间窄容易冲出车道）
+        if is_roundabout_like and lv is not None:
+            lv_vel = lv.get_velocity()
+            lv_speed = math.hypot(lv_vel.x, lv_vel.y)
+            lv_loc = lv.get_location()
+            d_lv = veh_location.distance(lv_loc)
+            if lv_speed < 1.0 and d_lv < 12.0:
+                # 距离越近刹车越狠，锁定方向盘防绕行
+                brake_ratio = max(0.0, 1.0 - d_lv / 12.0)
+                self._a_cmd = min(self._a_cmd, -2.5 * brake_ratio)
+                self._delta_cmd = self._delta_cmd * (1.0 - 0.5 * brake_ratio)
+
         # 防倒车 / 低速刹车保护
         safe_acc, safe_delta = self._front_ttc_brake(
             current_state, self._a_cmd, self._delta_cmd, emergency=danger
