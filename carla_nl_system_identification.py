@@ -31,7 +31,7 @@ except ImportError:
 from official.basic_agent import BasicAgent
 
 host = 'localhost'
-port = 2001
+port = 2000
 
 NO_RENDERING = False
 DT_ = 1/20  # [s] delta time step, = 1/FPS_in_server
@@ -221,20 +221,12 @@ class CarlaSystemIdentification(object):
 def collect_data():
     CSI = CarlaSystemIdentification(host, port)
 
-    # 从地图出生点中选取起终点（保证在路上），选距离最远的一对确保路线够长
-    spawn_points = CSI.get_spawn_points()
-    # 按距离排序，选相距最远的两个出生点
-    max_dist, best_s, best_e = 0, 0, 1
-    for i in range(min(len(spawn_points), 30)):
-        for j in range(i + 1, min(len(spawn_points), 30)):
-            d = spawn_points[i].location.distance(spawn_points[j].location)
-            if d > max_dist:
-                max_dist = d
-                best_s, best_e = i, j
-    s_transform = spawn_points[best_s]
-    e_transform = spawn_points[best_e]
-    logging.info(f'起点: ({s_transform.location.x:.1f}, {s_transform.location.y:.1f}), '
-                 f'终点: ({e_transform.location.x:.1f}, {e_transform.location.y:.1f}), 距离: {max_dist:.1f}m')
+    # Assign the start position and end position
+    s_transform = carla.Transform(carla.Location(x=214.658, y=58.735, z=0.2),\
+                                carla.Rotation(pitch=0.0, yaw=-180, roll=0.0))
+    e_transform = random.choice(CSI.get_spawn_points())
+    # e_transform = carla.Transform(carla.Location(x=4.35, y=-45, z=0.2),\
+    #                             carla.Rotation(pitch=0.0, yaw=-90, roll=0.0))
 
     # Spawn Ego Vehicle and set destinationss
     CSI.init_ego_vehicle(s_transform)
@@ -277,20 +269,18 @@ def fit_data():
     # p0 = np.array([-128916, -85944, 1.02, 1.85, 1614, 1536.7])
     p0 = np.array([-4.248e+04, -9.548e+04,  1.339e+00,  1.568e+00,  1.614e+03, 1.538e+03])
 
-    # ===== 约束条件（SLSQP: fun(p) >= 0）=====
-    con_wb    = {'type': 'eq',   'fun': lambda p: p[2] + p[3] - 2.87}
-    con_kf    = {'type': 'ineq', 'fun': lambda p: -p[0]}           # kf <= 0
-    con_kr    = {'type': 'ineq', 'fun': lambda p: -p[1]}           # kr <= 0
-    con_lf_lo = {'type': 'ineq', 'fun': lambda p: p[2] - 0.8}     # lf >= 0.8
-    con_lr_lo = {'type': 'ineq', 'fun': lambda p: p[3] - 0.8}     # lr >= 0.8
-    con_m_lo  = {'type': 'ineq', 'fun': lambda p: p[4] - 1000}    # m >= 1000
-    con_m_hi  = {'type': 'ineq', 'fun': lambda p: 2200 - p[4]}    # m <= 2200
-    con_Iz_lo = {'type': 'ineq', 'fun': lambda p: p[5] - 500}     # Iz >= 500
-    con_Iz_hi = {'type': 'ineq', 'fun': lambda p: 5000 - p[5]}    # Iz <= 5000
+    # Constraints
+    con_1 = {'type': 'eq', 'fun': lambda p: p[2] + p[3] - 2.87}
+    # con_2 = {'type': 'ineq', 'fun': lambda p: p[2]-2}
+    con_22 = {'type': 'ineq', 'fun': lambda p: -p[2]}
+    # con_3 = {'type': 'ineq', 'fun': lambda p: p[3]-2}
+    con_33 = {'type': 'ineq', 'fun': lambda p: -p[3]}
+    con_4  = {'type': 'ineq', 'fun': lambda p: p[4]-2200}
+    con_5  = {'type': 'ineq', 'fun': lambda p: 1000-p[4]}
+    con_6  = {'type': 'ineq', 'fun': lambda p: p[5]-10000}
+    con_7  = {'type': 'ineq', 'fun': lambda p: -p[5]}
     tick = time.time()
-    result = minimize(residuals, p0, args=(X, U), method='SLSQP', options={'maxiter': 200},
-                     constraints=[con_wb, con_kf, con_kr, con_lf_lo, con_lr_lo,
-                                  con_m_lo, con_m_hi, con_Iz_lo, con_Iz_hi])
+    result = minimize(residuals, p0, args=(X, U), method='SLSQP', options={'maxiter': 200}, constraints=[con_1, con_22, con_33, con_4, con_5, con_7])
     tock = time.time()
     print(f'Optimization time: {tock - tick} seconds')
 
@@ -387,7 +377,7 @@ def main():
     )
     args = argparser.parse_args()
 
-    if args.collect:
+    if 1:
         collect_data()
     if args.fit:
         fit_data()
