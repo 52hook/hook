@@ -91,7 +91,7 @@ class Xagent(BasicAgent):
         self._model.solver_basis(
             Q=np.diag([5.0, 15.0, 10.0, 2.0, 2.5]),      # [x, y, yaw, vx, vy]
             R=np.diag([0.8, 2.5]),                      # [a, δ]
-            Rd=np.diag([2000.0, 8000.0])                    # [Δa, Δδ]
+            Rd=np.diag([2000.0, 2000.0])                    # [Δa, Δδ] 原8000→2000，出弯需快速回正
         )
         self.Q_origin = copy.deepcopy(self._model.Q)
         self._log_data = []
@@ -413,8 +413,13 @@ class Xagent(BasicAgent):
                     # 基准路径和 B 样条做小比例插值（此时 cx0/cy0 已是 ndarray）
                     # 红灯减速时 MPC 预测窗口延伸到转弯区，B-spline 提前弯曲导致跨线
                     # 检测到红灯时完全禁用 B-spline，用原始路径保持直行
+                    # 弯道时降权：B-spline QP 平滑天然截弯取直，环岛出口偏外
+                    k_abs_raw = np.abs(ck0)
+                    k_max_local = float(np.max(k_abs_raw)) if len(k_abs_raw) > 0 else 0.0
                     if self._last_traffic_light is not None:
                         alpha_bs = 0.0
+                    elif k_max_local > 0.015:
+                        alpha_bs = 0.3   # 紧弯/环岛降权
                     else:
                         alpha_bs = 0.7
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
@@ -1031,8 +1036,8 @@ class Xagent(BasicAgent):
             alpha_delta = 0.20
             max_delta_step = 0.03
         elif is_roundabout_like or k_window_max > 0.015:
-            alpha_delta = 0.70
-            max_delta_step = 0.25
+            alpha_delta = 0.85
+            max_delta_step = 0.35
         else:
             alpha_delta = 0.50
             max_delta_step = 0.15
