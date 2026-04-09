@@ -20,6 +20,7 @@ import numpy as np
 import utils.interpolate as itp
 import utils.carla_utils as ca_u
 from enum import Enum
+from dataclasses import dataclass
 from collections import deque
 from official.basic_agent import BasicAgent
 from official.misc import get_trafficlight_trigger_location, is_within_distance
@@ -43,6 +44,27 @@ class RoadOption(Enum):
     LANEFOLLOW = 4
     CHANGELANELEFT = 5
     CHANGELANERIGHT = 6
+
+
+# ======================================================================
+#   规则权重集中定义 (APF / IGPR 方差反馈的全部可调常量)
+#   —— 默认值与历史硬编码逐字节一致，改动需走 sensitivity analysis
+# ======================================================================
+@dataclass
+class RuleWeights:
+    # APF 障碍权重（通用场景）
+    obs_ratio_front: float = 150.0
+    obs_ratio_cross: float = 60.0
+    obs_ratio_opp:   float = 40.0
+    # APF 障碍权重（环岛场景：整体收紧）
+    obs_ratio_front_round: float = 80.0
+    obs_ratio_cross_round: float = 40.0
+    obs_ratio_opp_round:   float = 30.0
+    # 对向车让行触发时的对向权重
+    obs_ratio_opp_yield: float = 25.0
+    # IGPR 方差 → APF 权重放大系数
+    k_sigma:         float = 2.0
+    sigma_scale_max: float = 1.5
 
 
 class Xagent(BasicAgent):
@@ -107,6 +129,9 @@ class Xagent(BasicAgent):
         self._use_igpr_var = use_igpr_var
         self._use_bspline = use_bspline
         self._use_qp_warmstart = use_qp_warmstart
+
+        # ---- 规则权重集中管理 ----
+        self._rw = RuleWeights()
 
         # === B 样条全局参考线平滑器 ===
         self._bspline_smoother = BSplineGlobalSmoother(
@@ -825,28 +850,26 @@ class Xagent(BasicAgent):
             tl_data = (0.0, 0.0, 0.0, 0.0, 0.0)
 
         # ----- APF 障碍 / 行人 / TTC 参数 -----
-        obs_ratio_front = 150
-        obs_ratio_cross = 60
-        obs_ratio_opp = 40
+        obs_ratio_front = self._rw.obs_ratio_front
+        obs_ratio_cross = self._rw.obs_ratio_cross
+        obs_ratio_opp   = self._rw.obs_ratio_opp
 
         if is_roundabout_like:
-            obs_ratio_front = 80
-            obs_ratio_cross = 40
-            obs_ratio_opp = 30
+            obs_ratio_front = self._rw.obs_ratio_front_round
+            obs_ratio_cross = self._rw.obs_ratio_cross_round
+            obs_ratio_opp   = self._rw.obs_ratio_opp_round
 
         if yield_for_opp:
-            obs_ratio_opp = 25
+            obs_ratio_opp = self._rw.obs_ratio_opp_yield
 
         # === IGPR 方差 → 动态调整 APF 权重（消融开关: use_igpr_var）===
+        k_sigma         = self._rw.k_sigma
+        sigma_scale_max = self._rw.sigma_scale_max
         if self._use_igpr_var:
-            k_sigma = 2.0
-            sigma_scale_max = 1.5
             obs_sigma_mean = float(np.mean(obs_stds)) if len(obs_stds) > 0 else 0.0
             sigma_scale = min(1.0 + k_sigma * obs_sigma_mean, sigma_scale_max)
         else:
             sigma_scale = 1.0
-            k_sigma = 2.0
-            sigma_scale_max = 1.5
 
         # 收集所有软 APF 障碍物到统一列表
         soft_obs_list = []
