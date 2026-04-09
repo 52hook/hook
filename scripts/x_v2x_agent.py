@@ -52,16 +52,16 @@ class RoadOption(Enum):
 # ======================================================================
 @dataclass
 class RuleWeights:
-    # APF 障碍权重（通用场景）
-    obs_ratio_front: float = 150.0
-    obs_ratio_cross: float = 60.0
-    obs_ratio_opp:   float = 40.0
+    # APF 障碍权重（通用场景）—— 保持 int 与历史硬编码逐字节一致
+    obs_ratio_front: int = 150
+    obs_ratio_cross: int = 60
+    obs_ratio_opp:   int = 40
     # APF 障碍权重（环岛场景：整体收紧）
-    obs_ratio_front_round: float = 80.0
-    obs_ratio_cross_round: float = 40.0
-    obs_ratio_opp_round:   float = 30.0
+    obs_ratio_front_round: int = 80
+    obs_ratio_cross_round: int = 40
+    obs_ratio_opp_round:   int = 30
     # 对向车让行触发时的对向权重
-    obs_ratio_opp_yield: float = 25.0
+    obs_ratio_opp_yield: int = 25
     # IGPR 方差 → APF 权重放大系数
     k_sigma:         float = 2.0
     sigma_scale_max: float = 1.5
