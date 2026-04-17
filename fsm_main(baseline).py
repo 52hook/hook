@@ -39,7 +39,7 @@ def generate_destination(ego_vehicle_transform):
     return destination
 
 # init environment
-env = Env(map_id='03', display_method='spec', birdeye_view=False, dt=simu_step, recording=True)
+env = Env(map_id='03', display_method='spec', birdeye_view=False, dt=simu_step, recording=False)
 # clean all existing actors
 env.clean_all_actors()
 spawn_points = env.world.get_map().get_spawn_points()
@@ -309,7 +309,12 @@ for _ in range(10000):
                 THW_cnt += 1
         env.ego_vehicle.apply_control(control)
         
-        computing_times.append(time.time()-tick)
+        tock = time.time()
+        computing_times.append(tock - tick)
+        # 仅在计算耗时不足一个仿真步长时补齐，避免空等
+        elapsed = tock - tick
+        if elapsed < simu_step:
+            time.sleep(simu_step - elapsed)
         env.spectator.set_transform(carla.Transform(navigation_agent._vehicle.get_location() + carla.Location(z=40), carla.Rotation(pitch=-90)))
         # - change traffic light
         if scenario == 'crossroad':
@@ -330,7 +335,6 @@ for _ in range(10000):
         if np.sqrt((env.ego_vehicle.get_location().x - destination_transform.location.x)**2 + (env.ego_vehicle.get_location().y - destination_transform.location.y)**2) < 5:
             break
         cnt +=1
-        time.sleep(simu_step)
         env.world.tick()
         
 

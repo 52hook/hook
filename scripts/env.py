@@ -185,7 +185,7 @@ class Env:
 
         logging.info("Connecting to CARLA at %s:%s", host, port)
         self.client = carla.Client(host, port)
-        self.client.set_timeout(10.0)
+        self.client.set_timeout(30.0)
 
         # Fail early on client/server mismatches instead of crashing later in RPC calls.
         client_version = None

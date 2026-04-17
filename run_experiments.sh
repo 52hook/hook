@@ -34,27 +34,31 @@ run_udmc() {
     local logfile="${RESULTS_DIR}/${label}_${scenario}_r${repeat}.log"
     local datafile="${RESULTS_DIR}/${label}_${scenario}_r${repeat}.txt"
     log "运行 ${label} | ${scenario} | repeat=${repeat} | seed=${seed}"
-    CARLA_PORT=${CARLA_PORT} \
-    USE_DUAL=${use_dual} \
-    ABLATION_IGPR=${abl_igpr} \
-    ABLATION_BSPLINE=${abl_bspline} \
-    ABLATION_QP=${abl_qp} \
-    RANDOM_SEED=${seed} \
-    LOG_OUTPUT="${datafile}" \
-    timeout 300 python udmc_main.py "${scenario}" "True" \
-        > "${logfile}" 2>&1 || true
-    sleep 3
+    (
+        CARLA_PORT=${CARLA_PORT} \
+        USE_DUAL=${use_dual} \
+        ABLATION_IGPR=${abl_igpr} \
+        ABLATION_BSPLINE=${abl_bspline} \
+        ABLATION_QP=${abl_qp} \
+        RANDOM_SEED=${seed} \
+        LOG_OUTPUT="${datafile}" \
+        timeout 300 python udmc_main.py "${scenario}" "True" \
+            > "${logfile}" 2>&1
+    ) || true
+    sleep 8
 }
 
 run_fsm() {
     local scenario=$1 repeat=$2 seed=${3:-}
     local logfile="${RESULTS_DIR}/FSM_${scenario}_r${repeat}.txt"
     log "运行 FSM | ${scenario} | repeat=${repeat} | seed=${seed}"
-    CARLA_PORT=${CARLA_PORT} \
-    RANDOM_SEED=${seed} \
-    timeout 300 python "fsm_main(baseline).py" "${scenario}" "True" \
-        > "${logfile}" 2>&1 || true
-    sleep 3
+    (
+        CARLA_PORT=${CARLA_PORT} \
+        RANDOM_SEED=${seed} \
+        timeout 300 python "fsm_main(baseline).py" "${scenario}" "True" \
+            > "${logfile}" 2>&1
+    ) || true
+    sleep 8
 }
 
 # ========================================================================
@@ -106,3 +110,12 @@ log "结果保存在: ${RESULTS_DIR}"
 log "对比实验: ${#SCENARIOS[@]} 场景 × 3 方法 × ${REPEATS} 轮 = ${N_COMP} 次"
 log "消融实验: ${#SCENARIOS[@]} 场景 × 4 消融 × ${REPEATS} 轮 = ${N_ABL} 次"
 log "总计: $(( N_COMP + N_ABL )) 次仿真"
+
+# ========================================================================
+# 清理：关闭 CARLA 服务端
+# ========================================================================
+log "关闭 CARLA 进程..."
+pkill -f "CarlaUE4" 2>/dev/null || true
+sleep 2
+pkill -9 -f "CarlaUE4" 2>/dev/null || true
+log "CARLA 已关闭"
