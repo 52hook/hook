@@ -15,6 +15,12 @@
 # ========================================================================
 set -euo pipefail
 
+# ------------------------------------------------------------------------
+# 激活 conda 环境 first1 —— 环境内才有 python 命令（否则裸 python 找不到）
+# ------------------------------------------------------------------------
+source "$HOME/anaconda3/etc/profile.d/conda.sh"
+conda activate first1
+
 CARLA_PORT=2001
 PROJECT_DIR="$HOME/phd/0.9.16udmc_carla-main_myfinal"
 RESULTS_DIR="${PROJECT_DIR}/experiment_results"
