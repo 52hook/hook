@@ -50,11 +50,13 @@ run_udmc() {
 
 run_fsm() {
     local scenario=$1 repeat=$2 seed=${3:-}
-    local logfile="${RESULTS_DIR}/FSM_${scenario}_r${repeat}.txt"
+    local logfile="${RESULTS_DIR}/FSM_${scenario}_r${repeat}.log"
+    local datafile="${RESULTS_DIR}/FSM_${scenario}_r${repeat}.txt"
     log "运行 FSM | ${scenario} | repeat=${repeat} | seed=${seed}"
     (
         CARLA_PORT=${CARLA_PORT} \
         RANDOM_SEED=${seed} \
+        LOG_OUTPUT="${datafile}" \
         timeout 300 python "fsm_main(baseline).py" "${scenario}" "True" \
             > "${logfile}" 2>&1
     ) || true

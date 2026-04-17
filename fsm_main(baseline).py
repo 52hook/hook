@@ -308,9 +308,37 @@ for _ in range(10000):
                 print('THW: ', THW)
                 THW_cnt += 1
         env.ego_vehicle.apply_control(control)
-        
+
         tock = time.time()
         computing_times.append(tock - tick)
+        # ================ 收集 14 列日志（对齐 UDMC/GRIPC 格式）================
+        ego_loc = navigation_agent._vehicle.get_location()
+        ego_tf = navigation_agent._vehicle.get_transform()
+        ego_wp = navigation_agent._map.get_waypoint(ego_loc)
+        # 横向误差：ego 到最近车道 waypoint 中心的距离
+        dist_error = ego_loc.distance(ego_wp.transform.location)
+        # 航向误差：wrap 到 [-pi, pi]
+        yaw_diff = ego_tf.rotation.yaw - ego_wp.transform.rotation.yaw
+        yaw_error = abs(((yaw_diff + 180) % 360) - 180) * np.pi / 180.0
+        # 速度误差：|ego_speed - speed_limit|
+        ego_vel_xy = navigation_agent._vehicle.get_velocity()
+        ego_speed = np.sqrt(ego_vel_xy.x ** 2 + ego_vel_xy.y ** 2)
+        ref_speed = navigation_agent._speed_limit / 3.6 if hasattr(navigation_agent, '_speed_limit') and navigation_agent._speed_limit else target_v / 3.6
+        vel_error = abs(ego_speed - ref_speed)
+        # 控制量映射（与 UDMC 一致：throttle*3 - brake*3）
+        acc_logged = 3.0 * (-control.throttle if control.reverse else control.throttle) - 3.0 * control.brake
+        steer_logged = control.steer / env.steer_ratio
+        # 最近障碍车距离
+        nearby_for_log = [v for v in navigation_agent._world.get_actors().filter('vehicle.*')
+                          if v.id != navigation_agent._vehicle.id
+                          and ego_loc.distance(v.get_location()) < 60.0]
+        min_dist_to_obs = min((ego_loc.distance(v.get_location()) for v in nearby_for_log), default=999.0)
+        agent._log_data.append([
+            cnt * simu_step, dist_error, yaw_error, vel_error,
+            acc_logged, steer_logged,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,   # FSM 不使用 APF，六列填 0
+            tock - tick, min_dist_to_obs
+        ])
         # 仅在计算耗时不足一个仿真步长时补齐，避免空等
         elapsed = tock - tick
         if elapsed < simu_step:
@@ -384,6 +412,16 @@ with open('computing_time.txt', 'a') as f:
     f.write('THW Rate: '+str(THW_cnt/cnt)+'\n')
     f.write('Time to pass: '+str(cnt*simu_step)+'\n')
 env.client.stop_recorder()
-# - save log data
-# np.savetxt(scenario+'.txt', agent._log_data)
+# ================ 保存 14 列日志（对齐 run_experiments.sh 的 LOG_OUTPUT 契约）================
+_log_output = os.environ.get('LOG_OUTPUT', '')
+if _log_output and agent._log_data:
+    os.makedirs(os.path.dirname(_log_output) or '.', exist_ok=True)
+    np.savetxt(_log_output, np.array(agent._log_data))
+    print(f'日志已保存: {_log_output}')
+elif agent._log_data:
+    os.makedirs('logs', exist_ok=True)
+    _ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    _fallback = os.path.join('logs', f'FSM_{scenario}_{_ts}.txt')
+    np.savetxt(_fallback, np.array(agent._log_data))
+    print(f'日志已保存: {_fallback}')
 # plot_result(scenario)
