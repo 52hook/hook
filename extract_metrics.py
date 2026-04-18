@@ -174,14 +174,34 @@ def print_single(log_file: str, metrics: dict):
     print(f"{'=' * 60}")
 
 
+KNOWN_METHODS = [
+    'GRIPC_noOBCA', 'GRIPC_noIGPR', 'GRIPC_noBSP', 'GRIPC_noQP',
+    'GRIPC', 'UDMC', 'FSM',
+]
+KNOWN_SCENARIOS = [
+    'unsig_crossroad', 'roundabout', 'multilaneACC', 'mixed_traffic',
+    'crossroad', 'unsig_s1', 'unsig_s2', 'unsig_s3', 'round_s1', 'cross_s1',
+]
+
+
 def parse_filename(filename: str):
     """从文件名中解析 method, scenario, repeat。
     格式: {METHOD}_{SCENARIO}_r{N}.txt
+    使用已知方法/场景白名单避免正则歧义（noBSP_unsig_crossroad 这类下划线混淆）。
     """
     name = Path(filename).stem
-    match = re.match(r'^(.+?)_(.+?)_r(\d+)$', name)
-    if match:
-        return match.group(1), match.group(2), int(match.group(3))
+    m_rep = re.search(r'_r(\d+)$', name)
+    if not m_rep:
+        return None, None, None
+    repeat = int(m_rep.group(1))
+    base = name[:m_rep.start()]
+    for method in KNOWN_METHODS:
+        prefix = method + '_'
+        if base.startswith(prefix):
+            scenario = base[len(prefix):]
+            if scenario in KNOWN_SCENARIOS:
+                return method, scenario, repeat
+            return method, scenario, repeat
     return None, None, None
 
 
