@@ -135,12 +135,14 @@ class Xagent(BasicAgent):
 
         # B 样条场景自适应 α 查表
         # roundabout：高曲率，降 α 保留原始转弯点
+        # unsig_crossroad：无信号路口 90° 左转，中高曲率
         # multilaneACC：直道换道不及时，中度降 α
         # 其他场景：保持原 0.7
         self._alpha_bs_by_scenario = {
-            'roundabout':     0.2,
-            'round_s1':       0.2,
-            'multilaneACC':   0.4,
+            'roundabout':      0.2,
+            'round_s1':        0.2,
+            'unsig_crossroad': 0.3,
+            'multilaneACC':    0.4,
         }
         self._alpha_bs_default = 0.7
 
