@@ -13,7 +13,7 @@
 set -euo pipefail
 
 CARLA_PORT=2001
-PROJECT_DIR="$HOME/phd/0.9.16udmc_carla-main myfinal"
+PROJECT_DIR="$HOME/phd/0.9.16udmc_carla-main_myfinal"
 RESULTS_DIR="${PROJECT_DIR}/experiment_results"
 REPEATS=40    # 每个配置重复次数（与 UDMC Table VI 一致）
 
