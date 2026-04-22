@@ -73,6 +73,7 @@ class Xagent(BasicAgent):
                  use_igpr_var=True,
                  use_bspline=True,
                  use_qp_warmstart=True,
+                 bspline_adaptive=False,
                  scenario='unsig_crossroad') -> None:
         """
         env   : simulation environment (provides ego_vehicle, get_obs, get_pedes)
@@ -84,6 +85,7 @@ class Xagent(BasicAgent):
             use_igpr_var     : IGPR 方差驱动动态 APF 权重
             use_bspline      : B 样条全局参考线平滑
             use_qp_warmstart : 凸 QP 预规划热启动 NMPC
+            bspline_adaptive : B 样条混合系数 alpha_bs 按场景自适应（默认 False = 固定 0.7）
         """
         self._env = env
         self._vehicle = env.ego_vehicle
@@ -129,6 +131,18 @@ class Xagent(BasicAgent):
         self._use_igpr_var = use_igpr_var
         self._use_bspline = use_bspline
         self._use_qp_warmstart = use_qp_warmstart
+        self._bspline_adaptive = bspline_adaptive
+
+        # B 样条场景自适应 α 查表
+        # roundabout：高曲率，降 α 保留原始转弯点
+        # multilaneACC：直道换道不及时，中度降 α
+        # 其他场景：保持原 0.7
+        self._alpha_bs_by_scenario = {
+            'roundabout':     0.2,
+            'round_s1':       0.2,
+            'multilaneACC':   0.4,
+        }
+        self._alpha_bs_default = 0.7
 
         # ---- 规则权重集中管理 ----
         self._rw = RuleWeights()
@@ -429,8 +443,13 @@ class Xagent(BasicAgent):
                     # 检测到红灯时完全禁用 B-spline，用原始路径保持直行
                     if self._last_traffic_light is not None:
                         alpha_bs = 0.0
+                    elif self._bspline_adaptive:
+                        # 场景自适应：环岛/多车道走查表，其余保持 0.7
+                        alpha_bs = self._alpha_bs_by_scenario.get(
+                            self._scenario, self._alpha_bs_default
+                        )
                     else:
-                        alpha_bs = 0.7
+                        alpha_bs = self._alpha_bs_default
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
                     cy = (1.0 - alpha_bs) * cy0 + alpha_bs * smooth_path[:, 1]
 
@@ -1089,6 +1108,14 @@ class Xagent(BasicAgent):
             next_state[0] - ref_traj[0, 1],
             next_state[1] - ref_traj[1, 1] - self.dist_move
         )
+        # dist_error_raw: ego 到 B-spline 前原始参考点的最短距离
+        # 用于剥离 "ego 追不上 B-spline 线" 与 "B-spline 把参考线拉偏" 两种效应
+        try:
+            _dx_raw = cx0 - next_state[0]
+            _dy_raw = cy0 - next_state[1]
+            dist_error_raw = float(np.min(np.hypot(_dx_raw, _dy_raw)))
+        except Exception:
+            dist_error_raw = float(dist_error)
         yaw_error = abs(next_state[2] - ref_traj[2, 1])
         vel_error = abs(state[2][0][3] - ref_traj[3, 0])
         acc = self._a_cmd
@@ -1118,7 +1145,7 @@ class Xagent(BasicAgent):
             self._simu_time, dist_error, yaw_error, vel_error,
             acc, steer, apf_obs, apf_ttc, apf_pede,
             apf_nc_road, apf_c_road, apf_traffic, cost_time,
-            min_dist_to_obs
+            min_dist_to_obs, dist_error_raw
         ])
 
         return self._a_cmd, self._delta_cmd, (next_state, height + 0.05)

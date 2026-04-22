@@ -30,10 +30,12 @@ veh_num = 100
 
 # ---- 消融实验开关（通过环境变量控制，默认全部启用 = 完整 GRIPC）----
 # 设为 "0" 关闭对应改进，例: ABLATION_QP=0 python udmc_main.py unsig_s1 False
-USE_DUAL          = os.environ.get('USE_DUAL', '1') != '0'
-USE_IGPR_VAR      = os.environ.get('ABLATION_IGPR', '1') != '0'
-USE_BSPLINE       = os.environ.get('ABLATION_BSPLINE', '1') != '0'
-USE_QP_WARMSTART  = os.environ.get('ABLATION_QP', '1') != '0'
+USE_DUAL             = os.environ.get('USE_DUAL', '1') != '0'
+USE_IGPR_VAR         = os.environ.get('ABLATION_IGPR', '1') != '0'
+USE_BSPLINE          = os.environ.get('ABLATION_BSPLINE', '1') != '0'
+USE_QP_WARMSTART     = os.environ.get('ABLATION_QP', '1') != '0'
+# B-spline 场景自适应 α（默认关，保护旧实验对比语义）
+USE_BSPLINE_ADAPTIVE = os.environ.get('ABLATION_BSPLINE_ADAPTIVE', '0') != '0'
 
 # ---- 随机种子（通用场景可复现）----
 _seed_str = os.environ.get('RANDOM_SEED', '')
@@ -220,8 +222,9 @@ agent = Xagent(env, dynamic_model, dt=simu_step,
                use_igpr_var=USE_IGPR_VAR,
                use_bspline=USE_BSPLINE,
                use_qp_warmstart=USE_QP_WARMSTART,
+               bspline_adaptive=USE_BSPLINE_ADAPTIVE,
                scenario=scenario)
-print(f'[Config] dual={USE_DUAL} igpr={USE_IGPR_VAR} bspline={USE_BSPLINE} qp_ws={USE_QP_WARMSTART}')
+print(f'[Config] dual={USE_DUAL} igpr={USE_IGPR_VAR} bspline={USE_BSPLINE} qp_ws={USE_QP_WARMSTART} bs_adaptive={USE_BSPLINE_ADAPTIVE}')
 
 # - Spawn other vehicles
 if random_spawn:

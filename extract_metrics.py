@@ -14,7 +14,7 @@
 
 日志列格式 (来自 udmc_main.py, agent._log_data):
   [0] simu_time
-  [1] dist_error      (横向跟踪误差)
+  [1] dist_error      (ego 到 B-spline 后参考轨迹的距离)
   [2] yaw_error       (航向误差)
   [3] vel_error       (速度误差)
   [4] acc             (经 env.step 映射后的纵向加速度)
@@ -27,6 +27,9 @@
   [11] apf_traffic    (红绿灯势场)
   [12] cost_time      (MPC 求解时间, 单位: 秒)
   [13] min_dist_to_obs (与最近障碍车辆的距离, 单位: 米)
+  [14] dist_error_raw (ego 到 B-spline 前原始参考轨迹 cx0/cy0 最短距离；2026-04-22 新增)
+
+向后兼容：旧日志只有 14 列，extract_single 会降级，dist_error_raw 相关指标置 nan。
 """
 import sys
 import os
@@ -74,6 +77,15 @@ def extract_single(log_file: str) -> dict:
     mean_yaw_err = float(np.mean(np.abs(data[:, 2])))
     mean_vel_err = float(np.mean(np.abs(data[:, 3])))
 
+    # ---- 原始车道中心 RMSE（B-spline 前）----
+    if data.shape[1] >= 15:
+        dist_err_raw = data[:, 14]
+        mean_dist_err_raw = float(np.mean(np.abs(dist_err_raw)))
+        rmse_dist_err_raw = float(np.sqrt(np.mean(dist_err_raw ** 2)))
+    else:
+        mean_dist_err_raw = float('nan')
+        rmse_dist_err_raw = float('nan')
+
     # ---- MPC 求解时间 ----
     mpc_times = data[:, 12]
     mean_mpc = float(np.mean(mpc_times))
@@ -115,6 +127,8 @@ def extract_single(log_file: str) -> dict:
         # 跟踪精度
         'mean_dist_err': mean_dist_err,
         'rmse_dist_err': rmse_dist_err,
+        'mean_dist_err_raw': mean_dist_err_raw,
+        'rmse_dist_err_raw': rmse_dist_err_raw,
         'mean_yaw_err': mean_yaw_err,
         'mean_vel_err': mean_vel_err,
         # MPC 实时性
@@ -240,6 +254,7 @@ def batch_summary(results_dir: str):
         ('max_jerk', 'MaxJerk', '.2f'),
         ('max_steer_rate', 'MaxStR', '.3f'),
         ('rmse_dist_err', 'RMSE(m)', '.3f'),
+        ('rmse_dist_err_raw', 'RMSEraw', '.3f'),
         ('min_dist_overall', 'MinDist', '.1f'),
         ('mean_mpc_ms', 'MPC(ms)', '.1f'),
         ('p95_mpc_ms', 'P95(ms)', '.1f'),
@@ -267,8 +282,9 @@ def batch_summary(results_dir: str):
                     mean_val = np.mean(vals) * 100
                     std_val = np.std(vals) * 100
                 else:
-                    mean_val = np.mean(vals)
-                    std_val = np.std(vals)
+                    # nanmean 忽略旧 14 列日志的缺失（dist_error_raw）
+                    mean_val = float(np.nanmean(vals))
+                    std_val = float(np.nanstd(vals))
                 row += f" {mean_val:{fmt}}±{std_val:{fmt}}"
             print(row)
         if any((method, s) in grouped for s in scenarios):
