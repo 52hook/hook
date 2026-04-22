@@ -133,18 +133,16 @@ class Xagent(BasicAgent):
         self._use_qp_warmstart = use_qp_warmstart
         self._bspline_adaptive = bspline_adaptive
 
-        # B 样条场景自适应 α 查表
-        # roundabout：高曲率，降 α 保留原始转弯点
-        # unsig_crossroad：无信号路口 90° 左转，中高曲率
-        # multilaneACC：直道换道不及时，中度降 α
-        # 其他场景：保持原 0.7
-        self._alpha_bs_by_scenario = {
-            'roundabout':      0.2,
-            'round_s1':        0.2,
-            'unsig_crossroad': 0.3,
-            'multilaneACC':    0.4,
-        }
-        self._alpha_bs_default = 0.7
+        # B 样条曲率调度 α sigmoid（Route Z）
+        # 直道 (|κ|→0)  → α_max 充分平滑
+        # 急弯 (|κ|≫κ0) → α_min 贴原车道中心，避免 B-spline 切内道
+        # 形式参考：Tarhini 2025 CEP Eq.(20a) 曲率 sigmoid 权重
+        #           Choi 2025 T-ITS Eq.(10) 曲率驱动的 flattening penalty
+        self._alpha_bs_max    = 0.7
+        self._alpha_bs_min    = 0.2
+        self._alpha_bs_kappa0 = 0.05    # sigmoid 拐点曲率 (1/m)
+        self._alpha_bs_beta   = 80.0    # sigmoid 陡峭度 (类比 Tarhini γ3)
+        self._alpha_bs_default = 0.7    # bspline_adaptive=0 时回退常数
 
         # ---- 规则权重集中管理 ----
         self._rw = RuleWeights()
@@ -446,9 +444,14 @@ class Xagent(BasicAgent):
                     if self._last_traffic_light is not None:
                         alpha_bs = 0.0
                     elif self._bspline_adaptive:
-                        # 场景自适应：环岛/多车道走查表，其余保持 0.7
-                        alpha_bs = self._alpha_bs_by_scenario.get(
-                            self._scenario, self._alpha_bs_default
+                        # Route Z: 曲率 sigmoid 逐点 α
+                        # α_i = α_max − (α_max−α_min) / (1 + exp(−β·(|κ_i|−κ0)))
+                        alpha_bs = self._alpha_bs_max - (
+                            self._alpha_bs_max - self._alpha_bs_min
+                        ) / (
+                            1.0 + np.exp(
+                                -self._alpha_bs_beta * (np.abs(ck0) - self._alpha_bs_kappa0)
+                            )
                         )
                     else:
                         alpha_bs = self._alpha_bs_default
