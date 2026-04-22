@@ -40,6 +40,7 @@ run_udmc() {
         ABLATION_IGPR=${abl_igpr} \
         ABLATION_BSPLINE=${abl_bspline} \
         ABLATION_QP=${abl_qp} \
+        ABLATION_BSPLINE_ADAPTIVE=1 \
         RANDOM_SEED=${seed} \
         LOG_OUTPUT="${datafile}" \
         timeout 300 python udmc_main.py "${scenario}" "True" \
