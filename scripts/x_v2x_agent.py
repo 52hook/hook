@@ -138,10 +138,10 @@ class Xagent(BasicAgent):
         # 急弯 (|κ|≫κ0) → α_min 贴原车道中心，避免 B-spline 切内道
         # 形式参考：Tarhini 2025 CEP Eq.(20a) 曲率 sigmoid 权重
         #           Choi 2025 T-ITS Eq.(10) 曲率驱动的 flattening penalty
-        self._alpha_bs_max    = 0.7
-        self._alpha_bs_min    = 0.2
-        self._alpha_bs_kappa0 = 0.05    # sigmoid 拐点曲率 (1/m)
-        self._alpha_bs_beta   = 80.0    # sigmoid 陡峭度 (类比 Tarhini γ3)
+        self._alpha_bs_max    = 0.5
+        self._alpha_bs_min    = 0.15
+        self._alpha_bs_kappa0 = 0.02    # sigmoid 拐点曲率 (1/m)
+        self._alpha_bs_beta   = 150.0   # sigmoid 陡峭度 (类比 Tarhini γ3)
         self._alpha_bs_default = 0.7    # bspline_adaptive=0 时回退常数
 
         # ---- 规则权重集中管理 ----
