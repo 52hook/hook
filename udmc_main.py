@@ -29,7 +29,7 @@ target_v = 35
 veh_num = 100
 
 # ---- 消融实验开关（通过环境变量控制，默认全部启用 = 完整 GRIPC）----
-# 设为 "0" 关闭对应改进，例: ABLATION_QP=0 python udmc_main.py unsig_s1 False
+# 设为 "0" 关闭对应改进，例: ABLATION_QP=0 python udmc_main.py unsig_crossroad False
 USE_DUAL             = os.environ.get('USE_DUAL', '1') != '0'
 USE_IGPR_VAR         = os.environ.get('ABLATION_IGPR', '1') != '0'
 USE_BSPLINE          = os.environ.get('ABLATION_BSPLINE', '1') != '0'
@@ -77,9 +77,6 @@ else:
 VALID_SCENARIOS = [
     'roundabout', 'multilaneACC', 'crossroad', 'comprehensive',
     'unsig_crossroad', 'mixed_traffic',
-    'unsig_s1', 'unsig_s2', 'unsig_s3',   # 无信号路口对比实验子场景
-    'round_s1',                            # 环岛入口紧迫场景
-    'cross_s1',                            # 有信号路口对向车逼近场景
 ]
 if scenario not in VALID_SCENARIOS:
     print('Wrong scenario!')
@@ -120,63 +117,6 @@ elif scenario == 'unsig_crossroad':
     target_v = 25
     start_transform = carla.Transform(carla.Location(x=8.914989, y=-96.977425, z=0.02), carla.Rotation(pitch=0.0, yaw=-88.5864, roll=0.0))
     destination_transform = carla.Transform(carla.Location(x=-46.57, y=-139.27, z=0.00), carla.Rotation(pitch=0.0, yaw=-180.5864, roll=0.0))
-
-# =====================================================================
-# 对比实验子场景 S1/S2/S3
-# 共用与 unsig_crossroad 相同的起止点，仅对向/交叉车辆配置不同
-# AV 从 (8.91, -96.98) 向北行驶，在交叉口左转至 (-46.57, -139.27)
-# 对向车在 x≈-4, 向南行驶 (yaw≈91°)
-# =====================================================================
-elif scenario in ('unsig_s1', 'unsig_s2', 'unsig_s3'):
-    # 信号灯常绿（无信号灯约束）
-    traffic_lights = env.world.get_actors().filter('*traffic_light*')
-    for traffic_light in traffic_lights:
-        traffic_light.set_state(carla.TrafficLightState.Green)
-        traffic_light.freeze(True)
-    random_spawn = False          # 对比实验使用手动放置
-    target_v = 25
-    start_transform = carla.Transform(
-        carla.Location(x=8.914989, y=-96.977425, z=0.02),
-        carla.Rotation(pitch=0.0, yaw=-88.5864, roll=0.0))
-    destination_transform = carla.Transform(
-        carla.Location(x=-46.57, y=-139.27, z=0.00),
-        carla.Rotation(pitch=0.0, yaw=-180.5864, roll=0.0))
-
-# =====================================================================
-# round_s1: 环岛入口紧迫场景
-# 复现原论文失败：驶入环岛第一象限时冲出内侧边界
-# AV 从东侧进入环岛，环内有 2 辆车占据内车道
-# =====================================================================
-elif scenario == 'round_s1':
-    random_spawn = False
-    target_v = 40
-    # 与原 roundabout 相同的起止点
-    start_transform = carla.Transform(
-        carla.Location(x=1.69, y=70.00, z=0.1),
-        carla.Rotation(pitch=0.0, yaw=-87.98, roll=0.0))
-    destination_transform = carla.Transform(
-        carla.Location(x=-6.85, y=37.58, z=0.1),
-        carla.Rotation(pitch=0.0, yaw=90.5864, roll=0.0))
-
-# =====================================================================
-# cross_s1: 有信号路口对向车逼近场景
-# 复现原论文失败：两辆周车从对向同时逼近 AV，安全裕度极低
-# 信号灯先红后绿（Ttl=4.5s），AV 左转时遭遇对向直行车
-# =====================================================================
-elif scenario == 'cross_s1':
-    traffic_lights = env.world.get_actors().filter('*traffic_light*')
-    for traffic_light in traffic_lights:
-        traffic_light.set_state(carla.TrafficLightState.Red)
-        traffic_light.freeze(True)
-    random_spawn = False
-    target_v = 25
-    # 与原 crossroad 相同的起止点
-    start_transform = carla.Transform(
-        carla.Location(x=8.914989, y=-96.977425, z=0.02),
-        carla.Rotation(pitch=0.0, yaw=-88.5864, roll=0.0))
-    destination_transform = carla.Transform(
-        carla.Location(x=-46.57, y=-139.27, z=0.00),
-        carla.Rotation(pitch=0.0, yaw=-180.5864, roll=0.0))
 
 elif scenario == 'mixed_traffic':
     traffic_lights = env.world.get_actors().filter('*traffic_light*')
@@ -269,78 +209,6 @@ else:
             init_state = carla.Transform(carla.Location(x=sv_init_states[i][0], y=sv_init_states[i][1], z=0.5),
                                         carla.Rotation(yaw=sv_init_states[i][2]))
             transform_list.append(init_state)
-
-    # =====================================================================
-    # S1: 稀疏对向车流 — 1 辆对向直行车（低速 ~20km/h 由 autopilot 控制）
-    # =====================================================================
-    elif scenario == 'unsig_s1':
-        sv_init_states = [
-            [-4.0, -180.0, 91.4],    # 对向车：距路口约 40m，向南行驶
-        ]
-        for s in sv_init_states:
-            transform_list.append(carla.Transform(
-                carla.Location(x=s[0], y=s[1], z=0.3),
-                carla.Rotation(yaw=s[2])))
-
-    # =====================================================================
-    # S2: 中密度对向车流 — 3 辆连续对向直行车（间距 ~15m）
-    # =====================================================================
-    elif scenario == 'unsig_s2':
-        sv_init_states = [
-            [-4.0, -180.0, 91.4],    # 第 1 辆：距路口 ~40m
-            [-4.0, -165.0, 91.4],    # 第 2 辆：距路口 ~25m
-            [-1.0, -150.0, 91.4],    # 第 3 辆：距路口 ~10m（略偏车道）
-        ]
-        for s in sv_init_states:
-            transform_list.append(carla.Transform(
-                carla.Location(x=s[0], y=s[1], z=0.3),
-                carla.Rotation(yaw=s[2])))
-
-    # =====================================================================
-    # S3: 高密度混合车流 + 双车夹击
-    #     2 辆对向直行 + 1 辆从垂直方向驶入 + 额外同向慢车
-    # =====================================================================
-    elif scenario == 'unsig_s3':
-        sv_init_states = [
-            [-4.0, -175.0, 91.4],    # 对向车 1：距路口 ~35m，向南
-            [-1.0, -160.0, 91.4],    # 对向车 2：距路口 ~20m，向南
-            [-46.0, -135.0, 0.86],   # 交叉车：从西侧驶来，向东直行 (yaw≈0°)
-            [5.0, -55.0, -88.6],     # 同向慢车：前方同车道，向北行驶
-        ]
-        for s in sv_init_states:
-            transform_list.append(carla.Transform(
-                carla.Location(x=s[0], y=s[1], z=0.3),
-                carla.Rotation(yaw=s[2])))
-
-    # =====================================================================
-    # round_s1: 环岛内侧 2 辆车 + 即将汇入的 1 辆车
-    # 测试 AV 汇入环岛时的避障与边界保持能力
-    # =====================================================================
-    elif scenario == 'round_s1':
-        sv_init_states = [
-            [-15.0, 55.0, -180.0],   # 环岛内车 1：内车道，从北侧向西行驶
-            [-25.0, 42.0, 90.0],     # 环岛内车 2：内车道，从西侧向北行驶
-            [10.0, 45.0, -88.0],     # 即将汇入车：从东侧接近环岛入口
-        ]
-        for s in sv_init_states:
-            transform_list.append(carla.Transform(
-                carla.Location(x=s[0], y=s[1], z=0.3),
-                carla.Rotation(yaw=s[2])))
-
-    # =====================================================================
-    # cross_s1: 对向双车逼近 + 侧方车辆
-    # 复现原论文 Sig-Inter 97.5% 的唯一失败案例
-    # =====================================================================
-    elif scenario == 'cross_s1':
-        sv_init_states = [
-            [-4.0, -175.0, 91.4],    # 对向车 1：距路口 ~35m，向南直行
-            [-1.0, -160.0, 91.4],    # 对向车 2：距路口 ~20m，向南直行（偏右车道）
-            [-35.0, -135.0, 0.86],   # 侧方车：从西侧驶入路口，向东直行
-        ]
-        for s in sv_init_states:
-            transform_list.append(carla.Transform(
-                carla.Location(x=s[0], y=s[1], z=0.3),
-                carla.Rotation(yaw=s[2])))
 
     # with open('spawnpoints_multilaneACC_2023-07-16 11:59:20.396382.txt', 'r') as csv_file:
     else:

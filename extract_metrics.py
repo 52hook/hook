@@ -194,7 +194,7 @@ KNOWN_METHODS = [
 ]
 KNOWN_SCENARIOS = [
     'unsig_crossroad', 'roundabout', 'multilaneACC', 'mixed_traffic',
-    'crossroad', 'unsig_s1', 'unsig_s2', 'unsig_s3', 'round_s1', 'cross_s1',
+    'crossroad',
 ]
 
 

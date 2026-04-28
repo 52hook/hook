@@ -22,7 +22,7 @@ log() {
 RAND_SCENARIOS=("unsig_crossroad" "crossroad" "roundabout" "multilaneACC")
 
 # 固定场景（调试用，不纳入正式实验）
-FIXED_SCENARIOS=("unsig_s1" "unsig_s2" "unsig_s3" "round_s1" "cross_s1" "mixed_traffic")
+FIXED_SCENARIOS=("mixed_traffic")
 
 log "===== 测试随机交通场景 (GRIPC 全开) ====="
 for sc in "${RAND_SCENARIOS[@]}"; do

@@ -534,7 +534,7 @@ class Xagent(BasicAgent):
             if self._scenario == 'multilaneACC':
                 max_dual_veh = 2
                 max_obca_range = 10.0
-            elif self._scenario in ('roundabout', 'round_s1'):
+            elif self._scenario == 'roundabout':
                 max_dual_veh = 2
                 max_obca_range = 12.0
             else:
