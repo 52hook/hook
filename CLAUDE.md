@@ -7,11 +7,11 @@
 - **专业问题必须验证**：回答学术规范、技术细节、算法原理等专业问题前，必须通过联网搜索或本地文件验证，禁止凭 AI 记忆直接作答，不确定的内容标注不确定。
 - **改文件前先出计划**：输出 3–7 步计划 + 文件清单 + 风险 + 验证方式，等用户说"开始"后再动手。
 - **（最严格要求）复杂任务默认多 Agent 并行**：涉及多文件修改、跨模块调研、论文+代码联动等复杂任务时，默认启用多 Agent 并发执行，引入方法，需要更改代码必须先利用agent调研顶刊论文，做到有依据。
-- **学术问题必须先读论文**：回答任何与本项目相关的学术问题前，必须先读 `new.docx` 及相关章节，基于论文实际内容，然后进行顶刊论文的搜索与阅读回答，严禁凭印象或通用知识敷衍作答。
+- **学术问题必须先读论文**：回答任何与本项目相关的学术问题前，必须先读 latex/cas-dc-template.tex 及相关章节，基于论文实际内容，然后进行顶刊论文的搜索与阅读回答，严禁凭印象或通用知识敷衍作答。
 - **`CLAUDE.md` 为唯一项目规则文件**，不在其他地方重复定义项目规则。
 - **联网必须用 Grok-Search MCP（强制，无例外）**：所有联网操作（搜索、抓取网页、查文献）必须使用 Grok-Search MCP 工具（`mcp__grok-search__*`），**严禁使用 WebFetch / WebSearch**。
 - **论文内容严禁进入 git（强制，无例外）**：涉及论文的文件（`*.tex`/`*.bib`/`*.docx`/`*.pdf`/`latex/` 目录/`changelogs/` 中论文相关日志等）**严禁 `git add`、严禁 `git commit`、严禁 `git push`、严禁任何形式的本地"备份 commit"**，必须始终保留在工作区未跟踪或未暂存状态。原因：若论文与代码混在同一条提交历史上，未来代码回退（`git reset`/`revert`）会把论文一起拖回旧版本，造成写作成果丢失。论文的历史管理由用户手动负责，AI 不介入，改论文前也不需要任何 git 备份动作，直接改就行。只有代码改动（`scripts/`/`utils/`/`*.py`/`*.sh`/`CLAUDE.md` 等）才可 `commit` + `push`。
-- **回答前必须 codex 复核（强制，无例外）**：每次回答问题或给出建议前，必须先调用 OpenAI Codex CLI（`codex` 命令，已安装于 `/home/jh/.nvm/versions/node/v20.20.2/bin/codex`，版本 `codex-cli 0.125.0`）对拟输出回答的合理性、技术准确性、与本 `CLAUDE.md` 规则的兼容性进行审查；只有 codex 审查通过后才可输出给用户。若 codex 指出问题必须修正后重审，禁止跳过、禁止伪造审查结论。调用方式示例：`codex exec "请审查以下回答的合理性与技术准确性：<回答草稿>"`。与既有约束的执行顺序：codex 复核 → 出计划 → 备份 → 改文件。
+- **回答前重要的问题需用 codex 复核**：回答重要问题或给出重要建议前，必须先调用 OpenAI Codex CLI（`codex` 命令，已安装于 `/home/jh/.nvm/versions/node/v20.20.2/bin/codex`，版本 `codex-cli 0.125.0`）对拟输出回答的合理性、技术准确性进行审查；只有 codex 审查通过后才可输出给用户。若 codex 指出问题必须修正后重审，禁止跳过、禁止伪造审查结论。调用方式示例：`codex exec "请审查以下回答的合理性与技术准确性：<回答草稿>"`。与既有约束的执行顺序：codex 复核 → 出计划 → 备份 → 改文件。
 
 ## 1. 语言与风格
 
@@ -24,7 +24,7 @@
 
 **GRIPC**（Geometry-Rule Integrated Planning and Control）— 面向城市自动驾驶的几何-规则集成规划与控制框架，基于 CARLA 0.9.16，在 UDMC 基础上做四项改进。
 
-本人论文：`1.pdf`（PDF 定稿）、`new.docx`（Word 版本），均在根目录。原版 UDMC 代码在 `udmc_carla-main/`，对应论文为 `UDMC_Unified_Decision-Making_and_Control_Framework_for_Urban_Autonomous_Driving_With_Motion_Prediction_of_Traffic_Participants.pdf`（根目录）。OBCA 改进参考论文为 `TDR-OBCA_A_Reliable_Planner_for_Autonomous_Driving_in_Free-Space_Environment.pdf`（根目录）。
+本人论文：latex/cas-dc-template.tex。原版 UDMC 代码在 `udmc_carla-main/`，对应论文为 `UDMC_Unified_Decision-Making_and_Control_Framework_for_Urban_Autonomous_Driving_With_Motion_Prediction_of_Traffic_Participants.pdf`（根目录）。OBCA 改进参考论文为 `TDR-OBCA_A_Reliable_Planner_for_Autonomous_Driving_in_Free-Space_Environment.pdf`（根目录）。
 
 ### 四大改进
 
