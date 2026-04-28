@@ -301,6 +301,14 @@ class Env:
 
         self.recording = recording
 
+        # ====================================================================
+        # CollisionSensor 状态（A 路径 OBCA 受控实验，2026-04-28 新增）
+        # 在 reset() 中 attach 到 ego；listen 回调把 carla.CollisionEvent 入队
+        # 主循环每 tick 后调用 consume_collisions(frame) 出队对齐到当前 frame
+        # ====================================================================
+        self._collision_queue = queue.Queue()
+        self._collision_sensor = None
+
 
     def reset(self, ego_transform=None):
         """
@@ -372,11 +380,78 @@ class Env:
                 # self.image_queue = queue.Queue()
                 self.camera.listen(lambda image: image.save_to_disk('images/' + str(self.dir_name) + '/%06d.png' % image.frame_number))
 
+        # ----- CollisionSensor attach（A 路径，2026-04-28）-----
+        self._attach_collision_sensor(self.ego_vehicle)
+
         self.time = 0
 
         self.world.tick()
         if DISPLAY_METHOD == 'pygame':
             self.clock.tick()
+
+    def _attach_collision_sensor(self, ego_actor):
+        """
+        在 ego 上挂一个 sensor.other.collision；事件按 frame 入队。
+        若已挂载则先销毁（reset 重入安全）。
+        """
+        # 销毁旧 sensor
+        if self._collision_sensor is not None:
+            try:
+                self._collision_sensor.stop()
+            except Exception:
+                pass
+            try:
+                self._collision_sensor.destroy()
+            except Exception:
+                pass
+            self._collision_sensor = None
+        # 清空残留事件
+        while not self._collision_queue.empty():
+            try:
+                self._collision_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        bp = self.world.get_blueprint_library().find('sensor.other.collision')
+        sensor = self.world.spawn_actor(bp, carla.Transform(), attach_to=ego_actor)
+        sensor.listen(lambda event: self._collision_queue.put(event))
+        self._collision_sensor = sensor
+        self.actor_list.append(sensor)
+
+    @staticmethod
+    def _classify_collision(other_actor):
+        """1=车辆，2=行人，3=其他（静态物/护栏/路灯）。"""
+        tid = ''
+        try:
+            tid = other_actor.type_id if other_actor is not None else ''
+        except Exception:
+            tid = ''
+        if tid.startswith('vehicle.'):
+            return 1
+        if tid.startswith('walker.'):
+            return 2
+        return 3
+
+    def consume_collisions(self, target_frame=None):
+        """
+        出队 frame <= target_frame 的所有 CollisionEvent，返回当 tick 内的最严重
+        分类（1>2>3，min 取数字最小者）。无碰撞返回 0。target_frame=None 则 drain 全部。
+        """
+        flags = []
+        leftover = []
+        while not self._collision_queue.empty():
+            try:
+                ev = self._collision_queue.get_nowait()
+            except queue.Empty:
+                break
+            ev_frame = getattr(ev, 'frame', None)
+            if target_frame is None or ev_frame is None or ev_frame <= target_frame:
+                flags.append(self._classify_collision(getattr(ev, 'other_actor', None)))
+            else:
+                leftover.append(ev)
+        for ev in leftover:
+            self._collision_queue.put(ev)
+        return min(flags) if flags else 0
 
     def print_mpc_timing_stats(self, dt=0.05, prefix="UDMC-X"):
         """
@@ -895,6 +970,27 @@ class Env:
         
 
     def clean_all_actors(self):
+        # ----- 先 stop+destroy 自管 collision sensor，避免 listener 持有 ego 句柄 -----
+        if self._collision_sensor is not None:
+            try:
+                self._collision_sensor.stop()
+            except Exception:
+                pass
+            try:
+                self._collision_sensor.destroy()
+            except Exception:
+                pass
+            self._collision_sensor = None
+        # 兜底：清掉残留的 collision sensor
+        for actor in self.world.get_actors().filter("sensor.other.collision"):
+            try:
+                actor.stop()
+            except Exception:
+                pass
+            try:
+                actor.destroy()
+            except Exception:
+                pass
         actors = self.world.get_actors().filter("*veh*")
         for actor in actors:
             actor.destroy()

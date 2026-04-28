@@ -287,6 +287,15 @@ for _ in range(10000):
         # update the log data from acc and steer to carla_thr and carla_steer
         agent._log_data[-1][4] = 3*(carla_thr if carla_reverse == False else -carla_thr)
         agent._log_data[-1][5] = carla_steer/env.steer_ratio
+
+        # ---- A 路径 OBCA 受控实验：第 16 列 collision_flag（2026-04-28）----
+        # env.step 内已 world.tick()，此处 consume 出当前帧及之前的碰撞事件
+        try:
+            _frame = env.world.get_snapshot().frame
+        except Exception:
+            _frame = None
+        _collision_flag = env.consume_collisions(_frame)
+        agent._log_data[-1][15] = _collision_flag
         # ----------------------- The above code is for the UDMC execution -----------------------
         if lv_state:
             # relative velocity of the leading vehicle

@@ -1150,7 +1150,8 @@ class Xagent(BasicAgent):
             self._simu_time, dist_error, yaw_error, vel_error,
             acc, steer, apf_obs, apf_ttc, apf_pede,
             apf_nc_road, apf_c_road, apf_traffic, cost_time,
-            min_dist_to_obs, dist_error_raw
+            min_dist_to_obs, dist_error_raw,
+            0,  # 第 16 列 collision_flag：默认 0，由 udmc_main.py 主循环 env.step 后填写
         ])
 
         return self._a_cmd, self._delta_cmd, (next_state, height + 0.05)

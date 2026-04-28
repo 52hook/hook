@@ -28,8 +28,9 @@
   [12] cost_time      (MPC 求解时间, 单位: 秒)
   [13] min_dist_to_obs (与最近障碍车辆的距离, 单位: 米)
   [14] dist_error_raw (ego 到 B-spline 前原始参考轨迹 cx0/cy0 最短距离；2026-04-22 新增)
+  [15] collision_flag (CARLA CollisionSensor 标志：0 无 / 1 车辆 / 2 行人 / 3 其他；2026-04-28 新增)
 
-向后兼容：旧日志只有 14 列，extract_single 会降级，dist_error_raw 相关指标置 nan。
+向后兼容：旧日志（14/15 列）会降级，缺失列对应指标置 nan/0。
 """
 import sys
 import os
@@ -109,6 +110,27 @@ def extract_single(log_file: str) -> dict:
         min_dist_overall = -1.0  # 旧日志无此列
         mean_min_dist = -1.0
 
+    # ============================================================
+    # 碰撞指标（第 15 列 collision_flag，2026-04-28 新增）
+    # 标志值：0 无碰撞 / 1 车辆 / 2 行人 / 3 其他物体
+    # ============================================================
+    if data.shape[1] >= 16:
+        coll = data[:, 15].astype(int)
+        collision_count        = int(np.sum(coll > 0))
+        collision_with_vehicle = int(np.sum(coll == 1))
+        collision_with_pede    = int(np.sum(coll == 2))
+        collision_with_other   = int(np.sum(coll == 3))
+        collision_rate         = float(collision_count) / max(n_steps, 1)
+        any_collision          = int(collision_count > 0)
+    else:
+        # 旧日志（14/15 列）无 collision_flag，置零并以 -1 标记 any_collision 不可判
+        collision_count        = 0
+        collision_with_vehicle = 0
+        collision_with_pede    = 0
+        collision_with_other   = 0
+        collision_rate         = float('nan')
+        any_collision          = -1
+
     # ---- APF 激活统计 ----
     apf_obs_time = float(np.sum(data[:, 6] > 1e-3) * dt)
     apf_ttc_time = float(np.sum(data[:, 7] > 1e-3) * dt)
@@ -142,6 +164,13 @@ def extract_single(log_file: str) -> dict:
         # 与障碍物最小距离
         'min_dist_overall': min_dist_overall,
         'mean_min_dist': mean_min_dist,
+        # 碰撞统计（2026-04-28 新增）
+        'collision_count': collision_count,
+        'collision_with_vehicle': collision_with_vehicle,
+        'collision_with_pede': collision_with_pede,
+        'collision_with_other': collision_with_other,
+        'collision_rate': collision_rate,
+        'any_collision': any_collision,
     }
 
 
@@ -185,6 +214,17 @@ def print_single(log_file: str, metrics: dict):
     print(f"  --- APF 势场激活时长 ---")
     print(f"  障碍物 APF 激活:     {m['apf_obs_time']:.2f} s")
     print(f"  TTC APF 激活:        {m['apf_ttc_time']:.2f} s")
+    print()
+    # ---- 碰撞统计（2026-04-28 新增；旧日志缺列时仅打印提示）----
+    print(f"  --- 碰撞统计 ---")
+    if m['any_collision'] == -1:
+        print(f"  [旧日志格式无 collision_flag 列]")
+    else:
+        print(f"  总碰撞步数:           {m['collision_count']}    (any_collision={m['any_collision']})")
+        print(f"  与车辆碰撞步数:       {m['collision_with_vehicle']}")
+        print(f"  与行人碰撞步数:       {m['collision_with_pede']}")
+        print(f"  与其他物体碰撞步数:   {m['collision_with_other']}")
+        print(f"  碰撞率:               {m['collision_rate']:.4%} （步数维度）")
     print(f"{'=' * 60}")
 
 
@@ -258,6 +298,10 @@ def batch_summary(results_dir: str):
         ('min_dist_overall', 'MinDist', '.1f'),
         ('mean_mpc_ms', 'MPC(ms)', '.1f'),
         ('p95_mpc_ms', 'P95(ms)', '.1f'),
+        # 碰撞列（2026-04-28 新增）；any_collision 为 0/1/-1 整数，
+        # 但批量 mean±std 模板用 float fmt，故用 .0f 兼容。
+        ('any_collision', 'Crash', '.0f'),
+        ('collision_rate', 'CrashR', '.4f'),
     ]
 
     # 打印表头
