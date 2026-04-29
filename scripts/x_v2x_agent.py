@@ -29,7 +29,7 @@ from utils.global_bspline_smoother import BSplineGlobalSmoother
 
 
 # polygon helpers (CARLA actors -> convex polygon half-spaces)
-from utils.geometry_poly import actors_to_Ab
+from utils.geometry_poly import actors_to_Ab, actors_to_Ab_horizon
 
 
 class RoadOption(Enum):
@@ -514,6 +514,11 @@ class Xagent(BasicAgent):
         current_state[3:] = self._next_states[0][3:]
         u0 = np.array([self._a_opt, self._delta_opt]).reshape(-1, 2).T
 
+        # ========== 1.5 环境感知前置: OBCA 时序障碍要用 IGPR 预测 ==========
+        # codex 风险点 #2 修复: 原版 get_obs 在 OBCA 之后调用, 导致 horizon
+        # 内 (A_k,b_k) 永远只有 k=0 一帧。这里前置, 让 obs_infer 可被 OBCA 使用。
+        obs, heights, obs_infer, obs_stds = self._env.get_obs(current_state)
+
         # ========== 2. 多边形 + 对偶硬约束（仅最近少量车辆） ==========
         if self._use_dual:
             obs_Am_list = []
@@ -556,18 +561,50 @@ class Xagent(BasicAgent):
             # 只有最近障碍物 < 25m 时，这一拍才用 QP 预规划
             use_qp_this_step = (min_obs_dist is not None) and (min_obs_dist < 25.0)
 
+            obca_actor_ids = []
             if len(others_for_dual) > 0:
-                ego_xy_carla = (float(veh_location.x), float(veh_location.y))
-                obs_Am_list, obs_bm_list = actors_to_Ab(
-                    others_for_dual,
-                    ego_xy=ego_xy_carla,
+                # ego 与 obs_infer 都已在右手系 (env.py:709 obs.append([x,-y,-yaw]))
+                ego_xy_rh = (float(veh_location.x), -float(veh_location.y))
+
+                # ---- 位置匹配 actor.id -> obs_infer 索引 (Tier 2: 不改 env.py) ----
+                # obs[i] = [loc.x, -loc.y, -yaw_rad], obs_infer[i] : (T,3) 右手系
+                # actors_for_dual 中部分车可能 > env.dist_threshold(15m), 无 pred,
+                # actors_to_Ab_horizon 会退化到静态 bbox (codex 风险 5.1 兜底)
+                obs_xy_rh = [(float(o[0]), float(o[1])) for o in obs] if len(obs) > 0 else []
+                actors_with_pred = []
+                for a in others_for_dual:
+                    a_loc = a.get_location()
+                    ax_rh, ay_rh = float(a_loc.x), -float(a_loc.y)
+                    best_i, best_d2 = -1, 1e9
+                    for i, (ox, oy) in enumerate(obs_xy_rh):
+                        d2 = (ox - ax_rh) ** 2 + (oy - ay_rh) ** 2
+                        if d2 < best_d2:
+                            best_d2 = d2
+                            best_i = i
+                    # 容差 1.0 m^2 (位置抖动 < 1m), 且索引在 obs_infer 范围内
+                    if best_i >= 0 and best_d2 < 1.0 and best_i < len(obs_infer):
+                        pred = np.asarray(obs_infer[best_i]).reshape(-1, 3)
+                        traj = [(float(p[0]), float(p[1]), float(p[2])) for p in pred]
+                    else:
+                        traj = []  # 退化静态
+                    actors_with_pred.append((a, traj))
+
+                obs_Am_seq, obs_bm_seq, obca_actor_ids = actors_to_Ab_horizon(
+                    actors_with_pred,
+                    ego_xy=ego_xy_rh,
+                    horizon=self._model.horizon,
                     max_range=max_range,
-                    include_types=('vehicle.',),   # 行人只用 APF
+                    include_types=('vehicle.',),
                     inflate_vehicle=0.6,
                     inflate_walker=0.45,
-                    max_obs=2,                     # 只取最近 2 个送 OBCA，减少求解规模
-                    y_flip=True
+                    max_obs=2,
+                    frame="right_hand",
                 )
+                # k=0 alias 兼容下游 (obca_qp_preplan / 调试日志读取)
+                obs_Am_list = list(obs_Am_seq[0]) if len(obs_Am_seq) > 0 else []
+                obs_bm_list = list(obs_bm_seq[0]) if len(obs_bm_seq) > 0 else []
+            else:
+                obs_Am_seq, obs_bm_seq = [], []
 
             if len(obs_Am_list) > 0 and hasattr(self._model, "enable_dual_collision"):
                 bb_ego = self._vehicle.bounding_box
@@ -577,11 +614,15 @@ class Xagent(BasicAgent):
                 ego_L_enlarge = ego_L + 0.6
                 ego_W_enlarge = ego_W + 0.4
 
+                # 时序 OBCA: 传 (A_k, b_k) 序列 + actor_id 列表 (Step 6 cache key)
                 self._model.enable_dual_collision(
-                    obs_Am_list, obs_bm_list,
+                    [], [],  # 静态槽位空, 走时序分支
                     car_box=(ego_L_enlarge, ego_W_enlarge),
                     alpha_e=2.5,
-                    beta_s=250.0   # slack 惩罚
+                    beta_s=250.0,
+                    obs_Am_seq=obs_Am_seq,
+                    obs_bm_seq=obs_bm_seq,
+                    actor_ids=obca_actor_ids,
                 )
 
                 # ====== 2.5 调用凸 QP 预规划（消融开关: use_qp_warmstart）======
@@ -614,7 +655,7 @@ class Xagent(BasicAgent):
                     self._model._qp_ws_valid = False
 
         # ========== 3. 环境感知：APF 用的障碍 / 行人 ==========
-        obs, heights, obs_infer, obs_stds = self._env.get_obs(current_state)
+        # obs/obs_infer/obs_stds 已在 1.5 节前置取得 (OBCA 时序需要), 此处不再重复
 
         # === 根据前方一段路径的“最大曲率”判断：是否进入环岛 / 紧弯区域 ===
         try:
