@@ -6,7 +6,7 @@
 #   验证 OBCA 多边形硬约束相比 UDMC 椭圆近似在无信号路口左转的碰撞下降
 #
 # 设计:
-#   paired-seed 同种子配对: 20 seeds (100..119) x 2 labels = 40 次
+#   paired-seed 同种子配对: 60 seeds (100..159) x 2 labels = 120 次
 #   单刀消融: 仅切换 USE_DUAL, 其余三开关 (IGPR/BSPLINE/QP) 全部固定为 1
 #
 # 标签:
@@ -28,10 +28,10 @@ set -euo pipefail
 # -----------------------------------------------------------------------
 CARLA_PORT=2001
 PROJECT_DIR="$HOME/phd/0.9.16udmc_carla-main_myfinal"
-RESULTS_DIR="${PROJECT_DIR}/experiment_results_a_path"
+RESULTS_DIR="${PROJECT_DIR}/experiment_results/a_path_obca_paired60"
 SCENARIO="unsig_crossroad"
 SEED_START=100
-SEED_END=119
+SEED_END=159
 
 mkdir -p "${RESULTS_DIR}"
 cd "${PROJECT_DIR}"

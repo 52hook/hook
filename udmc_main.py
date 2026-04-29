@@ -433,4 +433,14 @@ else:
     _log_file = os.path.join('logs', f'{scenario}_{_ts}.txt')
     np.savetxt(_log_file, agent._log_data)
 print(f'日志已保存: {_log_file}')
-plot_result(scenario, log_dir=os.path.dirname(_log_file))
+# ------------------------------------------------------------------
+# 收尾画图: 仅在 plot_result 能找到 <scenario>*.txt 时成功;
+# 自定义 LOG_OUTPUT (smoke / paired-seed) 文件名不匹配时降级为 warn,
+# 不影响 returncode, 保证日志和实验数据写入完整即视为成功
+# ------------------------------------------------------------------
+try:
+    plot_result(scenario, log_dir=os.path.dirname(_log_file))
+except Exception as _plot_err:
+    import traceback
+    print(f'[WARN] plot_result 跳过: {_plot_err}')
+    traceback.print_exc()
