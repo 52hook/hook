@@ -133,6 +133,44 @@ def carla_actor_box_to_Ab(actor,
     return polygon_to_Ab(V)
 
 
+def actor_to_Ab_pose(actor,
+                     x_pred: float,
+                     y_pred: float,
+                     yaw_pred: float,
+                     frame: str = "right_hand",
+                     inflate: float = 0.3,
+                     y_flip: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    按外部传入的预测姿态重建障碍 bbox -> 半空间 (A x <= b)。
+
+    与 carla_actor_box_to_Ab 的差异: 中心和 yaw 不读 actor.get_transform(),
+    而是用调用方给出的 (x_pred, y_pred, yaw_pred)。bbox 长宽仍取 actor.bounding_box。
+
+    参数:
+        actor    : CARLA actor (仅用于读 bounding_box.extent)
+        x_pred   : 预测中心 x (frame 由参数 frame 决定)
+        y_pred   : 预测中心 y (frame 由参数 frame 决定)
+        yaw_pred : 预测 yaw (弧度)
+        frame    : "right_hand" (推荐, 与 OBCA 内部坐标一致, x 不变, y 不再翻转)
+                   "carla_left" (CARLA 原生坐标, y_flip 自动应用)
+        inflate  : 长宽对称膨胀 (米, 单边)
+        y_flip   : 仅在 frame="carla_left" 时生效 (与 carla_actor_box_to_Ab 一致)
+
+    返回: (A, b), 满足 A @ p <= b 表示点 p 在多边形内部。
+    """
+    bb = actor.bounding_box
+    L = 2.0 * float(bb.extent.x) + 2.0 * inflate
+    W = 2.0 * float(bb.extent.y) + 2.0 * inflate
+
+    V = rect_vertices((x_pred, y_pred), yaw_pred, L, W)
+
+    if frame == "carla_left" and y_flip:
+        V[:, 1] *= -1.0
+    # frame == "right_hand" 时, 调用方已经在 right-hand 系给坐标, 不再 flip
+
+    return polygon_to_Ab(V)
+
+
 # ===========================
 #  主接口：actors_to_Ab
 # ===========================
@@ -202,3 +240,125 @@ def actors_to_Ab(
             break
 
     return obs_Am_list, obs_bm_list
+
+
+# ===========================
+#  时序接口: actors_to_Ab_horizon
+# ===========================
+
+def actors_to_Ab_horizon(
+    actors_with_pred: Iterable,
+    ego_xy: Tuple[float, float],
+    horizon: int,
+    max_range: float = 40.0,
+    include_types: Tuple[str, ...] = ('vehicle.',),
+    inflate_vehicle: float = 0.3,
+    inflate_walker: float = 0.4,
+    max_obs: Optional[int] = None,
+    frame: str = "right_hand",
+) -> Tuple[List[List[np.ndarray]], List[List[np.ndarray]], List[int]]:
+    """
+    构造 horizon 内时序障碍多边形序列 (A_k, b_k), k=0..horizon。
+
+    输入:
+        actors_with_pred : 可迭代项, 每项为 (actor, traj), 其中
+            actor : CARLA actor 对象
+            traj  : list of (x_pred, y_pred, yaw_pred), 长度任意
+                    长度不足 horizon+1 时, 自动 pad 最后一帧 (codex 风险点 5.1)
+                    长度为 0 时, 退化为静态 bbox (从 actor.get_transform() 读取)
+        ego_xy   : 自车在 right-hand 系下的 (x, y), 用于距离过滤
+        horizon  : MPC 预测步长 (返回外维 = horizon+1)
+        max_range/include_types/inflate_*/max_obs/frame : 与 actors_to_Ab 一致
+
+    返回:
+        obs_Am_seq : list of length (horizon+1), 内层 list of (E_m,2) 矩阵
+        obs_bm_seq : list of length (horizon+1), 内层 list of (E_m,) 向量
+        actor_id_list : 与 OBCA slot 顺序一致的 CARLA actor.id 列表 (供 dual
+                        warm-start 字典 key 使用; codex 风险点 4)
+
+    设计要点:
+        - k=0 对每个 actor: 优先用 traj[0], 若 traj 为空则用 actor.get_transform()
+        - k>=1 用 traj[k] 或 traj[-1] (pad)
+        - max_obs 在 k=0 处筛选, 后续 k 严格沿用同一 slot 顺序, 保证
+          (Am[k][m], bm[k][m]) 始终对应同一物理障碍 (slot 顺序稳定)
+    """
+    ex, ey = ego_xy
+
+    # ------ 1) 在 k=0 处筛选, 锁定 slot 顺序 ------
+    selected: List[Tuple] = []  # [(actor, traj_padded, inflate)]
+
+    for actor, traj in actors_with_pred:
+        tid = getattr(actor, "type_id", "")
+
+        if not any(tid.startswith(prefix) for prefix in include_types):
+            continue
+
+        loc = actor.get_location()
+        # ego_xy 是 right-hand, CARLA loc 是 left-hand (y 取负进入 right-hand)
+        ax = float(loc.x)
+        ay = -float(loc.y) if frame == "right_hand" else float(loc.y)
+        dx = ax - ex
+        dy = ay - ey
+        if dx * dx + dy * dy > max_range * max_range:
+            continue
+
+        if tid.startswith("vehicle."):
+            inflate = inflate_vehicle
+        elif tid.startswith("walker."):
+            inflate = inflate_walker
+        else:
+            inflate = inflate_vehicle
+
+        # 规范化 traj: 转为 list, pad 到 horizon+1
+        traj_list = list(traj) if traj is not None else []
+        if len(traj_list) == 0:
+            # 静态: 用 actor 当前姿态填满
+            (cx0, cy0), yaw0, _ = _actor_world_bb_center_and_yaw(actor)
+            if frame == "right_hand":
+                cy0 = -cy0  # CARLA left-hand -> right-hand
+                yaw0 = -yaw0
+            traj_list = [(cx0, cy0, yaw0)] * (horizon + 1)
+        else:
+            while len(traj_list) < horizon + 1:
+                traj_list.append(traj_list[-1])
+            traj_list = traj_list[:horizon + 1]
+
+        selected.append((actor, traj_list, inflate))
+
+        if max_obs is not None and len(selected) >= max_obs:
+            break
+
+    # ------ 2) 逐 k 生成 (A_k, b_k) ------
+    actor_id_list: List[int] = [int(getattr(actor, "id", -1))
+                                for actor, _, _ in selected]
+
+    obs_Am_seq: List[List[np.ndarray]] = []
+    obs_bm_seq: List[List[np.ndarray]] = []
+
+    for k in range(horizon + 1):
+        Am_k: List[np.ndarray] = []
+        bm_k: List[np.ndarray] = []
+        for actor, traj_list, inflate in selected:
+            xk, yk, yawk = traj_list[k]
+            try:
+                Am, bm = actor_to_Ab_pose(
+                    actor,
+                    x_pred=float(xk),
+                    y_pred=float(yk),
+                    yaw_pred=float(yawk),
+                    frame=frame,
+                    inflate=inflate,
+                    y_flip=False,
+                )
+            except Exception as e:
+                print("[actors_to_Ab_horizon] failed actor",
+                      getattr(actor, "id", None), "k=", k, "err:", e)
+                # 退化: 用 k=0 时的静态 bbox 兜底
+                Am, bm = carla_actor_box_to_Ab(actor, inflate=inflate,
+                                               y_flip=(frame == "right_hand"))
+            Am_k.append(Am)
+            bm_k.append(bm)
+        obs_Am_seq.append(Am_k)
+        obs_bm_seq.append(bm_k)
+
+    return obs_Am_seq, obs_bm_seq, actor_id_list
