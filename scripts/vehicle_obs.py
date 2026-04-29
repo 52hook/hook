@@ -137,6 +137,11 @@ class Vehicle:
         self.g_car = None
         self.obs_Am_list = []
         self.obs_bm_list = []
+        # E1 lite: 时序 (A_k, b_k) 序列, 外维 horizon+1, 内维 num_obs
+        self.obs_Am_seq = []
+        self.obs_bm_seq = []
+        self.obs_actor_ids = []      # Step 6 cache key 用
+        self._dual_dynamic = False   # 是否走时序 OBCA
         self.obs_edges_count = []
         self.num_obs = 0
 
@@ -705,18 +710,28 @@ class Vehicle:
         return float(traffic_pf_val)
 
     def enable_dual_collision(self, obs_Am_list, obs_bm_list, car_box=(4.5, 2.0),
-                              alpha_e=1.0, beta_s=10.0):
+                              alpha_e=1.0, beta_s=10.0,
+                              obs_Am_seq=None, obs_bm_seq=None,
+                              actor_ids=None):
         """
         启用 TDR-OBCA/H-OBCA 风格的对偶几何硬约束。
         参数：
-          - obs_Am_list: [Am] 列表，每个 Am 为 (E_m x 2) 的 numpy/casadi 矩阵（障碍多边形的半空间 A）
-          - obs_bm_list: [bm] 列表，每个 bm 为 (E_m,) 的 numpy/casadi 向量（障碍多边形的半空间 b）
+          - obs_Am_list: [Am] 列表 (静态; 兼容旧调用)
+          - obs_bm_list: [bm] 列表
           - car_box: (L, W) 车辆长宽（矩形近似）
           - alpha_e: 终端软约束权重
           - beta_s: slack s 的惩罚权重
-        使用：
-          在调用 solver_add_cost / solver_add_bounds 之前先调用一次本函数；
-          之后按原流程 solve_MPC_wo / solve_MPC 即可。
+          - obs_Am_seq: list of length (horizon+1), 内层 list of (E_m,2) 矩阵
+                       (E1 lite 时序接口; 来自 actors_to_Ab_horizon)
+          - obs_bm_seq: list of length (horizon+1), 内层 list of (E_m,) 向量
+          - actor_ids : 与 OBCA slot 顺序一致的 CARLA actor.id 列表
+                       (Step 6 dual warm-start 字典 key 用)
+
+        使用:
+          静态: enable_dual_collision(Am_list, bm_list, ...)  (旧用法)
+          时序: enable_dual_collision([], [], ..., obs_Am_seq=A_seq, obs_bm_seq=b_seq,
+                                      actor_ids=[id0, id1, ...])
+          (静态调用会被自动复制 horizon+1 份, 等价于时序退化)
         """
         self.dual_enabled = True
         self.alpha_e = float(alpha_e)
@@ -732,12 +747,54 @@ class Vehicle:
         self.G_car = ca.DM(G)
         self.g_car = ca.DM(g)
 
-        # 障碍多边形（世界系 A x <= b）
-        self.obs_Am_list = [ca.DM(Am) for Am in obs_Am_list]
-        # Ensure bm is a column vector for CasADi operations
-        self.obs_bm_list = [ca.DM(np.asarray(bm).reshape(-1, 1)) for bm in obs_bm_list]
+        # ---------- 障碍多边形: 时序优先, 否则静态退化 ----------
+        if obs_Am_seq is not None and obs_bm_seq is not None:
+            assert len(obs_Am_seq) == self.horizon + 1, (
+                f"obs_Am_seq 长度 {len(obs_Am_seq)} != horizon+1 {self.horizon+1}")
+            assert len(obs_bm_seq) == self.horizon + 1
+            # 时序: 外维 horizon+1, 内维 num_obs
+            self.obs_Am_seq = [
+                [ca.DM(Am) for Am in row] for row in obs_Am_seq
+            ]
+            self.obs_bm_seq = [
+                [ca.DM(np.asarray(bm).reshape(-1, 1)) for bm in row]
+                for row in obs_bm_seq
+            ]
+            # k=0 alias 兼容外部读取 (e.g. x_v2x_agent.py:967-970 读 obs_Am_list[m])
+            self.obs_Am_list = self.obs_Am_seq[0]
+            self.obs_bm_list = self.obs_bm_seq[0]
+            self._dual_dynamic = True
+        else:
+            # 静态: 复制 horizon+1 份
+            self.obs_Am_list = [ca.DM(Am) for Am in obs_Am_list]
+            self.obs_bm_list = [ca.DM(np.asarray(bm).reshape(-1, 1))
+                                for bm in obs_bm_list]
+            self.obs_Am_seq = [list(self.obs_Am_list)
+                               for _ in range(self.horizon + 1)]
+            self.obs_bm_seq = [list(self.obs_bm_list)
+                               for _ in range(self.horizon + 1)]
+            self._dual_dynamic = False
+
         self.num_obs = len(self.obs_Am_list)
         self.obs_edges_count = [int(Am.shape[0]) for Am in self.obs_Am_list]
+
+        # 跨 k 的 edge count 必须一致 (lambda 维度按 k=0 创建)
+        for k in range(1, self.horizon + 1):
+            for m in range(self.num_obs):
+                ek = int(self.obs_Am_seq[k][m].shape[0])
+                if ek != self.obs_edges_count[m]:
+                    raise ValueError(
+                        f"obs_Am_seq edge count 不一致: k={k}, m={m}, "
+                        f"got {ek}, expected {self.obs_edges_count[m]}")
+
+        # 记录 actor_ids (Step 6 用)
+        self.obs_actor_ids = (list(actor_ids) if actor_ids is not None
+                              else [-1] * self.num_obs)
+
+        # 动态 OBCA 启用时, 旧静态 QP warm-start 不再适用 -> 旁路
+        # (codex 风险点 5.3: HybridQPWarmStarter 仍持有静态 (Am,bm))
+        if self._dual_dynamic and hasattr(self, "_qp_ws_valid"):
+            self._qp_ws_valid = False
 
         # === NEW: 清空与形状相关的热启动缓存（障碍数量或边数变化时） ===
         new_sig = (self.horizon + 1, tuple(self.obs_edges_count))
@@ -777,7 +834,11 @@ class Vehicle:
         self.num_obs = 0
         self.obs_Am_list = []
         self.obs_bm_list = []
+        self.obs_Am_seq = []
+        self.obs_bm_seq = []
         self.obs_edges_count = []
+        self.obs_actor_ids = []
+        self._dual_dynamic = False
         self.lambda_vars = []
         self.mu_vars = []
         self.slack_s = []
@@ -1175,8 +1236,10 @@ class Vehicle:
                 tk = self.X[0:2, k]
 
                 for m in range(self.num_obs):
-                    Am = self.obs_Am_list[m]     # (E x 2)
-                    bm = self.obs_bm_list[m]     # (E,)
+                    # E1 lite: 时序 (A_k, b_k); 静态调用已被 enable_dual_collision
+                    # 复制为 horizon+1 份, obs_Am_seq[k][m] 永远存在
+                    Am = self.obs_Am_seq[k][m]   # (E x 2)
+                    bm = self.obs_bm_seq[k][m]   # (E,)
                     lam   = self.lambda_vars[k * self.num_obs + m]
                     mu    = self.mu_vars[k * self.num_obs + m]
                     s_var = self.slack_s[k * self.num_obs + m]
