@@ -820,13 +820,17 @@ class Vehicle:
         if self._dual_dynamic and hasattr(self, "_qp_ws_valid"):
             self._qp_ws_valid = False
 
-        # === NEW: 清空与形状相关的热启动缓存（障碍数量或边数变化时） ===
+        # === Step 6 (G2): 按 actor.id 重组 dual warm-start ===
+        # 旧版按 (horizon+1, tuple(edges)) shape signature 命中, slot 顺序变化
+        # 时 cache 张冠李戴 -> 收敛慢/震荡。
+        # 新版: _dual_cache_by_id[actor_id] 持有 per-actor (lam, mu, s) 张量,
+        # 在 slot 顺序变化时按 id 命中重建 flat cache; 边数不一致或缺失则 0 初始化。
         new_sig = (self.horizon + 1, tuple(self.obs_edges_count))
-        if getattr(self, "_dual_shape_sig", None) != new_sig:
-            self._lam_cache = None
-            self._mu_cache = None
-            self._s_cache = None
         self._dual_shape_sig = new_sig
+        if not hasattr(self, "_dual_cache_by_id"):
+            self._dual_cache_by_id = {}
+        # 按当前 obs_actor_ids 重建 flat cache (覆盖旧 _lam_cache/_mu_cache/_s_cache)
+        self._rebuild_flat_dual_from_dict()
 
         # 为每个 (k,m) 添加对偶变量 λ, μ, s
         self.lambda_vars, self.mu_vars, self.slack_s = [], [], []
@@ -877,6 +881,91 @@ class Vehicle:
             ca.reshape(self.U, -1, 1),
             ca.reshape(self.X, -1, 1)
         )
+
+    # ====================== Step 6 (G2): per-actor dual cache ======================
+    PM_DUAL_CACHE_MAX = 64   # 字典 FIFO 上限, 防止长仿真累积内存
+
+    def _rebuild_flat_dual_from_dict(self):
+        """按 self.obs_actor_ids 顺序从 _dual_cache_by_id 拼出 flat cache。
+
+        旧 _lam_cache/_mu_cache/_s_cache 直接被覆盖 (含 None -> ndarray 的扩展)。
+        缺失或边数不一致的 slot 用 0 兜底 -> 等价冷启, 不破坏求解。
+        """
+        if self.num_obs == 0:
+            self._lam_cache = None
+            self._mu_cache = None
+            self._s_cache = None
+            return
+        N1 = self.horizon + 1
+        edges = list(self.obs_edges_count)
+        lam_per_step = sum(edges)
+        mu_per_step = 4 * self.num_obs
+        s_per_step = self.num_obs
+        if lam_per_step == 0:
+            self._lam_cache = None
+            self._mu_cache = None
+            self._s_cache = None
+            return
+        lam_2d = np.zeros((N1, lam_per_step), dtype=float)
+        mu_2d = np.zeros((N1, mu_per_step), dtype=float)
+        s_2d = np.zeros((N1, s_per_step), dtype=float)
+        edge_offsets = [0]
+        for E in edges:
+            edge_offsets.append(edge_offsets[-1] + E)
+        cache = getattr(self, "_dual_cache_by_id", {})
+        for m, aid in enumerate(self.obs_actor_ids):
+            if aid is None or aid < 0:
+                continue
+            ent = cache.get(aid)
+            if ent is None:
+                continue
+            lam_m, mu_m, s_m = ent
+            E = edges[m]
+            # 形状校验: 长仿真中 actor 可能换车型 -> bbox 边数变化
+            if (lam_m.shape == (N1, E)
+                    and mu_m.shape == (N1, 4)
+                    and s_m.shape == (N1,)):
+                lam_2d[:, edge_offsets[m]:edge_offsets[m] + E] = lam_m
+                mu_2d[:, 4 * m:4 * m + 4] = mu_m
+                s_2d[:, m] = s_m
+        self._lam_cache = lam_2d.flatten()
+        self._mu_cache = mu_2d.flatten()
+        self._s_cache = s_2d.flatten()
+
+    def _writeback_dual_to_dict(self, lam_vec, mu_vec, s_vec):
+        """求解后把 flat 解切回 per-actor dict, 下一拍按 actor.id 命中重建。"""
+        if self.num_obs == 0:
+            return
+        if not hasattr(self, "_dual_cache_by_id"):
+            self._dual_cache_by_id = {}
+        N1 = self.horizon + 1
+        edges = list(self.obs_edges_count)
+        lam_per_step = sum(edges)
+        mu_per_step = 4 * self.num_obs
+        s_per_step = self.num_obs
+        if lam_per_step == 0:
+            return
+        lam_2d = np.asarray(lam_vec).reshape(N1, lam_per_step)
+        mu_2d = np.asarray(mu_vec).reshape(N1, mu_per_step)
+        s_2d = np.asarray(s_vec).reshape(N1, s_per_step)
+        edge_offsets = [0]
+        for E in edges:
+            edge_offsets.append(edge_offsets[-1] + E)
+        damping = float(self.dual_damping)
+        for m, aid in enumerate(self.obs_actor_ids):
+            if aid is None or aid < 0:
+                continue
+            E = edges[m]
+            lam_m = damping * lam_2d[:, edge_offsets[m]:edge_offsets[m] + E].copy()
+            mu_m = damping * mu_2d[:, 4 * m:4 * m + 4].copy()
+            s_m = 0.0 * s_2d[:, m].copy()   # s 从 0 开始, 鼓励严格满足
+            self._dual_cache_by_id[int(aid)] = (lam_m, mu_m, s_m)
+        # FIFO 上限 (Python 3.7+ dict 保序), 简单 prune 旧条目
+        if len(self._dual_cache_by_id) > self.PM_DUAL_CACHE_MAX:
+            keep_n = self.PM_DUAL_CACHE_MAX // 2
+            keys = list(self._dual_cache_by_id.keys())
+            for k in keys[:-keep_n]:
+                del self._dual_cache_by_id[k]
 
     def set_ellip_backup_obstacles(self, obs_infer, a=4.5, b=2.0, margin=0.1):
         """
@@ -1638,6 +1727,11 @@ class Vehicle:
             self._lam_cache = self.dual_damping * lam_vec
             self._mu_cache  = self.dual_damping * mu_vec
             self._s_cache   = 0.0 * s_vec   # s 从 0 开始，鼓励严格满足约束
+            # Step 6 (G2): 同步写回 per-actor dict, 下一拍按 actor.id 重建
+            try:
+                self._writeback_dual_to_dict(lam_vec, mu_vec, s_vec)
+            except Exception as _e:
+                logger.warning("dual_writeback_to_dict failed: %s", _e)
 
         # ---------- 8. 也缓存 U/X（跨步 warm-start） ----------
         self._u_cache = u0.flatten()
