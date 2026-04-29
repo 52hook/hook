@@ -1046,6 +1046,11 @@ class Vehicle:
                 else:
                     Rd_qp = None
 
+                # codex F3: QP warm-start 的 d_safe 与主 NLP (self.d_safe, 默认 0.30)
+                # 对齐, 避免 QP 解比 NLP 约束更紧 -> warm-start 在更窄走廊里搜,
+                # primal 偏离 NLP 真正最优域. QP 只看 k=0 静态障碍是已知简化,
+                # 此处只做最低成本对齐, 不重构 HybridQPWarmStarter 的时序接口.
+                qp_d_safe = float(getattr(self, 'd_safe', 0.30))
                 self.qp_warmstarter = HybridQPWarmStarter(
                     horizon=self.horizon,
                     dt=dt,
@@ -1053,7 +1058,7 @@ class Vehicle:
                     Q=Q_qp,
                     R=R_qp,
                     Rd=Rd_qp,
-                    d_safe=0.5,
+                    d_safe=qp_d_safe,
                     solver_name='ipopt',
                     acc_bounds=(self.acc_lbound, self.acc_ubound),
                     steer_bound=self.steer_bound,

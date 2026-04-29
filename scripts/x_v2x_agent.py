@@ -177,13 +177,18 @@ class Xagent(BasicAgent):
         obs         : (N,3) -> [x, y, yaw]  右手系
         heights     : list 长度 N
         obs_infer   : (N, T, 3) 或等价结构
+
+        返回: (obs_filtered, heights_filtered, obs_infer_filtered, keep_idx)
+        keep_idx 是过滤后每个保留 obs 在原 obs 中的下标 (np.ndarray, dtype=int).
+        codex F2: 上层 (OBCA-hit mask) 需要把 pre-filter 索引重映射到 post-filter
+        索引, 否则 mask 会错位.
         """
         if obs is None:
-            return obs, heights, obs_infer
+            return obs, heights, obs_infer, np.zeros((0,), dtype=int)
 
         obs_np = np.asarray(obs)
         if obs_np.size == 0:
-            return obs_np, heights, obs_infer
+            return obs_np, heights, obs_infer, np.zeros((0,), dtype=int)
 
         obs_infer_np = np.asarray(obs_infer, dtype=object)
 
@@ -249,7 +254,7 @@ class Xagent(BasicAgent):
 
             empty_infer = np.zeros((0,) + obs_infer_np.shape[1:],
                                    dtype=obs_infer_np.dtype)
-            return empty_obs, [], empty_infer
+            return empty_obs, [], empty_infer, np.zeros((0,), dtype=int)
 
         keep_idx = np.asarray(keep_idx, dtype=int)
 
@@ -257,7 +262,7 @@ class Xagent(BasicAgent):
         heights_filtered = [heights[int(k)] for k in keep_idx]
         obs_infer_filtered = obs_infer_np[keep_idx]
 
-        return obs_filtered, heights_filtered, obs_infer_filtered
+        return obs_filtered, heights_filtered, obs_infer_filtered, keep_idx
 
     # ======================================================================
     #   2) 额外的“前车安全层”：只做防倒车 + 限制低速急刹
@@ -658,6 +663,13 @@ class Xagent(BasicAgent):
                     if hasattr(self._model, "_qp_ws_valid"):
                         self._model._qp_ws_valid = False
             else:
+                # codex F1: 本拍 0 OBCA 障碍 -> 必须 disable, 否则 enable 状态 + 上一拍
+                # 的 stale obs_Am_seq 会被本拍的 solver_add_cost/bounds 当成"幽灵车"
+                # 加进新 NLP. disable 后 dual_enabled=False / num_obs=0 / obs_Am_seq=[],
+                # solver_add_cost/bounds 走非 OBCA 分支, 等价老 UDMC 路径.
+                if hasattr(self._model, "disable_dual_collision") and \
+                        getattr(self._model, "dual_enabled", False):
+                    self._model.disable_dual_collision()
                 if hasattr(self._model, "_qp_ws_valid"):
                     self._model._qp_ws_valid = False
 
@@ -692,12 +704,21 @@ class Xagent(BasicAgent):
         ego_wp = self._map.get_waypoint(self._vehicle.get_location(), project_to_road=True)
         in_junction = ego_wp.is_junction if ego_wp else False
 
-        # 先做”本车道 / 前方”过滤
-        obs, heights, obs_infer = self._filter_front_same_lane_obs(
+        # 先做"本车道 / 前方"过滤
+        obs, heights, obs_infer, keep_idx = self._filter_front_same_lane_obs(
             current_state, obs, heights, obs_infer,
             max_lat_dist=max_lat,
             min_long_dist=min_long
         )
+
+        # codex F2: obca_obs_idx_set 存的是 pre-filter (env.get_obs 全集) 下标,
+        # 而下面 partition 循环用 post-filter (filter 后) 下标 k. 必须把 OBCA-hit
+        # 集合从 pre-filter 重映射到 post-filter, 否则 ratio*0.4 floor mask 会错位.
+        if len(obca_obs_idx_set) > 0 and len(keep_idx) > 0:
+            pre2post = {int(p): post for post, p in enumerate(keep_idx)}
+            obca_obs_idx_set = {pre2post[p] for p in obca_obs_idx_set if p in pre2post}
+        else:
+            obca_obs_idx_set = set()
 
         # === 按航向把障碍拆成“纵向前车 / 交叉来车 / 对向直行车”（消融开关: use_opp_detect）===
         obs_long, obs_cross, obs_opp = [], [], []
