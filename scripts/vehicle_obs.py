@@ -371,6 +371,13 @@ class Vehicle:
                 slack_vec = ca.vertcat(*self.slack_s)
                 self.obj += float(self.beta_s) * ca.sum1(slack_vec)
                 self.obj += float(self.gamma_l2_s) * ca.sumsqr(slack_vec)
+            # Step 5 (G1.b): OBCA 启用时加输入速率 (Δa, Δδ) 二次惩罚, 抑制
+            # APF/OBCA 切换瞬间的方向盘抖动 (无需收紧 lbg/ubg, 不会引入硬墙)
+            w_du_a = float(getattr(self, 'w_du_a_obca', 50.0))
+            w_du_d = float(getattr(self, 'w_du_d_obca', 200.0))
+            for _i in range(self.horizon - 1):
+                self.obj += w_du_a * (self.U[0, _i + 1] - self.U[0, _i]) ** 2
+                self.obj += w_du_d * (self.U[1, _i + 1] - self.U[1, _i]) ** 2
 
     def get_obs_centers(self, ob_, radius=1.68, carla=False):
         """

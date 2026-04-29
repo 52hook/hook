@@ -518,6 +518,8 @@ class Xagent(BasicAgent):
         # codex 风险点 #2 修复: 原版 get_obs 在 OBCA 之后调用, 导致 horizon
         # 内 (A_k,b_k) 永远只有 k=0 一帧。这里前置, 让 obs_infer 可被 OBCA 使用。
         obs, heights, obs_infer, obs_stds = self._env.get_obs(current_state)
+        # Step 5 (G1): _use_dual=False 时也要有此 set, partition 阶段 always-True 兜底
+        obca_obs_idx_set = set()
 
         # ========== 2. 多边形 + 对偶硬约束（仅最近少量车辆） ==========
         if self._use_dual:
@@ -585,6 +587,7 @@ class Xagent(BasicAgent):
                     if best_i >= 0 and best_d2 < 1.0 and best_i < len(obs_infer):
                         pred = np.asarray(obs_infer[best_i]).reshape(-1, 3)
                         traj = [(float(p[0]), float(p[1]), float(p[2])) for p in pred]
+                        obca_obs_idx_set.add(best_i)  # Step 5: 标记为 OBCA-hit
                     else:
                         traj = []  # 退化静态
                     actors_with_pred.append((a, traj))
@@ -699,6 +702,9 @@ class Xagent(BasicAgent):
         # === 按航向把障碍拆成“纵向前车 / 交叉来车 / 对向直行车”（消融开关: use_opp_detect）===
         obs_long, obs_cross, obs_opp = [], [], []
         obs_long_infer, obs_cross_infer, obs_opp_infer = [], [], []
+        # Step 5 (G1): 与 obs_*_infer 等长的 OBCA-hit mask
+        # True 表示该障碍已被 OBCA 接管, APF 走 ratio*0.4 floor 避免双重计费
+        obs_long_obca, obs_cross_obca, obs_opp_obca = [], [], []
 
         ego_x = float(current_state[0])
         ego_y = float(current_state[1])
@@ -723,6 +729,8 @@ class Xagent(BasicAgent):
                 rel_y = s_ego * dx + c_ego * dy   # 左侧为 +y
                 d = math.hypot(rel_x, rel_y)
 
+                is_obca_hit = (k in obca_obs_idx_set)
+
                 # ① 对向直行车检测
                 is_opposite = abs_yaw > math.radians(140.0)
 
@@ -731,6 +739,7 @@ class Xagent(BasicAgent):
                         # 路口内/弯道：纳入对向车障碍列表，触发让行
                         obs_opp.append(ob)
                         obs_opp_infer.append(obs_infer[k])
+                        obs_opp_obca.append(is_obca_hit)
                         if (opp_min_dist is None) or (d < opp_min_dist):
                             opp_min_dist = d
                     # 非路口直道上的对向车：直接跳过，不加入任何障碍列表
@@ -740,10 +749,12 @@ class Xagent(BasicAgent):
                 if math.radians(50.0) <= abs_yaw <= math.radians(130.0):
                     obs_cross.append(ob)
                     obs_cross_infer.append(obs_infer[k])
+                    obs_cross_obca.append(is_obca_hit)
                 # ③ 同向前车 / 慢车
                 else:
                     obs_long.append(ob)
                     obs_long_infer.append(obs_infer[k])
+                    obs_long_obca.append(is_obca_hit)
 
         # 是否进入“对向直行车减速让行模式”（消融: 禁用时永远不让行）
         # 对向让行触发距离从 18m 降到 12m，避免路口转弯时过早让行
@@ -1042,16 +1053,32 @@ class Xagent(BasicAgent):
             self._model.solver_add_single_tr_lgt_pf_carla(
                 tl_data[1], tl_data[2], tl_data[3], red_time_ratio=tl_data[4])
 
+        # Step 5 (G1): APF 与 OBCA 解耦 — OBCA-hit 障碍只用 ratio*0.4 floor
+        # 防止双重计费导致 ego 在 OBCA 已锁死的方向上被 APF 再推一把震荡
+        OBCA_APF_FLOOR = 0.4
+
+        def _apf_split(infers, mask, full_ratio, **kw):
+            """按 OBCA-hit mask 拆为两组, 分别用 full / floor 调用 solver_add_soft_obs。
+            mask 与 infers 等长, True = 已被 OBCA 接管。
+            """
+            no_obca = [t for t, m in zip(infers, mask) if not m]
+            obca   = [t for t, m in zip(infers, mask) if m]
+            if len(no_obca) > 0:
+                self._model.solver_add_soft_obs(no_obca, ratio=full_ratio, **kw)
+            if len(obca) > 0:
+                self._model.solver_add_soft_obs(obca, ratio=full_ratio * OBCA_APF_FLOOR, **kw)
+
         # 软障碍物 APF（车辆+行人）
         if len(obs_long_infer) > 0:
-            self._model.solver_add_soft_obs(obs_long_infer, ratio=obs_ratio_front * sigma_scale, carla=True)
+            _apf_split(obs_long_infer, obs_long_obca, obs_ratio_front * sigma_scale, carla=True)
         if len(obs_opp_infer) > 0:
-            self._model.solver_add_soft_obs(obs_opp_infer, ratio=obs_ratio_opp, carla=True)
+            _apf_split(obs_opp_infer, obs_opp_obca, obs_ratio_opp, carla=True)
         if len(obs_cross_infer) > 0:
-            self._model.solver_add_soft_obs(obs_cross_infer, ratio=obs_ratio_cross * sigma_scale, carla=True)
+            _apf_split(obs_cross_infer, obs_cross_obca, obs_ratio_cross * sigma_scale, carla=True)
         if len(pedes) > 0:
             pede_sigma_mean = float(np.mean(pede_stds)) if len(pede_stds) > 0 else 0.0
             pede_sigma_scale = min(1.0 + k_sigma * pede_sigma_mean, sigma_scale_max)
+            # 行人不进 OBCA, 整体走原 ratio
             self._model.solver_add_soft_obs(pedes_infer, ratio=600 * pede_sigma_scale, carla=True, pede=True)
 
         # TTC APF
