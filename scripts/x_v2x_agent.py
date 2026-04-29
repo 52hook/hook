@@ -615,14 +615,18 @@ class Xagent(BasicAgent):
                 ego_W_enlarge = ego_W + 0.4
 
                 # 时序 OBCA: 传 (A_k, b_k) 序列 + actor_id 列表 (Step 6 cache key)
+                # Step 4 (A): d_safe / s_max / L1+L2 slack 显式覆盖
                 self._model.enable_dual_collision(
                     [], [],  # 静态槽位空, 走时序分支
                     car_box=(ego_L_enlarge, ego_W_enlarge),
                     alpha_e=2.5,
-                    beta_s=250.0,
+                    beta_s=500.0,           # 旧 250 -> 500 (slack L1 双倍惩罚)
                     obs_Am_seq=obs_Am_seq,
                     obs_bm_seq=obs_bm_seq,
                     actor_ids=obca_actor_ids,
+                    d_safe=0.30,            # 30cm 硬约束安全裕度
+                    s_max=0.30,             # slack 上限 30cm (与 d_safe 临界匹配)
+                    gamma_l2_s=1000.0,      # slack L2 spike 抑制
                 )
 
                 # ====== 2.5 调用凸 QP 预规划（消融开关: use_qp_warmstart）======

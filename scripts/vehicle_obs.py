@@ -132,7 +132,12 @@ class Vehicle:
         self.dual_enabled = False
         self.alpha_e = 1.0
         self.beta_s = 200.0
-        self.s_max = 0.10
+        # Step 4 (A): d_safe 硬约束安全裕度 (米); s_max slack 上限 (米)
+        # OBCA 第 3 个不等式: -g^T mu + (A t - b)^T lam + s >= d_safe
+        # 实际可被 slack 削弱到 (d_safe - s_max), 默认 (0.30 - 0.30 = 0.0) 临界
+        self.d_safe = 0.30
+        self.s_max = 0.30
+        self.gamma_l2_s = 1000.0     # slack L2 惩罚权重 (Step 4)
         self.G_car = None
         self.g_car = None
         self.obs_Am_list = []
@@ -359,9 +364,13 @@ class Vehicle:
             self.obj += float(self.alpha_e) * ca.sumsqr(
                 self.X[:, self.horizon] - self.P[:, self.horizon]
             )
-            # slack s 的 L1 惩罚（鼓励 s -> 0）
+            # Step 4 (A): slack s 的 L1 + L2 双惩罚
+            #   L1: 抑制 slack 的 mass (越早越好的"刹车")
+            #   L2: 抑制 slack 的 spike (单步大侵入)
             if hasattr(self, 'slack_s') and len(self.slack_s) > 0:
-                self.obj += float(self.beta_s) * ca.sum1(ca.vertcat(*self.slack_s))
+                slack_vec = ca.vertcat(*self.slack_s)
+                self.obj += float(self.beta_s) * ca.sum1(slack_vec)
+                self.obj += float(self.gamma_l2_s) * ca.sumsqr(slack_vec)
 
     def get_obs_centers(self, ob_, radius=1.68, carla=False):
         """
@@ -712,7 +721,8 @@ class Vehicle:
     def enable_dual_collision(self, obs_Am_list, obs_bm_list, car_box=(4.5, 2.0),
                               alpha_e=1.0, beta_s=10.0,
                               obs_Am_seq=None, obs_bm_seq=None,
-                              actor_ids=None):
+                              actor_ids=None,
+                              d_safe=None, s_max=None, gamma_l2_s=None):
         """
         启用 TDR-OBCA/H-OBCA 风格的对偶几何硬约束。
         参数：
@@ -736,6 +746,13 @@ class Vehicle:
         self.dual_enabled = True
         self.alpha_e = float(alpha_e)
         self.beta_s = float(beta_s)
+        # Step 4 (A): 显式覆盖 d_safe / s_max / L2 权重 (None 时保留构造期默认)
+        if d_safe is not None:
+            self.d_safe = float(d_safe)
+        if s_max is not None:
+            self.s_max = float(s_max)
+        if gamma_l2_s is not None:
+            self.gamma_l2_s = float(gamma_l2_s)
 
         # 车辆矩形 (G z <= g) 在车体坐标系
         L, W = car_box
@@ -1343,6 +1360,7 @@ class Vehicle:
 
         # (3) 对偶几何约束的 lbg / ubg
         if getattr(self, 'dual_enabled', False) and self.num_obs > 0:
+            d_safe_val = float(getattr(self, "d_safe", 0.30))
             for _k in range(self.horizon + 1):
                 for _m in range(self.num_obs):
                     # 1) ||A^T λ||^2 <= 1
@@ -1353,8 +1371,11 @@ class Vehicle:
                     self.lbg.extend([0.0, 0.0])
                     self.ubg.extend([0.0, 0.0])
 
-                    # 3) -g^T μ + (A t - b)^T λ + s >= 0
-                    self.lbg.append(0.0)
+                    # 3) Step 4 (A): -g^T μ + (A t - b)^T λ + s >= d_safe
+                    #    旧版下界为 0 (符合论文 Eq.46 但 d_safe=0 等于无安全裕度)
+                    #    现在 d_safe>0, slack s∈[0,s_max] 弹性吸收, 实际侵入
+                    #    最大为 (d_safe - s_max), 见构造期注释
+                    self.lbg.append(d_safe_val)
                     self.ubg.append(2e19)
         else:
             # 旧版占位（无对偶几何时），保留但一般不会用
@@ -1389,7 +1410,8 @@ class Vehicle:
 
         # (c) 对偶变量 λ / μ / slack s
         if getattr(self, 'dual_enabled', False) and self.num_obs > 0:
-            s_max = getattr(self, "s_max", 0.10)   # <= 10cm 侵入
+            # Step 4 (A): s_max 默认放宽到 0.30, 与 d_safe 配合 (临界紧贴)
+            s_max = getattr(self, "s_max", 0.30)
             for _k in range(self.horizon + 1):
                 for m in range(self.num_obs):
                     E = self.obs_edges_count[m]
