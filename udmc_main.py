@@ -438,13 +438,14 @@ else:
     np.savetxt(_log_file, agent._log_data)
 print(f'日志已保存: {_log_file}')
 # ------------------------------------------------------------------
-# 收尾画图: 仅在 plot_result 能找到 <scenario>*.txt 时成功;
-# 自定义 LOG_OUTPUT (smoke / paired-seed) 文件名不匹配时降级为 warn,
-# 不影响 returncode, 保证日志和实验数据写入完整即视为成功
+# 收尾画图: 默认开启, 批量实验脚本设 PLOT_RESULT=0 跳过.
+# 跳过原因有二: 1) glob 错配导致画错图 (routez 风格); 2) glob miss
+# 抛 FileNotFoundError 刷 traceback (a_path 风格). 一律走 env var.
 # ------------------------------------------------------------------
-try:
-    plot_result(scenario, log_dir=os.path.dirname(_log_file))
-except Exception as _plot_err:
-    import traceback
-    print(f'[WARN] plot_result 跳过: {_plot_err}')
-    traceback.print_exc()
+if os.environ.get('PLOT_RESULT', '1') != '0':
+    try:
+        plot_result(scenario, log_dir=os.path.dirname(_log_file))
+    except Exception as _plot_err:
+        import traceback
+        print(f'[WARN] plot_result 跳过: {_plot_err}')
+        traceback.print_exc()

@@ -31,7 +31,7 @@ CARLA_PORT=2001
 # 外部可 export CARLA_MAP_ID=03 回原行为
 CARLA_MAP_ID="${CARLA_MAP_ID:-03_Opt}"
 PROJECT_DIR="$HOME/phd/0.9.16udmc_carla-main_myfinal"
-RESULTS_DIR="${PROJECT_DIR}/experiment_results/a_path_obca_paired60"
+RESULTS_DIR="${PROJECT_DIR}/experiment_results/a_path_obca_paired60_post_step8"
 SCENARIO="unsig_crossroad"
 SEED_START=100
 SEED_END=159
@@ -64,6 +64,7 @@ run_udmc() {
         ABLATION_BSPLINE_ADAPTIVE=1 \
         RANDOM_SEED=${seed} \
         LOG_OUTPUT="${datafile}" \
+        PLOT_RESULT=0 \
         timeout 300 python udmc_main.py "${scenario}" "True" \
             > "${logfile}" 2>&1
     ) || true

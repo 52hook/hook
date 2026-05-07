@@ -10,8 +10,10 @@ A 路径 paired-seed 配对分析脚本。
   验证 OBCA 是否减少左转碰撞。
 
 输入：
-  experiment_results/a_path_obca_paired60/{label}_{scenario}_seed{seed}.txt
+  experiment_results/a_path_obca_paired60_post_step8/{label}_{scenario}_seed{seed}.txt
   其中 label ∈ {GRIPC, GRIPC_noOBCA}, seed ∈ [100, 159]
+  (旧目录 a_path_obca_paired60/ 是 Steps 1-8 修复前的数据,
+   通过 --dir 显式指定可继续分析.)
 
 输出（stdout）：
   1. paired 完整性校验 (哪些 seed 配对缺失 / 日志列数不达标)
@@ -27,7 +29,7 @@ A 路径 paired-seed 配对分析脚本。
   conda activate first1
   python analyze_a_path.py
   # 或自定义目录:
-  python analyze_a_path.py --dir experiment_results/a_path_obca_paired60
+  python analyze_a_path.py --dir experiment_results/a_path_obca_paired60_post_step8
 """
 
 import os
@@ -47,7 +49,7 @@ from extract_metrics import extract_single  # noqa: E402
 # ============================================================
 # 常量
 # ============================================================
-DEFAULT_DIR = os.path.join(PROJECT_ROOT, 'experiment_results', 'a_path_obca_paired60')
+DEFAULT_DIR = os.path.join(PROJECT_ROOT, 'experiment_results', 'a_path_obca_paired60_post_step8')
 SCENARIO = 'unsig_crossroad'
 LABEL_A = 'GRIPC'         # USE_DUAL=1, OBCA 全开
 LABEL_B = 'GRIPC_noOBCA'  # USE_DUAL=0, UDMC 椭圆
