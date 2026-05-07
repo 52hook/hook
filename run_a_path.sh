@@ -27,6 +27,9 @@ set -euo pipefail
 # 全局配置
 # -----------------------------------------------------------------------
 CARLA_PORT=2001
+# Town03 Vulkan PSO 崩溃 workaround: 默认走 Town03_Opt, 系统恢复后
+# 外部可 export CARLA_MAP_ID=03 回原行为
+CARLA_MAP_ID="${CARLA_MAP_ID:-03_Opt}"
 PROJECT_DIR="$HOME/phd/0.9.16udmc_carla-main_myfinal"
 RESULTS_DIR="${PROJECT_DIR}/experiment_results/a_path_obca_paired60"
 SCENARIO="unsig_crossroad"
@@ -53,6 +56,7 @@ run_udmc() {
     log "运行 ${label} | ${scenario} | seed=${seed} | USE_DUAL=${use_dual}"
     (
         CARLA_PORT=${CARLA_PORT} \
+        CARLA_MAP_ID="${CARLA_MAP_ID}" \
         USE_DUAL=${use_dual} \
         ABLATION_IGPR=1 \
         ABLATION_BSPLINE=1 \
