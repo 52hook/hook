@@ -41,6 +41,10 @@ USE_BSPLINE_ADAPTIVE = os.environ.get('ABLATION_BSPLINE_ADAPTIVE', '0') != '0'
 _seed_str = os.environ.get('RANDOM_SEED', '')
 RANDOM_SEED = int(_seed_str) if _seed_str else None
 
+# ---- CARLA map id 临时降级开关 (driver/kernel 升级后 Town03 Vulkan PSO 崩溃,
+# 临时设 '03_Opt' 走优化版 map; 系统恢复后去掉 env var 即可) ----
+CARLA_MAP_ID = os.environ.get('CARLA_MAP_ID', '03')
+
 random_spawn = False
 
 # logging 
@@ -56,7 +60,7 @@ def generate_destination(ego_vehicle_transform):
     return destination
 
 # init environment
-env = Env(map_id='03', display_method='spec', birdeye_view=False, dt=simu_step, recording=False)
+env = Env(map_id=CARLA_MAP_ID, display_method='spec', birdeye_view=False, dt=simu_step, recording=False)
 # clean all existing actors
 env.clean_all_actors()
 # set synchronous mode

@@ -11,7 +11,7 @@
 - **`CLAUDE.md` 为唯一项目规则文件**，不在其他地方重复定义项目规则。
 - **联网必须用 Grok-Search MCP（强制，无例外）**：所有联网操作（搜索、抓取网页、查文献）必须使用 Grok-Search MCP 工具（`mcp__grok-search__*`），**严禁使用 WebFetch / WebSearch**。
 - **论文内容严禁进入 git（强制，无例外）**：涉及论文的文件（`*.tex`/`*.bib`/`*.docx`/`*.pdf`/`latex/` 目录/`changelogs/` 中论文相关日志等）**严禁 `git add`、严禁 `git commit`、严禁 `git push`、严禁任何形式的本地"备份 commit"**，必须始终保留在工作区未跟踪或未暂存状态。原因：若论文与代码混在同一条提交历史上，未来代码回退（`git reset`/`revert`）会把论文一起拖回旧版本，造成写作成果丢失。论文的历史管理由用户手动负责，AI 不介入，改论文前也不需要任何 git 备份动作，直接改就行。只有代码改动（`scripts/`/`utils/`/`*.py`/`*.sh`/`CLAUDE.md` 等）才可 `commit` + `push`。
-- **回答前重要的问题需用 codex 复核**：回答重要问题或给出重要建议前，必须先调用 OpenAI Codex CLI（`codex` 命令，已安装于 `/home/jh/.nvm/versions/node/v20.20.2/bin/codex`，版本 `codex-cli 0.125.0`）对拟输出回答的合理性、技术准确性进行审查；只有 codex 审查通过后才可输出给用户。若 codex 指出问题必须修正后重审，禁止跳过、禁止伪造审查结论。调用方式示例：`codex exec "请审查以下回答的合理性与技术准确性：<回答草稿>"`。与既有约束的执行顺序：codex 复核 → 出计划 → 备份 → 改文件。
+- **重要回答须 codex + 自审双复核**：重要问题/建议先用 `codex exec "请审查以下回答的合理性与技术准确性：<草稿>"` 审查（CLI 路径 `/home/jh/.nvm/versions/node/v20.20.2/bin/codex`，版本 `codex-cli 0.125.0`），拿到 codex 报告后自己再审一遍，两关都过才可输出；codex 提问题必须改后重审，禁止跳过或伪造结论。执行顺序：codex 复核 → 自审 → 出计划 → 备份 → 改文件。
 
 ## 1. 语言与风格
 
