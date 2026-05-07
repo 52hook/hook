@@ -47,6 +47,19 @@ log() {
 }
 
 # -----------------------------------------------------------------------
+# 激活 conda 环境 first1
+# nohup/sh 起的非登录 shell 不会 source ~/.bashrc, conda 没 activate,
+# python 不在 PATH, timeout 直接报 "python: 没有那个文件或目录" 全程空跑.
+# set -u 严格模式下 conda 脚本会踩 unbound var, 临时关闭 -u.
+# -----------------------------------------------------------------------
+set +u
+source "$HOME/anaconda3/etc/profile.d/conda.sh"
+conda activate first1
+set -u
+command -v python >/dev/null || { echo "[FATAL] python 未在 PATH, conda 激活失败"; exit 1; }
+log "Python: $(command -v python) ($(python --version 2>&1))"
+
+# -----------------------------------------------------------------------
 # 单次仿真函数: 单刀切 USE_DUAL, 文件名以 seed 命名便于配对分析
 # -----------------------------------------------------------------------
 run_udmc() {
