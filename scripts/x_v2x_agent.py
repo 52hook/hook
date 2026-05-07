@@ -543,6 +543,8 @@ class Xagent(BasicAgent):
             # 场景自适应 OBCA 检测范围：
             # - ACC 直线：椭圆 APF 足够，OBCA 仅极近距离兜底
             # - roundabout：环岛内循环车 32m 被 OBCA 捕获导致 MPC 汇入震荡，缩小范围
+            # - 路口/混合：horizon=0.5s, v_rel<25m/s 时 18m 给 TTC 留 0.25s 安全余量
+            #   旧值 32m + max_dual_veh=4 / max_obs=2 不一致 -> 提前绕行 + mask 漏标
             if self._scenario == 'multilaneACC':
                 max_dual_veh = 2
                 max_obca_range = 10.0
@@ -550,8 +552,8 @@ class Xagent(BasicAgent):
                 max_dual_veh = 2
                 max_obca_range = 12.0
             else:
-                max_dual_veh = 4
-                max_obca_range = 32.0
+                max_dual_veh = 2          # 与 max_obs=2 对齐, 修 mask 漏标
+                max_obca_range = 18.0     # 32m -> 18m, 避免远距离硬约束触发提前大角度绕行
             max_range = 32.0
             others_for_dual = []
             min_obs_dist = None
@@ -582,6 +584,7 @@ class Xagent(BasicAgent):
                 for a in others_for_dual:
                     a_loc = a.get_location()
                     ax_rh, ay_rh = float(a_loc.x), -float(a_loc.y)
+                    a_yaw_rh = -math.radians(float(a.get_transform().rotation.yaw))
                     best_i, best_d2 = -1, 1e9
                     for i, (ox, oy) in enumerate(obs_xy_rh):
                         d2 = (ox - ax_rh) ** 2 + (oy - ay_rh) ** 2
@@ -591,7 +594,12 @@ class Xagent(BasicAgent):
                     # 容差 1.0 m^2 (位置抖动 < 1m), 且索引在 obs_infer 范围内
                     if best_i >= 0 and best_d2 < 1.0 and best_i < len(obs_infer):
                         pred = np.asarray(obs_infer[best_i]).reshape(-1, 3)
-                        traj = [(float(p[0]), float(p[1]), float(p[2])) for p in pred]
+                        # actors_to_Ab_horizon 用 traj[0] 作 k=0 (当前帧),
+                        # IGPR pred[0] 是 k=1 的预测, 直接用会让 OBCA 第一拍
+                        # 抢跑 0.05s, 累积横向偏置 -> 提前大角度绕行的根因之一.
+                        # 前置当前位姿, 使 traj = [now, pred[0..9]] 共 11 帧 = horizon+1.
+                        traj = [(ax_rh, ay_rh, a_yaw_rh)]
+                        traj.extend((float(p[0]), float(p[1]), float(p[2])) for p in pred)
                         obca_obs_idx_set.add(best_i)  # Step 5: 标记为 OBCA-hit
                     else:
                         traj = []  # 退化静态
@@ -603,7 +611,7 @@ class Xagent(BasicAgent):
                     horizon=self._model.horizon,
                     max_range=max_range,
                     include_types=('vehicle.',),
-                    inflate_vehicle=0.6,
+                    inflate_vehicle=0.3,    # 0.6 -> 0.3 (工程调参值), 减少远距离虚胖
                     inflate_walker=0.45,
                     max_obs=2,
                     frame="right_hand",
@@ -619,8 +627,11 @@ class Xagent(BasicAgent):
                 ego_L = 2.0 * float(bb_ego.extent.x)
                 ego_W = 2.0 * float(bb_ego.extent.y)
 
-                ego_L_enlarge = ego_L + 0.6
-                ego_W_enlarge = ego_W + 0.4
+                # ego 扩张 +0.6/+0.4 与 inflate_vehicle=0.6 + d_safe=0.30 叠加
+                # 总缓冲 ~1.4m, 远超城市路口需要 -> 改成 +0.3/+0.2 (≈半保险杠厚度).
+                # 与 inflate=0.3 + d_safe=0.30 合计 ~0.9m, 经验工程裕度.
+                ego_L_enlarge = ego_L + 0.3
+                ego_W_enlarge = ego_W + 0.2
 
                 # 时序 OBCA: 传 (A_k, b_k) 序列 + actor_id 列表 (Step 6 cache key)
                 # Step 4 (A): d_safe / s_max / L1+L2 slack 显式覆盖
