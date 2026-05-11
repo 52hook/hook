@@ -62,6 +62,9 @@ class RuleWeights:
     obs_ratio_opp_round:   int = 30
     # 对向车让行触发时的对向权重
     obs_ratio_opp_yield: int = 25
+    # 侧向直行车让行触发时的横向权重 (与 obs_ratio_front=150 同量级 -> 强制刹停等通过)
+    # 路口被侧向直行车切入时, ego 必须停下等对方通过, 否则 OBCA 几何死局
+    obs_ratio_cross_yield: int = 150
     # IGPR 方差 → APF 权重放大系数
     k_sigma:         float = 2.0
     sigma_scale_max: float = 1.5
@@ -110,6 +113,12 @@ class Xagent(BasicAgent):
         self._next_states = None
         self._last_traffic_light = None
         self._last_traffic_waypoint = None
+
+        # 侧向直行车刹停让行状态机 (codex Fix #3 迟滞)
+        # trigger: cross_min_dist < 10m   -> True
+        # release: cross_min_dist > 15m   -> False
+        # 避免在 10m 边界附近反复震荡
+        self._cross_yield_active = False
 
         # 构建 NMPC 基础
         self._model.solver_basis(
@@ -230,8 +239,11 @@ class Xagent(BasicAgent):
                 keep_idx.append(i)
                 continue  # 已经决定保留，跳过后面的判断
 
-            # === ② 交叉 / 汇入交通：60°~120°，保留 ===
-            if math.radians(60.0) <= abs_yaw_diff <= math.radians(120.0):
+            # === ② 交叉 / 汇入交通：50°~130°，保留 ===
+            # codex Fix #2: 与 partition 循环 (line ~785) 的 50-130° 严格对齐.
+            # 原 60-120° 会让 50-60° / 120-130° 斜向汇入车被丢进 ③ 同向分支,
+            # 大概率被 |rel_y|>max_lat 过滤掉, cross_yield 永远收不到 -> 漏让.
+            if math.radians(50.0) <= abs_yaw_diff <= math.radians(130.0):
                 # 避免明显在身后侧方的车
                 if rel_x < -8.0:
                     continue
@@ -745,6 +757,7 @@ class Xagent(BasicAgent):
         s_ego = math.sin(-ego_yaw)
 
         opp_min_dist = None  # 最近的对向直行车距离
+        cross_min_dist = None  # 最近的侧向直行车距离 (路口内 + 前方, 用于触发刹停让行)
 
         if obs is not None and len(obs) > 0:
             for k, ob in enumerate(obs):
@@ -782,6 +795,26 @@ class Xagent(BasicAgent):
                     obs_cross.append(ob)
                     obs_cross_infer.append(obs_infer[k])
                     obs_cross_obca.append(is_obca_hit)
+                    # 让行候选 (yield_for_cross 触发用)
+                    # codex Fix #1: ego 或 cross 车任一在路口内都触发让行.
+                    #   原 `in_junction` 只看 ego, 但 ego 刚驶出路口时 cross 车
+                    #   仍可能在路口内横穿, 让行依旧需要; 反之 ego 已进路口、
+                    #   cross 车还在引道上时也该让. 用 `or` 兼顾两种语义.
+                    #   ob_in_junction 用 cross 车 waypoint 判断 (CARLA 左手系
+                    #   y=-oy), 仅在 ego 不在路口时才查, 避免每帧多余调用.
+                    ob_in_junction = in_junction
+                    if not ob_in_junction:
+                        try:
+                            ob_wp = self._map.get_waypoint(
+                                carla.Location(x=ox, y=-oy, z=0.0),
+                                project_to_road=True
+                            )
+                            ob_in_junction = bool(ob_wp.is_junction) if ob_wp else False
+                        except Exception:
+                            ob_in_junction = False
+                    if ob_in_junction and rel_x > 0.0 and d < 15.0:
+                        if (cross_min_dist is None) or (d < cross_min_dist):
+                            cross_min_dist = d
                 # ③ 同向前车 / 慢车
                 else:
                     obs_long.append(ob)
@@ -795,6 +828,28 @@ class Xagent(BasicAgent):
             and (opp_min_dist < 12.0)
             and (not is_roundabout_like)
         )
+
+        # 是否进入"侧向直行车刹停让行模式" (带迟滞 + 显式刹停)
+        # 路口内被侧向直行车切入时, ego 必须刹停等通过.
+        # 不做就会被 OBCA 多边形硬约束几何死局, ego 原地打转向 (经验: 27.9% seed 慢卡).
+        #
+        # codex Fix #5: 用 self._scenario 排除 roundabout, 不能用 is_roundabout_like.
+        #   后者是纯曲率判定 (k_window_max>0.015), unsig_crossroad 左转弯也会命中,
+        #   会让 cross_yield 在路口左转场景被错误禁用 -> B 计划失效.
+        # codex Fix #3: 迟滞 trigger<10m / release>15m, 避免边界震荡.
+        cross_yield_allowed = (self._scenario != 'roundabout')
+        if cross_yield_allowed and (cross_min_dist is not None):
+            if not self._cross_yield_active:
+                if cross_min_dist < 10.0:
+                    self._cross_yield_active = True
+            else:
+                # 已激活, 等距离拉到 15m 以上再解除 (允许 cross 车通过)
+                if cross_min_dist > 15.0:
+                    self._cross_yield_active = False
+        else:
+            # cross_min_dist 没有候选 (cross 车全离开 partition 过滤范围) -> 解除
+            self._cross_yield_active = False
+        yield_for_cross = self._cross_yield_active
 
         # === debug 画框：保持 obs_infer 为 ndarray，不再 .tolist() ===
         temp_obs = copy.copy(obs)
@@ -973,6 +1028,15 @@ class Xagent(BasicAgent):
 
         if yield_for_opp:
             obs_ratio_opp = self._rw.obs_ratio_opp_yield
+        # 侧向直行车切入路口让行 (codex Fix #4):
+        #   ① obs_ratio_cross 60 -> 150 (与前车权重同量级, 软 APF 强斥力)
+        #   ② ref_traj[3, :] = 0.0    (显式把 MPC 参考速度全置零, 强制刹停)
+        # 单纯软 APF 不可靠: cross 车若是 OBCA-hit, APF 会乘 0.4 floor 衰减,
+        # 必须靠 v_ref=0 通过 MPC 速度跟踪误差项保证 ego 确实停下来.
+        # release 由迟滞状态机控制 (cross_min_dist > 15m), cross 车走远后自动恢复.
+        if yield_for_cross:
+            obs_ratio_cross = self._rw.obs_ratio_cross_yield
+            ref_traj[3, :] = 0.0
 
         # === IGPR 方差 → 动态调整 APF 权重（消融开关: use_igpr_var）===
         k_sigma         = self._rw.k_sigma
