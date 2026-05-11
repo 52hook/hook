@@ -265,7 +265,9 @@ for _ in range(10000):
             cnt * simu_step, dist_error, yaw_error, vel_error,
             acc_logged, steer_logged,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0,   # FSM 不使用 APF，六列填 0
-            tock - tick, min_dist_to_obs
+            tock - tick, min_dist_to_obs,
+            dist_error,                      # 第15列 dist_error_raw（FSM 无 B-spline，复用 dist_error，表注说明语义）
+            0,                               # 第16列 collision_flag（占位，下面 env.world.tick() 后由 consume_collisions 覆盖）
         ])
         # 仅在计算耗时不足一个仿真步长时补齐，避免空等
         elapsed = tock - tick
@@ -292,7 +294,12 @@ for _ in range(10000):
             break
         cnt +=1
         env.world.tick()
-        
+        # ---- A 路径 collision_flag（与 udmc_main.py 对齐：2026-04-28）----
+        try:
+            _frame = env.world.get_snapshot().frame
+        except Exception:
+            _frame = None
+        agent._log_data[-1][15] = env.consume_collisions(_frame)
 
     except Exception as e:
         print(e)
