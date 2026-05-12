@@ -879,12 +879,27 @@ class Env:
 
         self.world.apply_settings(self.original_settings)
         logging.info('destroying actors')
+        # ====================================================================
+        # CollisionSensor 主动销毁 (跨进程 cleanup 必要)
+        # 仿真主进程是 timeout 300 python ...; 进程退出时 CARLA server 端 actor
+        # 不会被 GC, 若不显式 destroy, 长跑会留下大量 sensor.other.collision 残骸
+        # ====================================================================
+        if self._collision_sensor is not None:
+            try:
+                self._collision_sensor.stop()
+            except Exception:
+                pass
+            try:
+                self._collision_sensor.destroy()
+            except Exception:
+                pass
+            self._collision_sensor = None
         self.client.apply_batch([carla.command.DestroyActor(x)
                                 for x in self.actor_list])
         self.client.apply_batch([carla.command.DestroyActor(x)
                                 for x in self.other_vehicles_list])
         logging.info('done')
-        
+
 
     def clean_all_actors(self):
         actors = self.world.get_actors().filter("*veh*")
@@ -899,6 +914,12 @@ class Env:
         actors = self.world.get_actors().filter("*cam*")
         for actor in actors:
             actor.destroy()
+        # 兜底: world 中残留的 collision sensor (filter 不会命中 *veh*/*cam*)
+        try:
+            for actor in self.world.get_actors().filter("sensor.other.collision"):
+                actor.destroy()
+        except Exception:
+            pass
         self.world.tick()
 
 

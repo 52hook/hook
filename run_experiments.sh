@@ -68,22 +68,18 @@ log() {
 #   规则:
 #     - 文件存在且非空
 #     - 行数 ≥ 100 (避免仅初始化几步即崩溃的残骸)
-#     - 列数 == 16
+#     - 列数 == 16 (全文件每行均须 16 列, 防止某行短裁)
 #     - 第 16 列值域只能是 {0, 1, 2, 3}
+#   注: 列 14 (min_dist) 在无障碍 tick 合法落 inf, 故不加 NaN/Inf 全局禁令
 # ------------------------------------------------------------------------
 is_valid() {
     local f=$1
     [[ -s "$f" ]] || return 1
-    local nrows ncols
+    local nrows
     nrows=$(wc -l < "$f")
     [[ "$nrows" -ge 100 ]] || return 1
-    ncols=$(awk 'NR==1{print NF; exit}' "$f")
-    [[ "$ncols" == "16" ]] || return 1
-    # 第 16 列任何非 {0,1,2,3} 值都视为无效
-    if awk '{print $16}' "$f" \
-        | awk '$1 != 0 && $1 != 1 && $1 != 2 && $1 != 3 {found=1; exit} END {exit !found}'; then
-        return 1
-    fi
+    # 全文件每行 NF==16 + 第 16 列 ∈ {0,1,2,3}
+    awk 'NF != 16 {exit 1} $16 != 0 && $16 != 1 && $16 != 2 && $16 != 3 {exit 2} END{exit 0}' "$f" || return 1
     return 0
 }
 
