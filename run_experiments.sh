@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # ========================================================================
-# GRIPC 完整实验自动化脚本 (v2 - post rollback)
+# GRIPC 完整实验自动化脚本 (v3 - paper baseline)
 #
 # 实验设计:
-#   A) 对比实验: 4 场景 × 3 方法 (GRIPC/UDMC/FSM) × 40 轮 = 480 次
-#   B) 消融实验: 4 场景 × 4 消融 × 40 轮 = 640 次
+#   A) 对比实验: 4 场景 × 3 方法 (GRIPC/UDMC_original/FSM) × 40 轮 = 480 次
+#   B) 消融实验: 4 场景 × 4 消融 (leave-one-out) × 40 轮 = 640 次
 #   总计: 1120 次仿真
 #
 # 场景: unsig_crossroad / roundabout / multilaneACC / mixed_traffic
 # 全部随机交通流 (100 辆车) + 固定 seed 保证可复现
 #
-# 改造要点:
-#   - 输出目录隔离到 v2_post_rollback (避免污染旧数据)
-#   - conda 环境自动激活 + python/carla preflight
-#   - HEAD 必须是基线 commit 的后代 (锁定回退状态)
-#   - 单次 timeout=300s, 失败重试 ≤3 次, failed.tsv 记录彻底失败项
+# v3 关键变化 (相比 v2_post_rollback):
+#   - UDMC baseline 切换到原版 udmc_carla-main/ 代码 + 仅打"禁倒车补丁"
+#     原因: 主线 UDMC 含 yield_for_opp/CollisionSensor 等工程化改进, 不可作为 paper baseline
+#   - retry 不对称:
+#       GRIPC + 4 个 leave-one-out 消融  → 3 次 retry (失败容忍, 仅过滤 simulator crash)
+#       原版 UDMC baseline + FSM baseline → 1 次 attempt 不 retry (避免 survivorship bias)
+#   - 输出目录隔离到 v3_paper_baseline
 #   - is_valid() 校验 16 列 + ≥100 行 + 第 16 列值域 {0,1,2,3}
 #   - resume 友好: 已有 valid 文件直接跳过
 #   - 末尾按 (method, scenario) 校验 N==REPEATS
@@ -40,7 +42,7 @@ python -c "import carla" 2>/dev/null || { echo "ERROR: carla 包未安装"; exit
 # ------------------------------------------------------------------------
 CARLA_PORT=2001
 PROJECT_DIR="$HOME/phd/0.9.16udmc_carla-main_myfinal"
-RESULTS_DIR="${PROJECT_DIR}/experiment_results/v2_post_rollback"
+RESULTS_DIR="${PROJECT_DIR}/experiment_results/v3_paper_baseline"
 REPEATS=40    # 每个配置重复次数（与 UDMC Table VI 一致）
 
 mkdir -p "${RESULTS_DIR}"
@@ -132,7 +134,7 @@ run_udmc() {
 }
 
 # ------------------------------------------------------------------------
-# run_fsm: 运行 FSM baseline (失败重试 ≤3 次)
+# run_fsm: 运行 FSM baseline (1 次 attempt, 不 retry - 防 survivorship bias)
 # ------------------------------------------------------------------------
 run_fsm() {
     local scenario=$1 repeat=$2 seed=${3:-}
@@ -144,27 +146,58 @@ run_fsm() {
         return 0
     fi
 
-    local attempt
-    for attempt in 1 2 3; do
-        log "运行 FSM | ${scenario} | r=${repeat} | seed=${seed} | attempt=${attempt}/3"
-        (
-            CARLA_PORT=${CARLA_PORT} \
-            PLOT_RESULT=0 \
-            RANDOM_SEED=${seed} \
-            LOG_OUTPUT="${datafile}" \
-            timeout 300 python "fsm_main(baseline).py" "${scenario}" "True" \
-                > "${logfile}" 2>&1
-        ) || true
-        sleep 8
-        if is_valid "${datafile}"; then
-            log "成功 FSM | ${scenario} | r=${repeat} | attempt=${attempt}"
-            return 0
-        fi
-        log "失败 FSM | ${scenario} | r=${repeat} | attempt=${attempt} (无效或缺失)"
-    done
-
+    log "运行 FSM | ${scenario} | r=${repeat} | seed=${seed} | attempt=1/1 (no retry)"
+    (
+        CARLA_PORT=${CARLA_PORT} \
+        PLOT_RESULT=0 \
+        RANDOM_SEED=${seed} \
+        LOG_OUTPUT="${datafile}" \
+        timeout 300 python "fsm_main(baseline).py" "${scenario}" "True" \
+            > "${logfile}" 2>&1
+    ) || true
+    sleep 8
+    if is_valid "${datafile}"; then
+        log "成功 FSM | ${scenario} | r=${repeat}"
+        return 0
+    fi
     echo -e "FSM\t${scenario}\t${repeat}\t${seed}" >> "${RESULTS_DIR}/failed.tsv"
-    log "彻底失败 FSM | ${scenario} | r=${repeat}"
+    log "失败 FSM | ${scenario} | r=${repeat} (no retry, recorded to failed.tsv)"
+    return 1
+}
+
+# ------------------------------------------------------------------------
+# run_udmc_original: 运行原版 UDMC baseline (udmc_carla-main/udmc_main.py)
+#                    1 次 attempt, 不 retry - 防 survivorship bias
+#   原版仅打"禁倒车补丁" (vehicle_obs.py:611 lbx[3]=0.0),
+#   不含主线工程化改进 (yield_for_opp / CollisionSensor 已移植但功能等价)
+# ------------------------------------------------------------------------
+run_udmc_original() {
+    local scenario=$1 repeat=$2 seed=${3:-}
+    local logfile="${RESULTS_DIR}/UDMC_${scenario}_r${repeat}.log"
+    local datafile="${RESULTS_DIR}/UDMC_${scenario}_r${repeat}.txt"
+
+    if is_valid "${datafile}"; then
+        log "跳过 (已有 valid 文件) UDMC | ${scenario} | r=${repeat}"
+        return 0
+    fi
+
+    log "运行 UDMC-orig | ${scenario} | r=${repeat} | seed=${seed} | attempt=1/1 (no retry)"
+    (
+        cd "${PROJECT_DIR}/udmc_carla-main" && \
+        CARLA_PORT=${CARLA_PORT} \
+        PLOT_RESULT=0 \
+        RANDOM_SEED=${seed} \
+        LOG_OUTPUT="${datafile}" \
+        timeout 300 python udmc_main.py "${scenario}" "True" \
+            > "${logfile}" 2>&1
+    ) || true
+    sleep 8
+    if is_valid "${datafile}"; then
+        log "成功 UDMC-orig | ${scenario} | r=${repeat}"
+        return 0
+    fi
+    echo -e "UDMC\t${scenario}\t${repeat}\t${seed}" >> "${RESULTS_DIR}/failed.tsv"
+    log "失败 UDMC-orig | ${scenario} | r=${repeat} (no retry, recorded to failed.tsv)"
     return 1
 }
 
@@ -181,9 +214,9 @@ log "========== A) 对比实验开始 =========="
 for r in $(seq 1 ${REPEATS}); do
     seed=$((42 + r))
     for sc in "${SCENARIOS[@]}"; do
-        run_udmc "$sc" "GRIPC" "$r"  1 1 1 1  ${seed} || true
-        run_udmc "$sc" "UDMC"  "$r"  0 0 0 0  ${seed} || true
-        run_fsm  "$sc" "$r"  ${seed} || true
+        run_udmc          "$sc" "GRIPC" "$r"  1 1 1 1  ${seed} || true
+        run_udmc_original "$sc"          "$r"           ${seed} || true
+        run_fsm           "$sc"          "$r"           ${seed} || true
     done
     log "--- 对比实验: 完成第 ${r}/${REPEATS} 轮 ---"
 done

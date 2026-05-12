@@ -494,9 +494,37 @@ class Xagent(BasicAgent):
         steer = self._delta_opt[0] # carla_steer # self._delta_opt[0]
         
         cost_time = state[-1]
-        # print([self._simu_time, dist_error, yaw_error, vel_error, acc, steer, apf_obs, apf_nc_road, apf_c_road, apf_traffic, cost_time])
+        # ========================================================================
+        # 16 列 log 契约 (与主线 scripts/x_v2x_agent.py 一致, 便于 extract_metrics 统一处理)
+        #  col  1: simu_time       col  9: apf_pede     col 14: min_dist_to_obs (含行人)
+        #  col  2: dist_error      col 10: apf_nc_road  col 15: dist_error_raw  (原版 = dist_error)
+        #  col  3: yaw_error       col 11: apf_c_road   col 16: collision_flag  (CollisionSensor 写)
+        #  col  4: vel_error       col 12: apf_traffic
+        #  col 5/6: acc/steer      col 13: cost_time
+        #  col  7: apf_obs
+        #  col  8: apf_ttc
+        # ------------------------------------------------------------------------
+        # min_dist_to_obs: 当前 tick 内 ego 到所有 (车 + 人) 最近障碍的欧氏距离
+        #                  无障碍时为 inf (extract_metrics 视为缺失)
+        # ------------------------------------------------------------------------
+        _min_d = float('inf')
+        for _o in temp_obs:
+            _d = math.hypot(_o[0] - current_state[0], _o[1] - current_state[1])
+            if _d < _min_d:
+                _min_d = _d
+        for _p in temp_pedes:
+            _d = math.hypot(_p[0] - current_state[0], _p[1] - current_state[1])
+            if _d < _min_d:
+                _min_d = _d
+        # 原版无 B-spline 平滑, ref_traj 即 raw lane center, dist_error_raw 与 dist_error 一致
+        dist_error_raw = dist_error
+        collision_flag = 0  # 默认无碰撞, 由 udmc_main.py 主循环根据 CollisionSensor 覆写
 
-        self._log_data.append([self._simu_time, dist_error, yaw_error, vel_error, acc, steer, apf_obs, apf_ttc, apf_pede, apf_nc_road, apf_c_road, apf_traffic, cost_time])
+        self._log_data.append([
+            self._simu_time, dist_error, yaw_error, vel_error, acc, steer,
+            apf_obs, apf_ttc, apf_pede, apf_nc_road, apf_c_road, apf_traffic, cost_time,
+            _min_d, dist_error_raw, collision_flag,
+        ])
         return self._a_opt[0], self._delta_opt[0], (next_state, height+0.05)
 
     def trace_route(self, start_location, end_location):

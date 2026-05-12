@@ -604,11 +604,15 @@ class Vehicle:
             self.ubx.append(self.steer_bound)
 
         # for state constraints
+        # ========================================================================
+        # 防倒车补丁: v >= 0（原 -self.target_v 允许倒车 → 0.0 禁止）
+        # 论文里所有 baseline 同条件，仅作为通用安全底座，不计入消融
+        # ========================================================================
         for _ in range(self.horizon+1):
             self.lbx.append(-np.inf)
             self.lbx.append(-np.inf)
             self.lbx.append(-np.inf)
-            self.lbx.append(-self.target_v)
+            self.lbx.append(0.0)
             self.lbx.append(-np.inf)
             self.lbx.append(-np.inf)
 

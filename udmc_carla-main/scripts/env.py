@@ -271,6 +271,15 @@ class Env:
 
         self.recording = recording
 
+        # ========================================================================
+        # CollisionSensor (移植自主线 scripts/env.py): 实测车体碰撞 → 第 16 列 collision_flag
+        # 主线契约: 0=无碰撞, 1=车-车, 2=车-人, 3=车-其他静态物
+        # 在 reset() 末尾通过 _attach_collision_sensor(ego) 挂载
+        # 主循环每个 tick 后调 consume_collisions(frame) 出队事件并返回最严重分类
+        # ========================================================================
+        self._collision_sensor = None
+        self._collision_queue = queue.Queue()
+
 
     def reset(self, ego_transform=None):
         """
@@ -344,9 +353,72 @@ class Env:
 
         self.time = 0
 
+        # 挂载 CollisionSensor (reset 重入安全: 内部先 destroy 旧 sensor)
+        self._attach_collision_sensor(self.ego_vehicle)
+
         self.world.tick()
         if DISPLAY_METHOD == 'pygame':
             self.clock.tick()
+
+    # ========================================================================
+    # CollisionSensor 三件套 (移植自主线 scripts/env.py:392-454)
+    # ========================================================================
+    def _attach_collision_sensor(self, ego_actor):
+        """在 ego 上挂一个 sensor.other.collision；事件按 frame 入队。
+        若已挂载则先销毁 (reset 重入安全)."""
+        if self._collision_sensor is not None:
+            try:
+                self._collision_sensor.stop()
+            except Exception:
+                pass
+            try:
+                self._collision_sensor.destroy()
+            except Exception:
+                pass
+            self._collision_sensor = None
+        while not self._collision_queue.empty():
+            try:
+                self._collision_queue.get_nowait()
+            except queue.Empty:
+                break
+        bp = self.world.get_blueprint_library().find('sensor.other.collision')
+        sensor = self.world.spawn_actor(bp, carla.Transform(), attach_to=ego_actor)
+        sensor.listen(lambda event: self._collision_queue.put(event))
+        self._collision_sensor = sensor
+        self.actor_list.append(sensor)
+
+    @staticmethod
+    def _classify_collision(other_actor):
+        """1=车辆, 2=行人, 3=其他静态物."""
+        tid = ''
+        try:
+            tid = other_actor.type_id if other_actor is not None else ''
+        except Exception:
+            tid = ''
+        if tid.startswith('vehicle.'):
+            return 1
+        if tid.startswith('walker.'):
+            return 2
+        return 3
+
+    def consume_collisions(self, target_frame=None):
+        """出队 frame<=target_frame 的事件, 返回当 tick 最严重分类 (1>2>3, min 取数字最小).
+        无碰撞返回 0. target_frame=None 则 drain 全部."""
+        flags = []
+        leftover = []
+        while not self._collision_queue.empty():
+            try:
+                ev = self._collision_queue.get_nowait()
+            except queue.Empty:
+                break
+            ev_frame = getattr(ev, 'frame', None)
+            if target_frame is None or ev_frame is None or ev_frame <= target_frame:
+                flags.append(self._classify_collision(getattr(ev, 'other_actor', None)))
+            else:
+                leftover.append(ev)
+        for ev in leftover:
+            self._collision_queue.put(ev)
+        return min(flags) if flags else 0
 
     def spawn_other_vehicles(self, transform_list, auto_mode=False):
         bp_lib = self.world.get_blueprint_library()

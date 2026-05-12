@@ -15,6 +15,19 @@ from utils.carla_utils import spawn_vehicles_around_ego_vehicles
 from utils.draw_result import plot_result
 from official.behavior_agent import BehaviorAgent
 
+# ========================================================================
+# 论文实验 baseline 环境变量 (与主线 udmc_main.py 一致)
+# ------------------------------------------------------------------------
+# RANDOM_SEED  : int  控制周车 spawn / np.random 一致性, 缺省随机
+# LOG_OUTPUT   : str  日志写入路径; 缺省走原版 scenario+'.txt'
+# PLOT_RESULT  : "0"  批量实验关绘图; 缺省 "1" 与原版行为一致
+# CARLA_PORT   : int  由 Env 构造函数 default 读取, 此处无需重复
+# ========================================================================
+_seed_str = os.environ.get('RANDOM_SEED', '')
+RANDOM_SEED = int(_seed_str) if _seed_str else None
+LOG_OUTPUT  = os.environ.get('LOG_OUTPUT', '')
+PLOT_RESULT = os.environ.get('PLOT_RESULT', '1') != '0'
+
 simu_step = 0.05
 gen_dis_max = 300
 gen_dis_min = 5
@@ -133,6 +146,11 @@ agent = Xagent(env, dynamic_model, dt=simu_step)
 
 # - Spawn other vehicles
 if random_spawn:
+    # 周车随机生成前固定 seed, 保证相同 seed 下交通流可复现
+    if RANDOM_SEED is not None:
+        random.seed(RANDOM_SEED)
+        np.random.seed(RANDOM_SEED)
+        print(f'[Seed] random_seed={RANDOM_SEED}')
     transform_list = spawn_vehicles_around_ego_vehicles(start_transform, gen_dis_max, gen_dis_min, spawn_points, veh_num)
     # store the transform position of other vehicles to file with scenario name and time stamp
     with open('spawnPoints/spawnpoints_{scenario}_{time_stamp}.txt'.format(scenario=scenario, time_stamp=datetime.datetime.now()), 'w') as csv_file:
@@ -226,6 +244,14 @@ for _ in range(10000):
         # update the log data from acc and steer to carla_thr and carla_steer
         agent._log_data[-1][4] = 3*(carla_thr if carla_reverse == False else -carla_thr)
         agent._log_data[-1][5] = carla_steer/env.steer_ratio
+        # 实测车体碰撞 (CollisionSensor) → 第 16 列 collision_flag (1=车,2=人,3=其他,0=无)
+        # env.step() 内部已 world.tick(), consume_collisions 在此 drain 当 tick 全部事件
+        try:
+            _cf = env.consume_collisions()
+            if _cf:
+                agent._log_data[-1][15] = _cf
+        except Exception:
+            pass
         # ----------------------- The above code is for the UDMC execution -----------------------
         if lv_state:
             # relative velocity of the leading vehicle
@@ -329,6 +355,20 @@ for _ in range(10000):
 
 if env.recording:
     env.client.stop_recorder()
-# - save log data
-np.savetxt(scenario+'.txt', agent._log_data)
-plot_result(scenario)
+# ------------------------------------------------------------------------
+# 保存日志: 优先用 LOG_OUTPUT 环境变量, 否则回退到原版 scenario+'.txt'
+# ------------------------------------------------------------------------
+if LOG_OUTPUT:
+    _log_dir = os.path.dirname(LOG_OUTPUT)
+    if _log_dir:
+        os.makedirs(_log_dir, exist_ok=True)
+    np.savetxt(LOG_OUTPUT, agent._log_data)
+    print(f'日志已保存: {LOG_OUTPUT}')
+else:
+    np.savetxt(scenario+'.txt', agent._log_data)
+# 绘图: 批量实验场景 PLOT_RESULT=0 跳过 (绘图依赖 matplotlib + GUI 资源)
+if PLOT_RESULT:
+    try:
+        plot_result(scenario)
+    except Exception as _plot_err:
+        print(f'[WARN] plot_result 跳过: {_plot_err}')
