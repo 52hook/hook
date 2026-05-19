@@ -156,8 +156,8 @@ class Vehicle:
         self._obca_actor_cache = _env_flag("OBCA_ACTOR_CACHE", True)
         # Step 4 (A): d_safe 硬约束安全裕度 (米); s_max slack 上限 (米)
         # OBCA 第 3 个不等式: -g^T mu + (A t - b)^T lam + s >= d_safe
-        # 实际可被 slack 削弱到 (d_safe - s_max), 默认 (0.40 - 0.30 = 0.10)
-        self.d_safe = _env_float("OBCA_DSAFE", 0.40)
+        # 实际可被 slack 削弱到 (d_safe - s_max), 默认 (0.35 - 0.30 = 0.05)
+        self.d_safe = _env_float("OBCA_DSAFE", 0.35)
         self.s_max = _env_float("OBCA_SMAX", 0.30)
         self.gamma_l2_s = _env_float("OBCA_GAMMA_L2_S", 1000.0)
         self.G_car = None
@@ -1488,7 +1488,7 @@ class Vehicle:
 
         # (3) 对偶几何约束的 lbg / ubg
         if getattr(self, 'dual_enabled', False) and self.num_obs > 0:
-            d_safe_val = float(getattr(self, "d_safe", 0.40))
+            d_safe_val = float(getattr(self, "d_safe", 0.35))
             for _k in range(self.horizon + 1):
                 for _m in range(self.num_obs):
                     # 1) ||A^T λ||^2 <= 1

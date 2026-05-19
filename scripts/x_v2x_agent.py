@@ -116,7 +116,7 @@ class Xagent(BasicAgent):
         self._obca_pred_front_only = _env_flag("OBCA_PRED_FRONT_ONLY", False)
         self._obca_pred_debug = _env_flag("OBCA_PRED_DEBUG", False)
         self._obca_apf_split = _env_flag("OBCA_APF_SPLIT", True)
-        self._obca_dsafe = _env_float("OBCA_DSAFE", 0.40)
+        self._obca_dsafe = _env_float("OBCA_DSAFE", 0.35)
         self._obca_smax = _env_float("OBCA_SMAX", 0.30)
         self._obca_gamma_l2_s = _env_float("OBCA_GAMMA_L2_S", 1000.0)
         self._obca_beta_s = _env_float("OBCA_BETA_S", 500.0)
