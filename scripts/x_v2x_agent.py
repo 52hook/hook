@@ -120,6 +120,8 @@ class Xagent(BasicAgent):
         self._obca_smax = _env_float("OBCA_SMAX", 0.30)
         self._obca_gamma_l2_s = _env_float("OBCA_GAMMA_L2_S", 1000.0)
         self._obca_beta_s = _env_float("OBCA_BETA_S", 500.0)
+        self._roundabout_yield_guard = _env_flag("ROUNDABOUT_YIELD_GUARD", False)
+        self._roundabout_yield_debug = _env_flag("ROUNDABOUT_YIELD_DEBUG", False)
 
         self._world = self._vehicle.get_world()
         self._map = self._world.get_map()
@@ -854,6 +856,9 @@ class Xagent(BasicAgent):
         s_ego = math.sin(-ego_yaw)
 
         opp_min_dist = None  # 最近的对向直行车距离
+        roundabout_conflict_dist = None
+        roundabout_conflict_rel = None
+        roundabout_conflict_yaw = None
 
         if obs is not None and len(obs) > 0:
             for k, ob in enumerate(obs):
@@ -871,6 +876,17 @@ class Xagent(BasicAgent):
                 d = math.hypot(rel_x, rel_y)
 
                 is_obca_hit = (k in obca_obs_idx_set)
+                if self._roundabout_yield_guard and is_roundabout_like:
+                    in_conflict_corridor = (
+                        -1.5 < rel_x < 11.0
+                        and abs(rel_y) < 4.5
+                        and d < 13.0
+                    )
+                    if in_conflict_corridor:
+                        if roundabout_conflict_dist is None or d < roundabout_conflict_dist:
+                            roundabout_conflict_dist = d
+                            roundabout_conflict_rel = (rel_x, rel_y)
+                            roundabout_conflict_yaw = abs_yaw
 
                 # ① 对向直行车检测
                 is_opposite = abs_yaw > math.radians(140.0)
@@ -1316,6 +1332,21 @@ class Xagent(BasicAgent):
                 brake_ratio = max(0.0, 1.0 - d_lv / 12.0)
                 self._a_cmd = min(self._a_cmd, -2.5 * brake_ratio)
                 self._delta_cmd = self._delta_cmd * (1.0 - 0.5 * brake_ratio)
+
+        if self._roundabout_yield_guard and is_roundabout_like and roundabout_conflict_dist is not None:
+            # 环岛冲突车优先纵向让行, 避免 OBCA/APF 把 ego 推向横向绕行。
+            yield_ratio = max(0.0, min(1.0, (13.0 - roundabout_conflict_dist) / 9.0))
+            self._a_cmd = min(self._a_cmd, -2.2 * yield_ratio)
+            steer_keep = max(0.35, 1.0 - 0.55 * yield_ratio)
+            self._delta_cmd = self._delta_cmd * steer_keep
+            if self._roundabout_yield_debug:
+                rx, ry = roundabout_conflict_rel
+                print(
+                    "[ROUNDABOUT_YIELD] "
+                    f"d={roundabout_conflict_dist:.2f} rel=({rx:.2f},{ry:.2f}) "
+                    f"yaw={roundabout_conflict_yaw:.2f} ratio={yield_ratio:.2f} "
+                    f"acc={self._a_cmd:.2f} steer={self._delta_cmd:.2f}"
+                )
 
         # 防倒车 / 低速刹车保护
         safe_acc, safe_delta = self._front_ttc_brake(
