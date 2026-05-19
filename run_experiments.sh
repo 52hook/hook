@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # ========================================================================
-# GRIPC 完整实验自动化脚本 (v4 - paper baseline)
+# GRIPC 完整实验自动化脚本 (v5 - final 50r)
 #
 # 实验设计:
-#   A) 对比实验: 4 场景 × 3 方法 (GRIPC/UDMC_original/FSM) × 40 轮 = 480 次
-#   B) 消融实验: 4 场景 × 4 消融 (leave-one-out) × 40 轮 = 640 次
-#   总计: 1120 次仿真
+#   A) 对比实验: 4 场景 × 3 方法 (GRIPC/UDMC_original/FSM) × 50 轮 = 600 次
+#   B) 消融实验: 4 场景 × 4 消融 (leave-one-out) × 50 轮 = 800 次
+#   总计: 1400 次仿真
 #
 # 场景: unsig_crossroad / roundabout / multilaneACC / mixed_traffic
 # 全部随机交通流 (100 辆车) + 固定 seed 保证可复现
+#
+# v5 关键变化 (相比 v4_paper_baseline):
+#   - 最终实验轮次从 40 增加到 50
+#   - 输出目录隔离到 v5_final_50r, 避免复用 v4 的 pre-fix 结果
 #
 # v4 关键变化 (相比 v3_paper_baseline):
 #   - Bug A 修复: ABLATION_BSPLINE_ADAPTIVE 不再硬编码 0, 改为跟随 ABLATION_BSPLINE
@@ -51,8 +55,8 @@ python -c "import carla" 2>/dev/null || { echo "ERROR: carla 包未安装"; exit
 # ------------------------------------------------------------------------
 CARLA_PORT=2001
 PROJECT_DIR="$HOME/phd/0.9.16udmc_carla-main_myfinal"
-RESULTS_DIR="${PROJECT_DIR}/experiment_results/v4_paper_baseline"
-REPEATS=40    # 每个配置重复次数（与 UDMC Table VI 一致）
+RESULTS_DIR="${PROJECT_DIR}/experiment_results/v5_final_50r"
+REPEATS=50    # 每个配置重复次数（final paper campaign）
 
 mkdir -p "${RESULTS_DIR}"
 cd "${PROJECT_DIR}"
@@ -251,7 +255,7 @@ SCENARIOS=("unsig_crossroad" "roundabout" "multilaneACC" "mixed_traffic")
 
 # ========================================================================
 # A) 对比实验: GRIPC vs UDMC vs FSM
-#    4 场景 × 3 方法 × 40 轮 = 480 次
+#    4 场景 × 3 方法 × 50 轮 = 600 次
 # ========================================================================
 log "========== A) 对比实验开始 =========="
 for r in $(seq 1 ${REPEATS}); do
@@ -265,7 +269,7 @@ for r in $(seq 1 ${REPEATS}); do
 done
 
 # ========================================================================
-# B) 消融实验: 4 场景 × 4 消融变体 × 40 轮 = 640 次
+# B) 消融实验: 4 场景 × 4 消融变体 × 50 轮 = 800 次
 # ========================================================================
 log "========== B) 消融实验开始 =========="
 for r in $(seq 1 ${REPEATS}); do
