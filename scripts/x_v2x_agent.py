@@ -113,6 +113,7 @@ class Xagent(BasicAgent):
         self._scenario = scenario
         self._obca_static_only = _env_flag("OBCA_STATIC_ONLY", False)
         self._obca_horizon_no_pred = _env_flag("OBCA_HORIZON_NO_PRED", False)
+        self._obca_pred_front_only = _env_flag("OBCA_PRED_FRONT_ONLY", False)
         self._obca_pred_debug = _env_flag("OBCA_PRED_DEBUG", False)
         self._obca_apf_split = _env_flag("OBCA_APF_SPLIT", True)
         self._obca_dsafe = _env_float("OBCA_DSAFE", 0.30)
@@ -623,9 +624,28 @@ class Xagent(BasicAgent):
                     # actors_to_Ab_horizon 会退化到静态 bbox (codex 风险 5.1 兜底)
                     obs_xy_rh = [(float(o[0]), float(o[1])) for o in obs] if len(obs) > 0 else []
                     actors_with_pred = []
+                    ego_yaw_for_obca = float(current_state[2])
+                    c_obca = math.cos(-ego_yaw_for_obca)
+                    s_obca = math.sin(-ego_yaw_for_obca)
                     for a in others_for_dual:
                         a_loc = a.get_location()
                         ax_rh, ay_rh = float(a_loc.x), -float(a_loc.y)
+                        actor_yaw_rh = -math.radians(a.get_transform().rotation.yaw)
+                        dx_ego = ax_rh - ego_xy_rh[0]
+                        dy_ego = ay_rh - ego_xy_rh[1]
+                        rel_x_ego = c_obca * dx_ego - s_obca * dy_ego
+                        rel_y_ego = s_obca * dx_ego + c_obca * dy_ego
+                        yaw_diff_ego = actor_yaw_rh - ego_yaw_for_obca
+                        yaw_diff_ego = math.atan2(math.sin(yaw_diff_ego), math.cos(yaw_diff_ego))
+                        abs_yaw_diff_ego = abs(yaw_diff_ego)
+                        pred_front_ok = (
+                            (not self._obca_pred_front_only)
+                            or (
+                                abs_yaw_diff_ego < math.radians(50.0)
+                                and rel_x_ego > -2.0
+                                and abs(rel_y_ego) < 5.0
+                            )
+                        )
                         best_i, best_d2 = -1, 1e9
                         for i, (ox, oy) in enumerate(obs_xy_rh):
                             d2 = (ox - ax_rh) ** 2 + (oy - ay_rh) ** 2
@@ -634,6 +654,7 @@ class Xagent(BasicAgent):
                                 best_i = i
                         # 容差 1.0 m^2 (位置抖动 < 1m), 且索引在 obs_infer 范围内
                         if (not self._obca_horizon_no_pred
+                                and pred_front_ok
                                 and best_i >= 0
                                 and best_d2 < 1.0
                                 and best_i < len(obs_infer)):
@@ -644,7 +665,6 @@ class Xagent(BasicAgent):
                             # 诊断路径: 时序接口保留, 但不用 prediction pose。
                             traj = []  # 退化静态
                         if self._obca_pred_debug:
-                            actor_yaw_rh = -math.radians(a.get_transform().rotation.yaw)
                             if best_i >= 0 and best_i < len(obs):
                                 obs_i = obs[best_i]
                                 obs_dx = float(obs_i[0]) - ax_rh
@@ -677,6 +697,8 @@ class Xagent(BasicAgent):
                                 f"aid={getattr(a, 'id', -1)} best_i={best_i} "
                                 f"best_d2={best_d2:.3f} "
                                 f"actor=({ax_rh:.2f},{ay_rh:.2f},{actor_yaw_rh:.2f}) "
+                                f"rel=({rel_x_ego:.2f},{rel_y_ego:.2f}) "
+                                f"yaw_diff={abs_yaw_diff_ego:.2f} pred_front_ok={int(pred_front_ok)} "
                                 f"obs_delta=({obs_dx:.2f},{obs_dy:.2f}) obs_yaw={obs_yaw:.2f} "
                                 f"pred0_delta=({pred_dx:.2f},{pred_dy:.2f}) pred0_yaw={pred_yaw:.2f} "
                                 f"step01=({step_dx:.2f},{step_dy:.2f}) step_head={step_heading:.2f} "
