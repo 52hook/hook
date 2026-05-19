@@ -112,6 +112,7 @@ class Xagent(BasicAgent):
         self._model = model
         self._scenario = scenario
         self._obca_static_only = _env_flag("OBCA_STATIC_ONLY", False)
+        self._obca_horizon_no_pred = _env_flag("OBCA_HORIZON_NO_PRED", False)
         self._obca_apf_split = _env_flag("OBCA_APF_SPLIT", True)
         self._obca_dsafe = _env_float("OBCA_DSAFE", 0.30)
         self._obca_smax = _env_float("OBCA_SMAX", 0.30)
@@ -631,11 +632,15 @@ class Xagent(BasicAgent):
                                 best_d2 = d2
                                 best_i = i
                         # 容差 1.0 m^2 (位置抖动 < 1m), 且索引在 obs_infer 范围内
-                        if best_i >= 0 and best_d2 < 1.0 and best_i < len(obs_infer):
+                        if (not self._obca_horizon_no_pred
+                                and best_i >= 0
+                                and best_d2 < 1.0
+                                and best_i < len(obs_infer)):
                             pred = np.asarray(obs_infer[best_i]).reshape(-1, 3)
                             traj = [(float(p[0]), float(p[1]), float(p[2])) for p in pred]
                             obca_obs_idx_set.add(best_i)  # Step 5: 标记为 OBCA-hit
                         else:
+                            # 诊断路径: 时序接口保留, 但不用 prediction pose。
                             traj = []  # 退化静态
                         actors_with_pred.append((a, traj))
 
