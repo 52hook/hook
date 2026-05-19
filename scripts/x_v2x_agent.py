@@ -113,6 +113,7 @@ class Xagent(BasicAgent):
         self._scenario = scenario
         self._obca_static_only = _env_flag("OBCA_STATIC_ONLY", False)
         self._obca_horizon_no_pred = _env_flag("OBCA_HORIZON_NO_PRED", False)
+        self._obca_pred_debug = _env_flag("OBCA_PRED_DEBUG", False)
         self._obca_apf_split = _env_flag("OBCA_APF_SPLIT", True)
         self._obca_dsafe = _env_float("OBCA_DSAFE", 0.30)
         self._obca_smax = _env_float("OBCA_SMAX", 0.30)
@@ -642,6 +643,45 @@ class Xagent(BasicAgent):
                         else:
                             # 诊断路径: 时序接口保留, 但不用 prediction pose。
                             traj = []  # 退化静态
+                        if self._obca_pred_debug:
+                            actor_yaw_rh = -math.radians(a.get_transform().rotation.yaw)
+                            if best_i >= 0 and best_i < len(obs):
+                                obs_i = obs[best_i]
+                                obs_dx = float(obs_i[0]) - ax_rh
+                                obs_dy = float(obs_i[1]) - ay_rh
+                                obs_yaw = float(obs_i[2])
+                            else:
+                                obs_dx = obs_dy = float("nan")
+                                obs_yaw = float("nan")
+                            if len(traj) > 0:
+                                p0 = np.asarray(traj[0], dtype=float)
+                                pred_dx = float(p0[0]) - ax_rh
+                                pred_dy = float(p0[1]) - ay_rh
+                                pred_yaw = float(p0[2])
+                                if len(traj) > 1:
+                                    p1 = np.asarray(traj[1], dtype=float)
+                                    step_dx = float(p1[0] - p0[0])
+                                    step_dy = float(p1[1] - p0[1])
+                                    step_heading = math.atan2(step_dy, step_dx)
+                                else:
+                                    step_dx = step_dy = 0.0
+                                    step_heading = float("nan")
+                                yaws = np.asarray([p[2] for p in traj], dtype=float)
+                                yaw_jump = float(np.max(np.abs(np.diff(yaws)))) if len(yaws) > 1 else 0.0
+                            else:
+                                pred_dx = pred_dy = pred_yaw = float("nan")
+                                step_dx = step_dy = step_heading = float("nan")
+                                yaw_jump = float("nan")
+                            print(
+                                "[OBCA_PRED_DEBUG] "
+                                f"aid={getattr(a, 'id', -1)} best_i={best_i} "
+                                f"best_d2={best_d2:.3f} "
+                                f"actor=({ax_rh:.2f},{ay_rh:.2f},{actor_yaw_rh:.2f}) "
+                                f"obs_delta=({obs_dx:.2f},{obs_dy:.2f}) obs_yaw={obs_yaw:.2f} "
+                                f"pred0_delta=({pred_dx:.2f},{pred_dy:.2f}) pred0_yaw={pred_yaw:.2f} "
+                                f"step01=({step_dx:.2f},{step_dy:.2f}) step_head={step_heading:.2f} "
+                                f"yaw_jump={yaw_jump:.2f} traj_len={len(traj)}"
+                            )
                         actors_with_pred.append((a, traj))
 
                     obs_Am_seq, obs_bm_seq, obca_actor_ids = actors_to_Ab_horizon(
