@@ -32,6 +32,26 @@ from utils.global_bspline_smoother import BSplineGlobalSmoother
 from utils.geometry_poly import actors_to_Ab, actors_to_Ab_horizon
 
 
+def _env_flag(name, default=False):
+    """读取诊断开关, 支持 1/true/on/yes。"""
+    val = os.environ.get(name)
+    if val is None:
+        return bool(default)
+    return str(val).strip().lower() in ("1", "true", "on", "yes")
+
+
+def _env_float(name, default):
+    """读取浮点诊断参数, 非法输入时回退默认值。"""
+    val = os.environ.get(name)
+    if val is None:
+        return float(default)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        print(f"[Xagent] invalid {name}={val!r}, use default {default}")
+        return float(default)
+
+
 class RoadOption(Enum):
     """
     RoadOption represents the possible topological configurations when moving
@@ -91,6 +111,12 @@ class Xagent(BasicAgent):
         self._vehicle = env.ego_vehicle
         self._model = model
         self._scenario = scenario
+        self._obca_static_only = _env_flag("OBCA_STATIC_ONLY", False)
+        self._obca_apf_split = _env_flag("OBCA_APF_SPLIT", True)
+        self._obca_dsafe = _env_float("OBCA_DSAFE", 0.30)
+        self._obca_smax = _env_float("OBCA_SMAX", 0.30)
+        self._obca_gamma_l2_s = _env_float("OBCA_GAMMA_L2_S", 1000.0)
+        self._obca_beta_s = _env_float("OBCA_BETA_S", 500.0)
 
         self._world = self._vehicle.get_world()
         self._map = self._world.get_map()
@@ -570,47 +596,63 @@ class Xagent(BasicAgent):
 
             obca_actor_ids = []
             if len(others_for_dual) > 0:
-                # ego 与 obs_infer 都已在右手系 (env.py:709 obs.append([x,-y,-yaw]))
-                ego_xy_rh = (float(veh_location.x), -float(veh_location.y))
+                if self._obca_static_only:
+                    # 诊断路径: 回到 a263829 的静态 polygon, 排除 prediction horizon 影响。
+                    ego_xy_carla = (float(veh_location.x), float(veh_location.y))
+                    obs_Am_list, obs_bm_list = actors_to_Ab(
+                        others_for_dual,
+                        ego_xy=ego_xy_carla,
+                        max_range=max_range,
+                        include_types=('vehicle.',),
+                        inflate_vehicle=0.6,
+                        inflate_walker=0.45,
+                        max_obs=2,
+                        y_flip=True,
+                    )
+                    obs_Am_seq, obs_bm_seq = [], []
+                    obca_actor_ids = [int(a.id) for a in others_for_dual[:len(obs_Am_list)]]
+                else:
+                    # ego 与 obs_infer 都已在右手系 (env.py:709 obs.append([x,-y,-yaw]))
+                    ego_xy_rh = (float(veh_location.x), -float(veh_location.y))
 
-                # ---- 位置匹配 actor.id -> obs_infer 索引 (Tier 2: 不改 env.py) ----
-                # obs[i] = [loc.x, -loc.y, -yaw_rad], obs_infer[i] : (T,3) 右手系
-                # actors_for_dual 中部分车可能 > env.dist_threshold(15m), 无 pred,
-                # actors_to_Ab_horizon 会退化到静态 bbox (codex 风险 5.1 兜底)
-                obs_xy_rh = [(float(o[0]), float(o[1])) for o in obs] if len(obs) > 0 else []
-                actors_with_pred = []
-                for a in others_for_dual:
-                    a_loc = a.get_location()
-                    ax_rh, ay_rh = float(a_loc.x), -float(a_loc.y)
-                    best_i, best_d2 = -1, 1e9
-                    for i, (ox, oy) in enumerate(obs_xy_rh):
-                        d2 = (ox - ax_rh) ** 2 + (oy - ay_rh) ** 2
-                        if d2 < best_d2:
-                            best_d2 = d2
-                            best_i = i
-                    # 容差 1.0 m^2 (位置抖动 < 1m), 且索引在 obs_infer 范围内
-                    if best_i >= 0 and best_d2 < 1.0 and best_i < len(obs_infer):
-                        pred = np.asarray(obs_infer[best_i]).reshape(-1, 3)
-                        traj = [(float(p[0]), float(p[1]), float(p[2])) for p in pred]
-                        obca_obs_idx_set.add(best_i)  # Step 5: 标记为 OBCA-hit
-                    else:
-                        traj = []  # 退化静态
-                    actors_with_pred.append((a, traj))
+                    # ---- 位置匹配 actor.id -> obs_infer 索引 (Tier 2: 不改 env.py) ----
+                    # obs[i] = [loc.x, -loc.y, -yaw_rad], obs_infer[i] : (T,3) 右手系
+                    # actors_for_dual 中部分车可能 > env.dist_threshold(15m), 无 pred,
+                    # actors_to_Ab_horizon 会退化到静态 bbox (codex 风险 5.1 兜底)
+                    obs_xy_rh = [(float(o[0]), float(o[1])) for o in obs] if len(obs) > 0 else []
+                    actors_with_pred = []
+                    for a in others_for_dual:
+                        a_loc = a.get_location()
+                        ax_rh, ay_rh = float(a_loc.x), -float(a_loc.y)
+                        best_i, best_d2 = -1, 1e9
+                        for i, (ox, oy) in enumerate(obs_xy_rh):
+                            d2 = (ox - ax_rh) ** 2 + (oy - ay_rh) ** 2
+                            if d2 < best_d2:
+                                best_d2 = d2
+                                best_i = i
+                        # 容差 1.0 m^2 (位置抖动 < 1m), 且索引在 obs_infer 范围内
+                        if best_i >= 0 and best_d2 < 1.0 and best_i < len(obs_infer):
+                            pred = np.asarray(obs_infer[best_i]).reshape(-1, 3)
+                            traj = [(float(p[0]), float(p[1]), float(p[2])) for p in pred]
+                            obca_obs_idx_set.add(best_i)  # Step 5: 标记为 OBCA-hit
+                        else:
+                            traj = []  # 退化静态
+                        actors_with_pred.append((a, traj))
 
-                obs_Am_seq, obs_bm_seq, obca_actor_ids = actors_to_Ab_horizon(
-                    actors_with_pred,
-                    ego_xy=ego_xy_rh,
-                    horizon=self._model.horizon,
-                    max_range=max_range,
-                    include_types=('vehicle.',),
-                    inflate_vehicle=0.6,
-                    inflate_walker=0.45,
-                    max_obs=2,
-                    frame="right_hand",
-                )
-                # k=0 alias 兼容下游 (obca_qp_preplan / 调试日志读取)
-                obs_Am_list = list(obs_Am_seq[0]) if len(obs_Am_seq) > 0 else []
-                obs_bm_list = list(obs_bm_seq[0]) if len(obs_bm_seq) > 0 else []
+                    obs_Am_seq, obs_bm_seq, obca_actor_ids = actors_to_Ab_horizon(
+                        actors_with_pred,
+                        ego_xy=ego_xy_rh,
+                        horizon=self._model.horizon,
+                        max_range=max_range,
+                        include_types=('vehicle.',),
+                        inflate_vehicle=0.6,
+                        inflate_walker=0.45,
+                        max_obs=2,
+                        frame="right_hand",
+                    )
+                    # k=0 alias 兼容下游 (obca_qp_preplan / 调试日志读取)
+                    obs_Am_list = list(obs_Am_seq[0]) if len(obs_Am_seq) > 0 else []
+                    obs_bm_list = list(obs_bm_seq[0]) if len(obs_bm_seq) > 0 else []
             else:
                 obs_Am_seq, obs_bm_seq = [], []
 
@@ -622,20 +664,31 @@ class Xagent(BasicAgent):
                 ego_L_enlarge = ego_L + 0.6
                 ego_W_enlarge = ego_W + 0.4
 
-                # 时序 OBCA: 传 (A_k, b_k) 序列 + actor_id 列表 (Step 6 cache key)
-                # Step 4 (A): d_safe / s_max / L1+L2 slack 显式覆盖
-                self._model.enable_dual_collision(
-                    [], [],  # 静态槽位空, 走时序分支
-                    car_box=(ego_L_enlarge, ego_W_enlarge),
-                    alpha_e=2.5,
-                    beta_s=500.0,           # 旧 250 -> 500 (slack L1 双倍惩罚)
-                    obs_Am_seq=obs_Am_seq,
-                    obs_bm_seq=obs_bm_seq,
-                    actor_ids=obca_actor_ids,
-                    d_safe=0.30,            # 30cm 硬约束安全裕度
-                    s_max=0.30,             # slack 上限 30cm (与 d_safe 临界匹配)
-                    gamma_l2_s=1000.0,      # slack L2 spike 抑制
-                )
+                if self._obca_static_only:
+                    self._model.enable_dual_collision(
+                        obs_Am_list, obs_bm_list,
+                        car_box=(ego_L_enlarge, ego_W_enlarge),
+                        alpha_e=2.5,
+                        beta_s=self._obca_beta_s,
+                        actor_ids=obca_actor_ids,
+                        d_safe=self._obca_dsafe,
+                        s_max=self._obca_smax,
+                        gamma_l2_s=self._obca_gamma_l2_s,
+                    )
+                else:
+                    # 时序 OBCA: 传 (A_k, b_k) 序列 + actor_id 列表 (Step 6 cache key)
+                    self._model.enable_dual_collision(
+                        [], [],  # 静态槽位空, 走时序分支
+                        car_box=(ego_L_enlarge, ego_W_enlarge),
+                        alpha_e=2.5,
+                        beta_s=self._obca_beta_s,
+                        obs_Am_seq=obs_Am_seq,
+                        obs_bm_seq=obs_bm_seq,
+                        actor_ids=obca_actor_ids,
+                        d_safe=self._obca_dsafe,
+                        s_max=self._obca_smax,
+                        gamma_l2_s=self._obca_gamma_l2_s,
+                    )
 
                 # ====== 2.5 调用凸 QP 预规划（消融开关: use_qp_warmstart）======
                 if use_qp_this_step and self._use_qp_warmstart and hasattr(self._model, "obca_qp_preplan"):
@@ -1091,11 +1144,20 @@ class Xagent(BasicAgent):
 
         # 软障碍物 APF（车辆+行人）
         if len(obs_long_infer) > 0:
-            _apf_split(obs_long_infer, obs_long_obca, obs_ratio_front * sigma_scale, carla=True)
+            if self._obca_apf_split:
+                _apf_split(obs_long_infer, obs_long_obca, obs_ratio_front * sigma_scale, carla=True)
+            else:
+                self._model.solver_add_soft_obs(obs_long_infer, ratio=obs_ratio_front * sigma_scale, carla=True)
         if len(obs_opp_infer) > 0:
-            _apf_split(obs_opp_infer, obs_opp_obca, obs_ratio_opp, carla=True)
+            if self._obca_apf_split:
+                _apf_split(obs_opp_infer, obs_opp_obca, obs_ratio_opp, carla=True)
+            else:
+                self._model.solver_add_soft_obs(obs_opp_infer, ratio=obs_ratio_opp, carla=True)
         if len(obs_cross_infer) > 0:
-            _apf_split(obs_cross_infer, obs_cross_obca, obs_ratio_cross * sigma_scale, carla=True)
+            if self._obca_apf_split:
+                _apf_split(obs_cross_infer, obs_cross_obca, obs_ratio_cross * sigma_scale, carla=True)
+            else:
+                self._model.solver_add_soft_obs(obs_cross_infer, ratio=obs_ratio_cross * sigma_scale, carla=True)
         if len(pedes) > 0:
             pede_sigma_mean = float(np.mean(pede_stds)) if len(pede_stds) > 0 else 0.0
             pede_sigma_scale = min(1.0 + k_sigma * pede_sigma_mean, sigma_scale_max)

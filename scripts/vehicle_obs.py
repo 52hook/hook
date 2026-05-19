@@ -21,6 +21,26 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name, default=False):
+    """读取诊断开关, 支持 1/true/on/yes。"""
+    val = os.environ.get(name)
+    if val is None:
+        return bool(default)
+    return str(val).strip().lower() in ("1", "true", "on", "yes")
+
+
+def _env_float(name, default):
+    """读取浮点诊断参数, 非法输入时回退默认值。"""
+    val = os.environ.get(name)
+    if val is None:
+        return float(default)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        logger.warning("invalid %s=%r, use default %s", name, val, default)
+        return float(default)
+
+
 # estimated parameters by SLSQP with steering transformation of 70 deg
 
 # 使用原版 UDMC 标定参数（线性区间内验证过，物理合理）
@@ -132,12 +152,14 @@ class Vehicle:
         self.dual_enabled = False
         self.alpha_e = 1.0
         self.beta_s = 200.0
+        self._obca_rate_penalty = _env_flag("OBCA_RATE_PENALTY", True)
+        self._obca_actor_cache = _env_flag("OBCA_ACTOR_CACHE", True)
         # Step 4 (A): d_safe 硬约束安全裕度 (米); s_max slack 上限 (米)
         # OBCA 第 3 个不等式: -g^T mu + (A t - b)^T lam + s >= d_safe
         # 实际可被 slack 削弱到 (d_safe - s_max), 默认 (0.30 - 0.30 = 0.0) 临界
-        self.d_safe = 0.30
-        self.s_max = 0.30
-        self.gamma_l2_s = 1000.0     # slack L2 惩罚权重 (Step 4)
+        self.d_safe = _env_float("OBCA_DSAFE", 0.30)
+        self.s_max = _env_float("OBCA_SMAX", 0.30)
+        self.gamma_l2_s = _env_float("OBCA_GAMMA_L2_S", 1000.0)
         self.G_car = None
         self.g_car = None
         self.obs_Am_list = []
@@ -373,11 +395,12 @@ class Vehicle:
                 self.obj += float(self.gamma_l2_s) * ca.sumsqr(slack_vec)
             # Step 5 (G1.b): OBCA 启用时加输入速率 (Δa, Δδ) 二次惩罚, 抑制
             # APF/OBCA 切换瞬间的方向盘抖动 (无需收紧 lbg/ubg, 不会引入硬墙)
-            w_du_a = float(getattr(self, 'w_du_a_obca', 50.0))
-            w_du_d = float(getattr(self, 'w_du_d_obca', 200.0))
-            for _i in range(self.horizon - 1):
-                self.obj += w_du_a * (self.U[0, _i + 1] - self.U[0, _i]) ** 2
-                self.obj += w_du_d * (self.U[1, _i + 1] - self.U[1, _i]) ** 2
+            if getattr(self, "_obca_rate_penalty", True):
+                w_du_a = float(getattr(self, 'w_du_a_obca', 50.0))
+                w_du_d = float(getattr(self, 'w_du_d_obca', 200.0))
+                for _i in range(self.horizon - 1):
+                    self.obj += w_du_a * (self.U[0, _i + 1] - self.U[0, _i]) ** 2
+                    self.obj += w_du_d * (self.U[1, _i + 1] - self.U[1, _i]) ** 2
 
     def get_obs_centers(self, ob_, radius=1.68, carla=False):
         """
@@ -820,17 +843,21 @@ class Vehicle:
         if self._dual_dynamic and hasattr(self, "_qp_ws_valid"):
             self._qp_ws_valid = False
 
-        # === Step 6 (G2): 按 actor.id 重组 dual warm-start ===
-        # 旧版按 (horizon+1, tuple(edges)) shape signature 命中, slot 顺序变化
-        # 时 cache 张冠李戴 -> 收敛慢/震荡。
-        # 新版: _dual_cache_by_id[actor_id] 持有 per-actor (lam, mu, s) 张量,
-        # 在 slot 顺序变化时按 id 命中重建 flat cache; 边数不一致或缺失则 0 初始化。
         new_sig = (self.horizon + 1, tuple(self.obs_edges_count))
-        self._dual_shape_sig = new_sig
-        if not hasattr(self, "_dual_cache_by_id"):
-            self._dual_cache_by_id = {}
-        # 按当前 obs_actor_ids 重建 flat cache (覆盖旧 _lam_cache/_mu_cache/_s_cache)
-        self._rebuild_flat_dual_from_dict()
+        if getattr(self, "_obca_actor_cache", True):
+            # === Step 6 (G2): 按 actor.id 重组 dual warm-start ===
+            # 新版: actor.id 命中可避免 slot 顺序变化时 cache 张冠李戴。
+            self._dual_shape_sig = new_sig
+            if not hasattr(self, "_dual_cache_by_id"):
+                self._dual_cache_by_id = {}
+            self._rebuild_flat_dual_from_dict()
+        else:
+            # 诊断路径: 关闭 actor-id cache, 回到 shape signature 缓存策略。
+            if getattr(self, "_dual_shape_sig", None) != new_sig:
+                self._lam_cache = None
+                self._mu_cache = None
+                self._s_cache = None
+            self._dual_shape_sig = new_sig
 
         # 为每个 (k,m) 添加对偶变量 λ, μ, s
         self.lambda_vars, self.mu_vars, self.slack_s = [], [], []
@@ -1732,11 +1759,11 @@ class Vehicle:
             self._lam_cache = self.dual_damping * lam_vec
             self._mu_cache  = self.dual_damping * mu_vec
             self._s_cache   = 0.0 * s_vec   # s 从 0 开始，鼓励严格满足约束
-            # Step 6 (G2): 同步写回 per-actor dict, 下一拍按 actor.id 重建
-            try:
-                self._writeback_dual_to_dict(lam_vec, mu_vec, s_vec)
-            except Exception as _e:
-                logger.warning("dual_writeback_to_dict failed: %s", _e)
+            if getattr(self, "_obca_actor_cache", True):
+                try:
+                    self._writeback_dual_to_dict(lam_vec, mu_vec, s_vec)
+                except Exception as _e:
+                    logger.warning("dual_writeback_to_dict failed: %s", _e)
 
         # ---------- 8. 也缓存 U/X（跨步 warm-start） ----------
         self._u_cache = u0.flatten()
@@ -2488,5 +2515,4 @@ class Vehicle:
             return u_opt[:, 0], u_opt[:, 1], x_opt, cost_time
         else:
             return u_opt, x_opt, cost_time
-
 
