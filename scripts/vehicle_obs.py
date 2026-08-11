@@ -41,6 +41,11 @@ def _env_float(name, default):
         return float(default)
 
 
+# ==== 行人 v2 长尾核权重 (2026-08-11 行人避撞修复, env 可调便于 A/B) ====
+_PED_W_TAIL = _env_float('PED_W_TAIL', 80.0)    # 长尾引导项 (1+q)^-2
+_PED_W_CORE = _env_float('PED_W_CORE', 400.0)   # 近距核心项 (1+q)^-6
+
+
 # estimated parameters by SLSQP with steering transformation of 70 deg
 
 # 使用原版 UDMC 标定参数（线性区间内验证过，物理合理）
@@ -423,7 +428,13 @@ class Vehicle:
         return obc1, obc2
 
     # the version 3 of solver_add_soft_obs [ellipsoid obstacle]
-    def solver_add_soft_obs(self, obs_infer, ratio=500, expn=1, carla=True, pede=False):
+    def solver_add_soft_obs(self, obs_infer, ratio=500, expn=1, carla=True, pede=False,
+                            ped_axes=None):
+        """软 APF 障碍项。
+
+        ped_axes: 行人前移椭圆半轴列表 [(A_纵, b_横), ...]，与 obs_infer 一一对应。
+        传入时启用 v2 长尾核（2026-08-11 行人避撞修复）；None 时回退旧短程高斯核。
+        """
         # Pad predictions if shorter than horizon
         if len(obs_infer[0]) < self.horizon:
             for ob_ in obs_infer:
@@ -436,7 +447,7 @@ class Vehicle:
         else:
             ratio_eff = ratio * self.rule_weights.soft_obs_vehicle
 
-        for ob_ in obs_infer:  # for each obstacle
+        for j, ob_ in enumerate(obs_infer):  # for each obstacle
             for i in range(self.horizon):  # for each time step
                 ob_center = self.get_obs_center(ob_[i], carla=carla)
                 for self_center in self.get_obs_centers(self.X[:, i], carla=carla):  # for each circle of the EV
@@ -444,6 +455,24 @@ class Vehicle:
                         dist = self.dist_point_to_ellipsoid(self_center, ob_center, ob_[i][2])
                         # 车辆：反距离型（保持原逻辑）
                         self.obj += 12 * ((1 / dist - 0.5) ** expn) * ratio_eff / (i + 1)
+                    elif ped_axes is not None:
+                        # ========================================================
+                        # 行人 v2 核: 前移椭圆 + 双有理长尾 (2026-08-11)
+                        #   q = (Δ∥/A)² + (Δ⊥/b)²  中心已由调用方沿运动方向前移
+                        #   U = ρ_i·[w_tail/(1+q)² + w_core/(1+q)⁶]·ratio_eff
+                        # 旧高斯核 exp(-(d/0.5)²) 在 1.5m 外梯度为机器零, IPOPT
+                        # 直行局部解无牵引 -> "有时绕开有时撞上"双稳态; 长尾核在
+                        # 归一化半径 3 处残余场强为旧核 81 倍, 远距即有梯度。
+                        # ρ_i=exp(-0.2·t_i) 替代 1/(i+1): 安全代价不随步深折扣
+                        # (0.5s 末端 0.905 vs 旧 0.1)。
+                        # ========================================================
+                        A_j, b_j = ped_axes[j]
+                        q = self.dist_point_to_ellipsoid(
+                            self_center, ob_center, ob_[i][2], a=A_j, b=b_j)
+                        rho_i = float(np.exp(-0.2 * dt * i))
+                        self.obj += rho_i * (
+                            _PED_W_TAIL / (1.0 + q) ** 2
+                            + _PED_W_CORE / (1.0 + q) ** 6) * ratio_eff
                     else:
                         dist = self.dist_point_to_ellipsoid(self_center, ob_center, ob_[i][2], a=0.5, b=0.5)
                         # 行人：指数衰减（论文 F_PD = k * exp(-α * d)）
