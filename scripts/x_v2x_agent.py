@@ -746,12 +746,23 @@ class Xagent(BasicAgent):
                     # ==== 参考线横向位移上限 (2026-08-11) ====
                     # B-spline 切角会延伸到出弯直道, 而直道曲率低 adaptive α 反而
                     # 高(0.5), 实测混合参考线离车道中心 0.85m, 与车道保持势场
-                    # 拔河成 ~2s 转向极限环。逐点钳制 α·|dev| ≤ BS_DEV_CAP,
-                    # 弯内正常切角 (α≈0.15, 位移≈0.3m) 不受影响。
+                    # 拔河成 ~2s 转向极限环。tanh 软饱和: 位移渐近上限 BS_DEV_CAP,
+                    # 过渡 C¹ 光滑 (硬 min 会产生"平台+折点", 出弯仍有一次超调);
+                    # α 再经 7 点弧长滑动平均, 横向剖面成缓坡。弯内正常切角
+                    # (α≈0.15, 位移≈0.3m) 不受影响。
                     dev = np.hypot(smooth_path[:, 0] - cx0,
                                    smooth_path[:, 1] - cy0)
-                    alpha_bs = np.minimum(
-                        alpha_bs, _BS_DEV_CAP / np.maximum(dev, 1e-6))
+                    dev_eff = np.maximum(dev, 1e-6)
+                    alpha_arr = (np.full_like(dev, float(alpha_bs))
+                                 if np.ndim(alpha_bs) == 0
+                                 else np.asarray(alpha_bs, dtype=float))
+                    sat = _BS_DEV_CAP * np.tanh(
+                        alpha_arr * dev_eff / _BS_DEV_CAP)
+                    alpha_bs = sat / dev_eff
+                    if len(alpha_bs) >= 7:
+                        alpha_bs = np.convolve(
+                            np.pad(alpha_bs, 3, mode='edge'),
+                            np.ones(7) / 7.0, mode='valid')
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
                     cy = (1.0 - alpha_bs) * cy0 + alpha_bs * smooth_path[:, 1]
 
