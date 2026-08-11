@@ -462,21 +462,46 @@ class Xagent(BasicAgent):
         # ---- 3s 时空走廊扫描 (参考线 Frenet 投影, 3.03σ 占用膨胀) ----
         ttc_corr, d_eff, a_req = np.inf, np.inf, 0.0
         if _PED_GUARD_ON and len(pedes) > 0:
-            i0 = int(ind_nearest)
-            i1 = min(i0 + 220, len(cx) - 1)
-            if i1 > i0 + 1:
-                seg = np.hypot(np.diff(np.asarray(cx[i0:i1 + 1])),
-                               np.diff(np.asarray(cy[i0:i1 + 1])))
-                s_arr = np.concatenate([[0.0], np.cumsum(seg)])
-                taus = np.arange(0.0, 3.01, 0.1)
-                # v2.2: 扫描速度下限 1.5 m/s, 防止减速后 s_ego 塌缩导致
-                # 扫描失明 -> 冲突消失 -> 提速 -> 冲突再现的振荡
-                v_scan = max(cur_v, 1.5)
-                s_ego = np.minimum(v_scan * taus, s_arr[-1])
-                ex = np.interp(s_ego, s_arr, np.asarray(cx[i0:i1 + 1]))
-                ey = np.interp(s_ego, s_arr, np.asarray(cy[i0:i1 + 1]))
-                idxs = np.clip(np.searchsorted(s_arr, s_ego), 0, i1 - i0)
-                psi = np.asarray(cyaw[i0:i1 + 1])[idxs]
+            taus = np.arange(0.0, 3.01, 0.1)
+            v_scan = max(cur_v, 1.5)
+            # ==== v2.4: 走廊优先沿上一拍 MPC 规划轨迹 ====
+            # 参考线走廊看不见 MPC 的侧向绕行 -> 绕行进行中仍判"正对行人"
+            # 而触发急刹 (用户实测 EMERGENCY 掐死绕行)。规划轨迹走廊下,
+            # 绕得开的行人自然离开走廊, 监护只兜"规划也绕不开"的真冲突。
+            # 0.5s 规划时域内线性插值, 之后沿规划末端航向/速度匀速外推。
+            ex = ey = psi = None
+            plan = getattr(self, '_next_states', None)
+            if plan is not None:
+                plan = np.asarray(plan, dtype=float)
+                if (plan.ndim == 2 and plan.shape[0] >= 3 and
+                        np.hypot(plan[0, 0] - current_state[0],
+                                 plan[0, 1] - current_state[1]) < 5.0):
+                    t_plan = np.arange(plan.shape[0]) * self._dt
+                    yaw_pl = np.unwrap(plan[:, 2])
+                    v_end = max(float(plan[-1, 3]), 1.5)
+                    dt_out = np.maximum(taus - t_plan[-1], 0.0)
+                    ex = (np.interp(taus, t_plan, plan[:, 0])
+                          + v_end * np.cos(yaw_pl[-1]) * dt_out)
+                    ey = (np.interp(taus, t_plan, plan[:, 1])
+                          + v_end * np.sin(yaw_pl[-1]) * dt_out)
+                    psi = np.interp(taus, t_plan, yaw_pl)
+            if ex is None:
+                # 规划无效时退回参考线走廊
+                i0 = int(ind_nearest)
+                i1 = min(i0 + 220, len(cx) - 1)
+                if i1 > i0 + 1:
+                    seg = np.hypot(np.diff(np.asarray(cx[i0:i1 + 1])),
+                                   np.diff(np.asarray(cy[i0:i1 + 1])))
+                    s_arr = np.concatenate([[0.0], np.cumsum(seg)])
+                    s_ego = np.minimum(v_scan * taus, s_arr[-1])
+                    ex = np.interp(s_ego, s_arr, np.asarray(cx[i0:i1 + 1]))
+                    ey = np.interp(s_ego, s_arr, np.asarray(cy[i0:i1 + 1]))
+                    idxs = np.clip(np.searchsorted(s_arr, s_ego), 0, i1 - i0)
+                    psi = np.asarray(cyaw[i0:i1 + 1])[idxs]
+            if ex is not None:
+                # 走廊真实弧长表 (d_avail 用弧长而非 v·τ 直线近似)
+                s_scan = np.concatenate(
+                    [[0.0], np.cumsum(np.hypot(np.diff(ex), np.diff(ey)))])
                 ct, st = np.cos(psi), np.sin(psi)
                 for j in range(len(pedes)):
                     traj = np.asarray(pedes_infer[j], dtype=float)
@@ -517,7 +542,7 @@ class Xagent(BasicAgent):
                                 continue
                         if tau_k < ttc_corr:
                             ttc_corr = tau_k
-                            d_avail = (v_scan * tau_k + float(ds[k])
+                            d_avail = (float(s_scan[k]) + float(ds[k])
                                        - half_L - 0.35 - 1.5 * float(sig[k]))
                             d_eff = d_avail - cur_v * 0.25 - 0.5
                             a_req = cur_v ** 2 / (2.0 * max(d_eff, 0.1))
@@ -562,10 +587,11 @@ class Xagent(BasicAgent):
             # 通过速度帽: 舒适停车剖面但下限 3.0 m/s, 保持接近由势场绕行;
             # 3m/s 下限保证 EMERGENCY 触发时 1-2m 内可刹停
             v_cap = max(float(np.sqrt(max(2.0 * 3.0 * max(d_eff, 0.0), 0.0))), 3.0)
-        elif new == 'EMERGENCY':
+        elif new == 'EMERGENCY' and np.isfinite(ttc_corr):
+            # v2.4: 仅当本拍扫描确有冲突才施加制动 — 修复 ttc=inf 后滞回
+            # 窗口内仍持续 -4.5 急刹导致的"刹死"
             v_cap = 0.0
-            a_r = a_req if np.isfinite(a_req) else 6.0
-            self._ped_guard_acc = -float(min(max(a_r, 4.5), 6.0))
+            self._ped_guard_acc = -float(min(max(a_req, 4.5), 6.0))
         if _env_flag('PED_GUARD_DEBUG') and new != 'NORMAL':
             print(f"[PedGuard] state={new} ttc={ttc_corr:.2f} d_eff={d_eff:.2f} "
                   f"a_req={a_req:.2f} v_cap={v_cap} a_guard={self._ped_guard_acc}")
