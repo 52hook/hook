@@ -1643,6 +1643,27 @@ class Xagent(BasicAgent):
         self._a_cmd = float(np.clip(safe_acc, a_floor, 3.0))
         self._delta_cmd = float(np.clip(safe_delta, -0.7, 0.7))
 
+        # ==== 控制链路插桩 (2026-08-11, CTRL_DEBUG=1 时启用, 默认零开销) ====
+        # 判决出弯震荡出生层: raw_delta 震 -> 求解层; raw 平 cmd 震 -> 滤波层
+        if _env_flag('CTRL_DEBUG'):
+            if not hasattr(self, '_ctrl_dbg_fp'):
+                import time as _t
+                os.makedirs('logs', exist_ok=True)
+                _p = f"logs/ctrl_debug_{_t.strftime('%Y%m%d_%H%M%S')}.csv"
+                self._ctrl_dbg_fp = open(_p, 'w')
+                self._ctrl_dbg_fp.write(
+                    "t,raw_a,raw_delta,a_cmd,delta_cmd,branch,danger,"
+                    "k_window_max,cur_v,veh_yaw,ref_yaw0,apf_pede\n")
+                print(f"[CtrlDebug] -> {_p}")
+            _branch = 0 if safe_and_straight else (
+                2 if (is_roundabout_like or k_window_max > 0.015) else 1)
+            self._ctrl_dbg_fp.write(
+                f"{self._simu_time:.2f},{raw_a:.4f},{raw_delta:.4f},"
+                f"{self._a_cmd:.4f},{self._delta_cmd:.4f},{_branch},"
+                f"{int(danger)},{k_window_max:.4f},{cur_v:.2f},"
+                f"{current_state[2]:.4f},{ref_traj[2, 0]:.4f},{apf_pede:.2f}\n")
+            self._ctrl_dbg_fp.flush()
+
         # 用“滤波 + 死区 + 安全层”后的指令推进内部模型
         next_state = self._model.predict(
             current_state, (self._a_cmd, self._delta_cmd)
