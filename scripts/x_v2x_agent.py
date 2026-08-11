@@ -389,7 +389,8 @@ class Xagent(BasicAgent):
     # 行人避撞修复 (2026-08-11): 风险场几何构造 + MPC 外层安全监护
     # ====================================================================
     def _build_ped_field_inputs(self, current_state, cur_v, pedes, pedes_infer,
-                                pede_stds, pede_modes):
+                                pede_stds, pede_modes, cx=None, cy=None,
+                                ind_nearest=None):
         """构造行人 v2 风险场输入: CPA 排序取前 K=4, 轨迹沿运动方向前移。
 
         前移量 δ=(τ_f-τ_b)/2·v̄ (τ_f=1.2s, τ_b=0.3s, v̄=min(v,3)), 使椭圆在行人
@@ -409,6 +410,16 @@ class Xagent(BasicAgent):
         ego_p = np.array([current_state[0], current_state[1]], dtype=float)
         ego_v = cur_v * np.array([np.cos(current_state[2]), np.sin(current_state[2])])
 
+        # v2.6: 参考线局部窗口, 用于行人-路径横向距离过滤
+        ref_x = ref_y = None
+        if cx is not None and ind_nearest is not None:
+            i0 = max(int(ind_nearest) - 20, 0)
+            i1 = min(int(ind_nearest) + 220, len(cx) - 1)
+            if i1 > i0 + 1:
+                ref_x = np.asarray(cx[i0:i1 + 1], dtype=float)
+                ref_y = np.asarray(cy[i0:i1 + 1], dtype=float)
+        last_sel = getattr(self, '_ped_last_sel', [])
+
         cands = []
         for j in range(len(pedes)):
             traj = np.asarray(pedes_infer[j], dtype=float).copy()
@@ -416,6 +427,17 @@ class Xagent(BasicAgent):
                 continue
             v_j = (traj[1, :2] - traj[0, :2]) / self._dt
             speed = float(np.hypot(v_j[0], v_j[1]))
+            # v2.6: 路径旁 2.2m 外的"静止 或 横向正在远离"行人不进求解器 —
+            # 人行道站立者/已绕过正在离开者的全向侧推会在车道内推车(画龙激励源);
+            # 横穿接近中的行人 (lat 减小) 始终保留, 避让能力不受影响
+            if ref_x is not None:
+                lat_now = float(np.min(np.hypot(ref_x - pedes[j][0],
+                                                ref_y - pedes[j][1])))
+                if lat_now > 2.2:
+                    lat_end = float(np.min(np.hypot(ref_x - traj[-1, 0],
+                                                    ref_y - traj[-1, 1])))
+                    if speed < 0.2 or lat_end >= lat_now - 0.1:
+                        continue
             v_bar = min(speed, 3.0)
             degraded = (j < len(pede_modes) and pede_modes[j] == 1)
             sigma = float(pede_stds[j]) if j < len(pede_stds) else 0.21
@@ -426,6 +448,12 @@ class Xagent(BasicAgent):
                                   0.0, 3.5))
             d_cpa = float(np.hypot(*(r + t_cpa * v_rel)))
             score = float(np.exp(-t_cpa / 1.5) / (d_cpa + 0.5))
+            # v2.6: 粘滞选择 — 靠近上一拍入选位置的候选加分, 抑制 top-K
+            # 逐拍换手造成的代价面跳变 (GPT 方案"槽位保持"的轻量实现)
+            for (lx, ly) in last_sel:
+                if np.hypot(pedes[j][0] - lx, pedes[j][1] - ly) < 1.0:
+                    score *= 1.3
+                    break
             # -- 前移 + 半轴 --
             if speed > 0.2 and not degraded:
                 e_par = v_j / speed
@@ -437,10 +465,12 @@ class Xagent(BasicAgent):
             else:
                 A_j = R_BASE + KAPPA * sigma
             b_j = R_BASE + KAPPA * sigma
-            cands.append((score, traj, (A_j, b_j)))
+            cands.append((score, j, traj, (A_j, b_j)))
         cands.sort(key=lambda c: -c[0])
         cands = cands[:K_MAX]
-        return [c[1] for c in cands], [c[2] for c in cands]
+        self._ped_last_sel = [
+            (float(pedes[c[1]][0]), float(pedes[c[1]][1])) for c in cands]
+        return [c[2] for c in cands], [c[3] for c in cands]
 
     def _ped_safety_guard(self, current_state, cur_v, cx, cy, cyaw, ind_nearest,
                           pedes, pedes_infer, pede_modes):
@@ -1358,7 +1388,12 @@ class Xagent(BasicAgent):
             apf_obs += 0.5 * self._model.soft_obs_apf(obs_opp, ref_traj)
         if len(obs_cross) > 0:
             apf_obs += 0.5 * self._model.soft_obs_apf(obs_cross, ref_traj)
-        apf_pede += self._model.soft_obs_apf(pedes, ref_traj, pede=True)
+        # v2.6: 门控口径回归旧 10m 半径 — 20m 感知下 apf_pede 常年非零, 会把
+        # no_front_threat/danger 滤波分支长期锁在激进档, 放行转向抖动 (画龙主因)
+        pedes_gate = [p for p in pedes
+                      if np.hypot(p[0] - current_state[0],
+                                  p[1] - current_state[1]) <= 10.0]
+        apf_pede += self._model.soft_obs_apf(pedes_gate, ref_traj, pede=True)
 
         # ========== 4.5 椭圆硬约束兜底 ==========
         front_like = obs_long_infer + obs_opp_infer + obs_cross_infer
@@ -1459,7 +1494,8 @@ class Xagent(BasicAgent):
                 # v2 (2026-08-11): CPA 前 K=4 + 前移椭圆 + 长尾核;
                 # σ 已膨胀进椭圆半轴, 不再乘 600×方差 ratio
                 ped_trajs, ped_axes = self._build_ped_field_inputs(
-                    current_state, cur_v, pedes, pedes_infer, pede_stds, pede_modes)
+                    current_state, cur_v, pedes, pedes_infer, pede_stds, pede_modes,
+                    cx, cy, ind_nearest)
                 if len(ped_trajs) > 0:
                     self._model.solver_add_soft_obs(
                         ped_trajs, ratio=1.0, carla=True, pede=True, ped_axes=ped_axes)
