@@ -478,26 +478,16 @@ class Xagent(BasicAgent):
                     if traj.shape[0] < 2:
                         continue
                     v_j = (traj[1, :2] - traj[0, :2]) / self._dt
-                    ped_speed = float(np.hypot(v_j[0], v_j[1]))
                     px = pedes[j][0] + v_j[0] * taus
                     py = pedes[j][1] + v_j[1] * taus
-                    # v2.1: σ 封顶 0.5 + 乘子 3.03->1.5。原参数 τ=3s 处横向
-                    # 半宽达 4.5m, 人行道上的静止行人也被膨胀进走廊, 导致
-                    # 远距离刹停等人 (监护只兜真挡路的, 侧向让开归 MPC 场)
-                    sig = np.minimum(0.15 + 0.25 * taus, 0.5)
+                    sig = 0.15 + 0.25 * taus
                     if j < len(pede_modes) and pede_modes[j] == 1:
-                        sig = np.minimum(sig * 2.0, 1.0)
+                        sig = sig * 2.0
                     dxp, dyp = px - ex, py - ey
                     ds = ct * dxp + st * dyp
                     dn = -st * dxp + ct * dyp
-                    if ped_speed < 0.2:
-                        # 静止行人: 无膨胀静态带宽 (B_n≈1.6m), 站在扫掠宽度
-                        # 外不触发监护 -> 车减速绕过而不是停车等人
-                        B_s = half_L + 0.35 + 0.40
-                        B_n = half_W + 0.35 + 0.25
-                    else:
-                        B_s = half_L + 0.35 + 0.40 + 1.5 * sig
-                        B_n = half_W + 0.35 + 0.25 + 1.5 * sig
+                    B_s = half_L + 0.35 + 0.60 + 3.03 * sig
+                    B_n = half_W + 0.35 + 0.40 + 3.03 * sig
                     hit = (np.abs(ds) <= B_s) & (np.abs(dn) <= B_n)
                     if np.any(hit):
                         k = int(np.argmax(hit))
@@ -505,8 +495,8 @@ class Xagent(BasicAgent):
                         if tau_k < ttc_corr:
                             ttc_corr = tau_k
                             d_avail = (cur_v * tau_k + float(ds[k])
-                                       - half_L - 0.35 - 1.5 * float(sig[k]))
-                            d_eff = d_avail - cur_v * 0.25 - 0.5
+                                       - half_L - 0.35 - 3.03 * float(sig[k]))
+                            d_eff = d_avail - cur_v * 0.25 - 1.0
                             a_req = cur_v ** 2 / (2.0 * max(d_eff, 0.1))
 
         # ---- 状态机: 进入去抖 2 拍 (EMERGENCY 立即), 退出滞回 0.4s ----
@@ -533,7 +523,7 @@ class Xagent(BasicAgent):
             self._ped_guard_pending = 0
         if want == 'NORMAL' and cur != 'NORMAL':
             self._ped_guard_clear += 1
-            if self._ped_guard_clear >= 5:
+            if self._ped_guard_clear >= 8:
                 new = 'NORMAL'
                 self._ped_guard_clear = 0
         elif want != 'NORMAL':
@@ -545,10 +535,6 @@ class Xagent(BasicAgent):
         self._ped_guard_acc = None
         if new != 'NORMAL' and np.isfinite(d_eff):
             v_cap = float(np.sqrt(max(2.0 * 3.0 * max(d_eff, 0.0), 0.0)))
-            if new == 'CAUTION':
-                # v2.1: CAUTION 只减速不停车, 2.0 m/s 下限保持接近;
-                # 真威胁靠近后由 BRAKE/EMERGENCY 决定是否停
-                v_cap = max(v_cap, 2.0)
         if new == 'BRAKE' and np.isfinite(a_req):
             self._ped_guard_acc = -float(min(max(a_req, 2.5), 4.5))
         elif new == 'EMERGENCY':
