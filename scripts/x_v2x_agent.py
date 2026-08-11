@@ -1473,6 +1473,8 @@ class Xagent(BasicAgent):
                     obca_active_mask[m] = True
 
         # ========== 5. 原始求解流程（每步重编译，轻量高效） ==========
+        # 首步时间一致性锚定: 把上一拍实际执行的 (a, δ) 交给求解器 (2026-08-11)
+        self._model.u_prev_exec = (self._a_cmd, self._delta_cmd)
         self._model.solver_add_cost()
 
         # 车道线 APF

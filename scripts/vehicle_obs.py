@@ -46,6 +46,10 @@ def _env_float(name, default):
 _PED_W_TAIL = _env_float('PED_W_TAIL', 55.0)    # 长尾引导项 (1+q)^-2
 _PED_W_CORE = _env_float('PED_W_CORE', 400.0)   # 近距核心项 (1+q)^-6
 
+# ==== MPC 首步时间一致性锚定权重 (2026-08-11, 治求解层跨拍跳解) ====
+_CTRL_W_DACC0   = _env_float('CTRL_W_DACC0', 30.0)
+_CTRL_W_DSTEER0 = _env_float('CTRL_W_DSTEER0', 400.0)
+
 
 # estimated parameters by SLSQP with steering transformation of 70 deg
 
@@ -362,6 +366,17 @@ class Vehicle:
 
         # initial equal state condition
         self.g.append(self.X[:, 0] - self.P[:, 0])
+
+        # ==== 首步时间一致性软锚定 (2026-08-11) ====
+        # 每拍全量重建的非凸 NLP 在密集障碍段存在左/右绕多局部解, U[:,0]
+        # 对上一拍执行值无任何约束时解会逐拍跳变 (插桩实测 raw_delta 3.4s
+        # 内 39 个拐点)。软锚定让求解器权衡"翻解收益 vs 一致性代价",
+        # 优于求解后再低通硬掰; 权重低于避撞场量级, 不牺牲避障能力。
+        u_prev = getattr(self, 'u_prev_exec', None)
+        if u_prev is not None:
+            self.obj = self.obj \
+                + _CTRL_W_DACC0 * (self.U[0, 0] - float(u_prev[0])) ** 2 \
+                + _CTRL_W_DSTEER0 * (self.U[1, 0] - float(u_prev[1])) ** 2
 
         # add objective function and equality constraints
         for i in range(self.horizon):
