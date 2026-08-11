@@ -26,11 +26,6 @@ import math
 import carla
 import cv2
 import joblib
-
-# ==== 行人预测开关 (2026-08-11 行人避撞修复) ====
-# 1 = 匀速外推 CV (默认, 车辆 GPR 预测行人系统性失真)
-# 0 = 回退原车辆 GPR 路径 (A/B 对照)
-_PED_PRED_CV = os.environ.get('PED_PRED_CV', '1') not in ('0', 'false', 'False')
 # from carla_birdeye_view import (BirdViewCropType, BirdViewProducer,
 #                                 PixelDimensions)
 from others_agent import OthersAgent
@@ -617,22 +612,11 @@ class Env:
         
         return np.array(inferred_states)
 
-    def get_pedes(self, cur_state=None, dist_threshold=20):
-        # ================================================================
-        # 行人感知与预测 (2026-08-11 行人避撞修复)
-        #   - 感知半径 10m -> 20m: 8.3m/s 下舒适刹停(3m/s^2)需 11.5m,
-        #     10m 半径使行人进入视野即无平滑减速空间
-        #   - PED_PRED_CV=1(默认): 匀速外推替代车辆 GPR
-        #     (gpr.pkl 由车辆轨迹训练, 预测行人系统性失真 -> 势场中心错位)
-        # ================================================================
+    def get_pedes(self, cur_state=None, dist_threshold=10):
         pedes = []
         heights = []
         pedes_infer = []
-        pede_stds = []  # 预测不确定性 (CV: 解析方差 / GPR: IGPR 标准差)
-        pede_modes = []  # 0=正常 1=降级(航向突变/超速, 方差已加倍)
-        if not hasattr(self, '_ped_vel_ema'):
-            self._ped_vel_ema = {}    # actor.id -> EMA 平滑速度 (右手系)
-            self._ped_head_hist = {}  # actor.id -> [(t, heading), ...] 近 0.35s
+        pede_stds = []  # IGPR 预测标准差
         # add the current states of the pedestrians to the state queue for trajectory prediction:
         for sv in self.pedestrian_list:
             sv_state = sv.get_transform()
@@ -658,46 +642,6 @@ class Env:
                 dist = np.sqrt((location.x-cur_state[0])**2 + (-location.y-cur_state[1])**2)
                 if dist < dist_threshold:
                     pedes.append([location.x, -location.y, -phi])
-                    if _PED_PRED_CV:
-                        # ==== CV 匀速外推路径 (默认) ====
-                        vel = pede.get_velocity()
-                        v_now = np.array([vel.x, -vel.y])  # 右手系
-                        v_prev = self._ped_vel_ema.get(pede.id)
-                        v_ema = (0.3 * v_now + 0.7 * v_prev) if v_prev is not None else v_now
-                        self._ped_vel_ema[pede.id] = v_ema
-                        speed = float(np.hypot(v_ema[0], v_ema[1]))
-                        # -- 降级判据: 0.3s 内航向突变 >45 度, 或速度 >4 m/s --
-                        degraded = speed > 4.0
-                        hist = self._ped_head_hist.setdefault(pede.id, [])
-                        if speed > 0.2:
-                            heading = float(np.arctan2(v_ema[1], v_ema[0]))
-                            for (t_old, h_old) in hist:
-                                if self.time - t_old <= 0.3:
-                                    dh = abs(math.atan2(math.sin(heading - h_old),
-                                                        math.cos(heading - h_old)))
-                                    if dh > np.deg2rad(45.0):
-                                        degraded = True
-                                        break
-                            hist.append((self.time, heading))
-                            yaw_motion = heading
-                        else:
-                            yaw_motion = -phi
-                        # 只保留近 0.35s 的航向历史
-                        self._ped_head_hist[pede.id] = [
-                            (t, h) for (t, h) in hist if self.time - t <= 0.35]
-                        # -- 匀速外推 10 步 x 0.05s (与 MPC 步一一对应) --
-                        p0x, p0y = location.x, -location.y
-                        traj = np.array([
-                            [p0x + v_ema[0] * 0.05 * (k + 1),
-                             p0y + v_ema[1] * 0.05 * (k + 1),
-                             yaw_motion] for k in range(10)])
-                        pedes_infer.append(traj)
-                        # 解析方差: sigma(t)=0.15+0.25t, 取时域中点 t=0.25s; 降级加倍
-                        sigma_mid = 0.15 + 0.25 * 0.25
-                        pede_stds.append(sigma_mid * (2.0 if degraded else 1.0))
-                        pede_modes.append(1 if degraded else 0)
-                        heights.append(location.z)
-                        continue
                     pede_hist=self.pedestrian_queue_list[self.pedestrian_list.index(pede)].queue
                     pede_hist = np.array(pede_hist)
                     # if the queue is not full, fill it with the oldest state from the queue
@@ -733,9 +677,8 @@ class Env:
                     pedes_infer.append(pede_infer_i)
                     # 取所有维度均值标准差作为不确定性指标
                     pede_stds.append(float(np.mean(np.abs(pede_std_i))))
-                    pede_modes.append(0)
                     heights.append(location.z)
-        return pedes, heights, pedes_infer, pede_stds, pede_modes
+        return pedes, heights, pedes_infer, pede_stds
 
     def get_obs(self, cur_state=None, dist_threshold=15):
         obs = []

@@ -52,11 +52,6 @@ def _env_float(name, default):
         return float(default)
 
 
-# ==== 行人避撞修复开关 (2026-08-11, 默认开; 置 0 回退旧行为做 A/B) ====
-_PED_FIELD_V2 = _env_flag('PED_FIELD_V2', True)   # 前移椭圆 + 长尾核风险场
-_PED_GUARD_ON = _env_flag('PED_GUARD', True)      # MPC 外层行人安全监护
-
-
 class RoadOption(Enum):
     """
     RoadOption represents the possible topological configurations when moving
@@ -382,168 +377,6 @@ class Xagent(BasicAgent):
         wp_loc = self.rotate(wp_loc[0], wp_loc[1], np.deg2rad(wp_yaw))
         ev_loc = self.rotate(ev_loc[0], ev_loc[1], np.deg2rad(wp_yaw))
         return np.abs(wp_loc[1] - ev_loc[1])
-
-    # ====================================================================
-    # 行人避撞修复 (2026-08-11): 风险场几何构造 + MPC 外层安全监护
-    # ====================================================================
-    def _build_ped_field_inputs(self, current_state, cur_v, pedes, pedes_infer,
-                                pede_stds, pede_modes):
-        """构造行人 v2 风险场输入: CPA 排序取前 K=4, 轨迹沿运动方向前移。
-
-        前移量 δ=(τ_f-τ_b)/2·v̄ (τ_f=1.2s, τ_b=0.3s, v̄=min(v,3)), 使椭圆在行人
-        前进方向覆盖 a⁺、后方 a⁻, 无需非光滑分支 (Chen & Zhang T-IE 2021 非对称
-        安全区的光滑实现)。半轴 A=r_c+r_p+d_s+(τ_f+τ_b)/2·v̄+κσ, b=r_c+r_p+d_s+κσ
-        (r_c=1.68 ego 圆半径吸收项, r_p=0.35, d_s=0.40, κ=2.58)。
-        静止 (v<0.2) 或降级行人: δ=0, A 退化为 b (各向同性)。
-        返回 (trajs_shifted, ped_axes)。
-        """
-        K_MAX = 4
-        TAU_F = _env_float('PED_TAU_F', 1.2)
-        TAU_B = 0.3
-        R_BASE = 1.68 + 0.35 + 0.40
-        KAPPA = 2.58
-        ego_p = np.array([current_state[0], current_state[1]], dtype=float)
-        ego_v = cur_v * np.array([np.cos(current_state[2]), np.sin(current_state[2])])
-
-        cands = []
-        for j in range(len(pedes)):
-            traj = np.asarray(pedes_infer[j], dtype=float).copy()
-            if traj.shape[0] < 2:
-                continue
-            v_j = (traj[1, :2] - traj[0, :2]) / self._dt
-            speed = float(np.hypot(v_j[0], v_j[1]))
-            v_bar = min(speed, 3.0)
-            degraded = (j < len(pede_modes) and pede_modes[j] == 1)
-            sigma = float(pede_stds[j]) if j < len(pede_stds) else 0.21
-            # -- CPA 排序分: S=exp(-t_cpa/1.5)/(d_cpa+0.5) --
-            r = np.array(pedes[j][:2], dtype=float) - ego_p
-            v_rel = v_j - ego_v
-            t_cpa = float(np.clip(-np.dot(r, v_rel) / (np.dot(v_rel, v_rel) + 1e-3),
-                                  0.0, 3.5))
-            d_cpa = float(np.hypot(*(r + t_cpa * v_rel)))
-            score = float(np.exp(-t_cpa / 1.5) / (d_cpa + 0.5))
-            # -- 前移 + 半轴 --
-            if speed > 0.2 and not degraded:
-                e_par = v_j / speed
-                delta = 0.5 * (TAU_F - TAU_B) * v_bar
-                A_j = R_BASE + 0.5 * (TAU_F + TAU_B) * v_bar + KAPPA * sigma
-                traj[:, 0] += delta * e_par[0]
-                traj[:, 1] += delta * e_par[1]
-                traj[:, 2] = float(np.arctan2(e_par[1], e_par[0]))
-            else:
-                A_j = R_BASE + KAPPA * sigma
-            b_j = R_BASE + KAPPA * sigma
-            cands.append((score, traj, (A_j, b_j)))
-        cands.sort(key=lambda c: -c[0])
-        cands = cands[:K_MAX]
-        return [c[1] for c in cands], [c[2] for c in cands]
-
-    def _ped_safety_guard(self, current_state, cur_v, cx, cy, cyaw, ind_nearest,
-                          pedes, pedes_infer, pede_modes):
-        """MPC 外层行人安全监护: 3s 时空走廊扫描 + 速度帽/制动状态机。
-
-        NMPC 时域仅 0.5s (8.3m/s 下 4.2m), 舒适刹停需 11.5m, 停车安全责任必须
-        由外层承担 (软 APF + 硬兜底分层, Pek & Althoff T-RO 2020)。仅纵向干预,
-        转向仍归 NMPC。返回速度帽 v_cap (无冲突时 None); 制动覆盖指令写入
-        self._ped_guard_acc, 由 run_step 尾部在低通滤波后应用 (绕过迟滞)。
-        """
-        if not hasattr(self, '_ped_guard_state'):
-            self._ped_guard_state = 'NORMAL'
-            self._ped_guard_pending = 0
-            self._ped_guard_clear = 0
-            self._ped_guard_acc = None
-
-        LEVELS = {'NORMAL': 0, 'CAUTION': 1, 'BRAKE': 2, 'EMERGENCY': 3}
-        half_L = float(self._vehicle.bounding_box.extent.x)
-        half_W = float(self._vehicle.bounding_box.extent.y)
-
-        # ---- 3s 时空走廊扫描 (参考线 Frenet 投影, 3.03σ 占用膨胀) ----
-        ttc_corr, d_eff, a_req = np.inf, np.inf, 0.0
-        if _PED_GUARD_ON and len(pedes) > 0:
-            i0 = int(ind_nearest)
-            i1 = min(i0 + 220, len(cx) - 1)
-            if i1 > i0 + 1:
-                seg = np.hypot(np.diff(np.asarray(cx[i0:i1 + 1])),
-                               np.diff(np.asarray(cy[i0:i1 + 1])))
-                s_arr = np.concatenate([[0.0], np.cumsum(seg)])
-                taus = np.arange(0.0, 3.01, 0.1)
-                s_ego = np.minimum(cur_v * taus, s_arr[-1])
-                ex = np.interp(s_ego, s_arr, np.asarray(cx[i0:i1 + 1]))
-                ey = np.interp(s_ego, s_arr, np.asarray(cy[i0:i1 + 1]))
-                idxs = np.clip(np.searchsorted(s_arr, s_ego), 0, i1 - i0)
-                psi = np.asarray(cyaw[i0:i1 + 1])[idxs]
-                ct, st = np.cos(psi), np.sin(psi)
-                for j in range(len(pedes)):
-                    traj = np.asarray(pedes_infer[j], dtype=float)
-                    if traj.shape[0] < 2:
-                        continue
-                    v_j = (traj[1, :2] - traj[0, :2]) / self._dt
-                    px = pedes[j][0] + v_j[0] * taus
-                    py = pedes[j][1] + v_j[1] * taus
-                    sig = 0.15 + 0.25 * taus
-                    if j < len(pede_modes) and pede_modes[j] == 1:
-                        sig = sig * 2.0
-                    dxp, dyp = px - ex, py - ey
-                    ds = ct * dxp + st * dyp
-                    dn = -st * dxp + ct * dyp
-                    B_s = half_L + 0.35 + 0.60 + 3.03 * sig
-                    B_n = half_W + 0.35 + 0.40 + 3.03 * sig
-                    hit = (np.abs(ds) <= B_s) & (np.abs(dn) <= B_n)
-                    if np.any(hit):
-                        k = int(np.argmax(hit))
-                        tau_k = float(taus[k])
-                        if tau_k < ttc_corr:
-                            ttc_corr = tau_k
-                            d_avail = (cur_v * tau_k + float(ds[k])
-                                       - half_L - 0.35 - 3.03 * float(sig[k]))
-                            d_eff = d_avail - cur_v * 0.25 - 1.0
-                            a_req = cur_v ** 2 / (2.0 * max(d_eff, 0.1))
-
-        # ---- 状态机: 进入去抖 2 拍 (EMERGENCY 立即), 退出滞回 0.4s ----
-        if ttc_corr <= 1.2 or a_req >= 4.5 or d_eff <= 0.0:
-            want = 'EMERGENCY'
-        elif ttc_corr <= 2.0 or a_req >= 2.5:
-            want = 'BRAKE'
-        elif ttc_corr <= 3.0 or a_req >= 1.0:
-            want = 'CAUTION'
-        else:
-            want = 'NORMAL'
-
-        cur = self._ped_guard_state
-        new = cur
-        if want == 'EMERGENCY':
-            new = 'EMERGENCY'
-            self._ped_guard_pending = 0
-        elif LEVELS[want] > LEVELS[cur]:
-            self._ped_guard_pending += 1
-            if self._ped_guard_pending >= 2:
-                new = want
-                self._ped_guard_pending = 0
-        else:
-            self._ped_guard_pending = 0
-        if want == 'NORMAL' and cur != 'NORMAL':
-            self._ped_guard_clear += 1
-            if self._ped_guard_clear >= 8:
-                new = 'NORMAL'
-                self._ped_guard_clear = 0
-        elif want != 'NORMAL':
-            self._ped_guard_clear = 0
-        self._ped_guard_state = new
-
-        # ---- 动作: CAUTION+ 限速帽; BRAKE/EMERGENCY 附加制动覆盖 ----
-        v_cap = None
-        self._ped_guard_acc = None
-        if new != 'NORMAL' and np.isfinite(d_eff):
-            v_cap = float(np.sqrt(max(2.0 * 3.0 * max(d_eff, 0.0), 0.0)))
-        if new == 'BRAKE' and np.isfinite(a_req):
-            self._ped_guard_acc = -float(min(max(a_req, 2.5), 4.5))
-        elif new == 'EMERGENCY':
-            a_r = a_req if np.isfinite(a_req) else 6.0
-            self._ped_guard_acc = -float(min(max(a_r, 4.5), 6.0))
-        if _env_flag('PED_GUARD_DEBUG') and new != 'NORMAL':
-            print(f"[PedGuard] state={new} ttc={ttc_corr:.2f} d_eff={d_eff:.2f} "
-                  f"a_req={a_req:.2f} v_cap={v_cap} a_guard={self._ped_guard_acc}")
-        return v_cap
 
     def run_step(self, lv=None):
         self._simu_time += self._dt
@@ -1095,16 +928,8 @@ class Xagent(BasicAgent):
                     )
 
         # === 行人感知 + debug 可视化 ===
-        pedes, pede_heights, pedes_infer, pede_stds, pede_modes = \
-            self._env.get_pedes(current_state)
+        pedes, pede_heights, pedes_infer, pede_stds = self._env.get_pedes(current_state)
         temp_pedes = copy.copy(pedes)
-
-        # ==== 行人安全监护 (2026-08-11 修复): 3s 走廊扫描 + 速度帽 ====
-        ped_guard_vcap = self._ped_safety_guard(
-            current_state, cur_v, cx, cy, cyaw, ind_nearest,
-            pedes, pedes_infer, pede_modes)
-        if ped_guard_vcap is not None:
-            ref_traj[3, :] = np.minimum(ref_traj[3, :], ped_guard_vcap)
 
         if len(temp_pedes) > 0:
             for i in range(len(temp_pedes)):
@@ -1401,19 +1226,10 @@ class Xagent(BasicAgent):
             else:
                 self._model.solver_add_soft_obs(obs_cross_infer, ratio=obs_ratio_cross * sigma_scale, carla=True)
         if len(pedes) > 0:
-            if _PED_FIELD_V2:
-                # v2 (2026-08-11): CPA 前 K=4 + 前移椭圆 + 长尾核;
-                # σ 已膨胀进椭圆半轴, 不再乘 600×方差 ratio
-                ped_trajs, ped_axes = self._build_ped_field_inputs(
-                    current_state, cur_v, pedes, pedes_infer, pede_stds, pede_modes)
-                if len(ped_trajs) > 0:
-                    self._model.solver_add_soft_obs(
-                        ped_trajs, ratio=1.0, carla=True, pede=True, ped_axes=ped_axes)
-            else:
-                pede_sigma_mean = float(np.mean(pede_stds)) if len(pede_stds) > 0 else 0.0
-                pede_sigma_scale = min(1.0 + k_sigma * pede_sigma_mean, sigma_scale_max)
-                # 行人不进 OBCA, 整体走原 ratio
-                self._model.solver_add_soft_obs(pedes_infer, ratio=600 * pede_sigma_scale, carla=True, pede=True)
+            pede_sigma_mean = float(np.mean(pede_stds)) if len(pede_stds) > 0 else 0.0
+            pede_sigma_scale = min(1.0 + k_sigma * pede_sigma_mean, sigma_scale_max)
+            # 行人不进 OBCA, 整体走原 ratio
+            self._model.solver_add_soft_obs(pedes_infer, ratio=600 * pede_sigma_scale, carla=True, pede=True)
 
         # TTC APF
         if lv is not None and not is_roundabout_like:
@@ -1506,17 +1322,7 @@ class Xagent(BasicAgent):
             current_state, self._a_cmd, self._delta_cmd, emergency=danger
         )
 
-        # ==== 行人监护制动 (2026-08-11): BRAKE/EMERGENCY 覆盖并放宽 -3.0 钳位 ====
-        # 原 -3.0 舒适钳位物理上禁止紧急制动 (根因⑥); 监护激活时放宽到模型下界 -6.0,
-        # 且在低通滤波之后应用, 绕过 τ_a 迟滞
-        a_floor = -3.0
-        _g_acc = getattr(self, '_ped_guard_acc', None)
-        if _g_acc is not None:
-            if not np.isfinite(safe_acc):
-                safe_acc = _g_acc
-            safe_acc = min(safe_acc, _g_acc)
-            a_floor = -6.0
-        self._a_cmd = float(np.clip(safe_acc, a_floor, 3.0))
+        self._a_cmd = float(np.clip(safe_acc, -3.0, 3.0))
         self._delta_cmd = float(np.clip(safe_delta, -0.7, 0.7))
 
         # 用“滤波 + 死区 + 安全层”后的指令推进内部模型
