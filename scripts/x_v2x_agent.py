@@ -52,6 +52,9 @@ def _env_float(name, default):
         return float(default)
 
 
+# ==== B-spline 参考线横向位移上限 (2026-08-11, 治出弯转向极限环) ====
+_BS_DEV_CAP = _env_float('BS_DEV_CAP', 0.35)
+
 # ==== 行人避撞修复开关 (2026-08-11) ====
 _PED_FIELD_V2 = _env_flag('PED_FIELD_V2', True)   # 前移椭圆 + 长尾核风险场 (默认开)
 # 监护默认关 (v2.5): 用户实测纯势场即可稳定绕行, 监护 EMERGENCY 存在
@@ -740,6 +743,15 @@ class Xagent(BasicAgent):
                         )
                     else:
                         alpha_bs = self._alpha_bs_default
+                    # ==== 参考线横向位移上限 (2026-08-11) ====
+                    # B-spline 切角会延伸到出弯直道, 而直道曲率低 adaptive α 反而
+                    # 高(0.5), 实测混合参考线离车道中心 0.85m, 与车道保持势场
+                    # 拔河成 ~2s 转向极限环。逐点钳制 α·|dev| ≤ BS_DEV_CAP,
+                    # 弯内正常切角 (α≈0.15, 位移≈0.3m) 不受影响。
+                    dev = np.hypot(smooth_path[:, 0] - cx0,
+                                   smooth_path[:, 1] - cy0)
+                    alpha_bs = np.minimum(
+                        alpha_bs, _BS_DEV_CAP / np.maximum(dev, 1e-6))
                     cx = (1.0 - alpha_bs) * cx0 + alpha_bs * smooth_path[:, 0]
                     cy = (1.0 - alpha_bs) * cy0 + alpha_bs * smooth_path[:, 1]
 
