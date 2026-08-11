@@ -467,7 +467,10 @@ class Xagent(BasicAgent):
                                np.diff(np.asarray(cy[i0:i1 + 1])))
                 s_arr = np.concatenate([[0.0], np.cumsum(seg)])
                 taus = np.arange(0.0, 3.01, 0.1)
-                s_ego = np.minimum(cur_v * taus, s_arr[-1])
+                # v2.2: 扫描速度下限 1.5 m/s, 防止减速后 s_ego 塌缩导致
+                # 扫描失明 -> 冲突消失 -> 提速 -> 冲突再现的振荡
+                v_scan = max(cur_v, 1.5)
+                s_ego = np.minimum(v_scan * taus, s_arr[-1])
                 ex = np.interp(s_ego, s_arr, np.asarray(cx[i0:i1 + 1]))
                 ey = np.interp(s_ego, s_arr, np.asarray(cy[i0:i1 + 1]))
                 idxs = np.clip(np.searchsorted(s_arr, s_ego), 0, i1 - i0)
@@ -502,19 +505,29 @@ class Xagent(BasicAgent):
                     if np.any(hit):
                         k = int(np.argmax(hit))
                         tau_k = float(taus[k])
+                        # v2.2 "将让清"豁免: 移动行人若在冲突后 0.8s 内离开
+                        # 走廊带且冲突不在 1s 内 -> 绕后可通过, 不计冲突
+                        # (1s 内冲突永不豁免; 20Hz 重估 + EMERGENCY 仍兜底)
+                        if tau_k > 1.0 and ped_speed >= 0.2:
+                            out_rel = np.where(np.abs(dn[k:]) > B_n[k:])[0]
+                            if len(out_rel) > 0 and \
+                                    float(taus[k + out_rel[0]]) - tau_k <= 0.8:
+                                continue
                         if tau_k < ttc_corr:
                             ttc_corr = tau_k
-                            d_avail = (cur_v * tau_k + float(ds[k])
+                            d_avail = (v_scan * tau_k + float(ds[k])
                                        - half_L - 0.35 - 1.5 * float(sig[k]))
                             d_eff = d_avail - cur_v * 0.25 - 0.5
                             a_req = cur_v ** 2 / (2.0 * max(d_eff, 0.1))
 
         # ---- 状态机: 进入去抖 2 拍 (EMERGENCY 立即), 退出滞回 0.4s ----
-        if ttc_corr <= 1.2 or a_req >= 4.5 or d_eff <= 0.0:
+        # v2.2: 监护降级为纯兜底 — CAUTION 需 TTC 与减速需求同时满足(且),
+        # BRAKE/EMERGENCY 阈值收紧到真正无路可退时才接管, 常规避让归 MPC 场
+        if ttc_corr <= 1.0 or a_req >= 5.0 or d_eff <= 0.0:
             want = 'EMERGENCY'
-        elif ttc_corr <= 2.0 or a_req >= 2.5:
+        elif ttc_corr <= 1.5 or a_req >= 3.5:
             want = 'BRAKE'
-        elif ttc_corr <= 3.0 or a_req >= 1.0:
+        elif ttc_corr <= 2.0 and a_req >= 1.5:
             want = 'CAUTION'
         else:
             want = 'NORMAL'
@@ -546,9 +559,9 @@ class Xagent(BasicAgent):
         if new != 'NORMAL' and np.isfinite(d_eff):
             v_cap = float(np.sqrt(max(2.0 * 3.0 * max(d_eff, 0.0), 0.0)))
             if new == 'CAUTION':
-                # v2.1: CAUTION 只减速不停车, 2.0 m/s 下限保持接近;
-                # 真威胁靠近后由 BRAKE/EMERGENCY 决定是否停
-                v_cap = max(v_cap, 2.0)
+                # v2.2: CAUTION 只轻减速 (下限 4.0 m/s), 不进入爬行;
+                # 真威胁由 BRAKE/EMERGENCY 接管
+                v_cap = max(v_cap, 4.0)
         if new == 'BRAKE' and np.isfinite(a_req):
             self._ped_guard_acc = -float(min(max(a_req, 2.5), 4.5))
         elif new == 'EMERGENCY':
