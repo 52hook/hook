@@ -422,6 +422,8 @@ class Xagent(BasicAgent):
                 ref_x = np.asarray(cx[i0:i1 + 1], dtype=float)
                 ref_y = np.asarray(cy[i0:i1 + 1], dtype=float)
         last_sel = getattr(self, '_ped_last_sel', [])
+        cyaw_e = float(np.cos(current_state[2]))
+        syaw_e = float(np.sin(current_state[2]))
 
         cands = []
         for j in range(len(pedes)):
@@ -430,6 +432,15 @@ class Xagent(BasicAgent):
                 continue
             v_j = (traj[1, :2] - traj[0, :2]) / self._dt
             speed = float(np.hypot(v_j[0], v_j[1]))
+            # v2.7: 已越过的行人退出势场 — 车尾后 1m 且预测期内不回到前方。
+            # 日志证据: 转向蛇形窗与 apf_pede 峰值共现(apf_obs=0), 后方行人
+            # 场把车推回→回摆过头→再蛇形; 后方场无避撞价值只有激励
+            relx_now = (cyaw_e * (pedes[j][0] - ego_p[0])
+                        + syaw_e * (pedes[j][1] - ego_p[1]))
+            relx_end = (cyaw_e * (traj[-1, 0] - ego_p[0])
+                        + syaw_e * (traj[-1, 1] - ego_p[1]))
+            if relx_now < -1.0 and relx_end < -0.5:
+                continue
             # v2.6: 路径旁 2.2m 外的"静止 或 横向正在远离"行人不进求解器 —
             # 人行道站立者/已绕过正在离开者的全向侧推会在车道内推车(画龙激励源);
             # 横穿接近中的行人 (lat 减小) 始终保留, 避让能力不受影响
