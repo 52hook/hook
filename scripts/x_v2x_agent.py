@@ -400,8 +400,10 @@ class Xagent(BasicAgent):
         K_MAX = 4
         TAU_F = _env_float('PED_TAU_F', 1.2)
         TAU_B = 0.3
-        R_BASE = 1.68 + 0.35 + 0.40
-        KAPPA = 2.58
+        # v2.3: 余量 0.40->0.30, κ 2.58->2.0 (横向半轴 ≈2.98->2.73m),
+        # 用户实测绕行幅度略大, 收敛之
+        R_BASE = 1.68 + 0.35 + 0.30
+        KAPPA = 2.0
         ego_p = np.array([current_state[0], current_state[1]], dtype=float)
         ego_v = cur_v * np.array([np.cos(current_state[2]), np.sin(current_state[2])])
 
@@ -453,7 +455,7 @@ class Xagent(BasicAgent):
             self._ped_guard_clear = 0
             self._ped_guard_acc = None
 
-        LEVELS = {'NORMAL': 0, 'CAUTION': 1, 'BRAKE': 2, 'EMERGENCY': 3}
+        LEVELS = {'NORMAL': 0, 'SLOW': 1, 'EMERGENCY': 2}
         half_L = float(self._vehicle.bounding_box.extent.x)
         half_W = float(self._vehicle.bounding_box.extent.y)
 
@@ -520,15 +522,15 @@ class Xagent(BasicAgent):
                             d_eff = d_avail - cur_v * 0.25 - 0.5
                             a_req = cur_v ** 2 / (2.0 * max(d_eff, 0.1))
 
-        # ---- 状态机: 进入去抖 2 拍 (EMERGENCY 立即), 退出滞回 0.4s ----
-        # v2.2: 监护降级为纯兜底 — CAUTION 需 TTC 与减速需求同时满足(且),
-        # BRAKE/EMERGENCY 阈值收紧到真正无路可退时才接管, 常规避让归 MPC 场
-        if ttc_corr <= 1.0 or a_req >= 5.0 or d_eff <= 0.0:
+        # ---- 状态机 v2.3: NORMAL / SLOW / EMERGENCY ----
+        # 物理死结: 8.3m/s 下"保证可停"必须 11.5m 外开始刹 -> 任何停车剖面
+        # 都注定远停。v2.3: SLOW 只压"通过速度"(下限 3m/s), 几何绕行归势场;
+        # EMERGENCY (TTC≤1s) 是唯一停车路径 — 低速接近下刹停仅需 1-2m,
+        # 停也停在人跟前而非十米开外
+        if ttc_corr <= 1.0 or d_eff <= 0.0:
             want = 'EMERGENCY'
-        elif ttc_corr <= 1.5 or a_req >= 3.5:
-            want = 'BRAKE'
-        elif ttc_corr <= 2.0 and a_req >= 1.5:
-            want = 'CAUTION'
+        elif ttc_corr <= 2.5 and a_req >= 1.0:
+            want = 'SLOW'
         else:
             want = 'NORMAL'
 
@@ -553,18 +555,15 @@ class Xagent(BasicAgent):
             self._ped_guard_clear = 0
         self._ped_guard_state = new
 
-        # ---- 动作: CAUTION+ 限速帽; BRAKE/EMERGENCY 附加制动覆盖 ----
+        # ---- 动作 v2.3: SLOW 仅限通过速度; EMERGENCY 才停车 ----
         v_cap = None
         self._ped_guard_acc = None
-        if new != 'NORMAL' and np.isfinite(d_eff):
-            v_cap = float(np.sqrt(max(2.0 * 3.0 * max(d_eff, 0.0), 0.0)))
-            if new == 'CAUTION':
-                # v2.2: CAUTION 只轻减速 (下限 4.0 m/s), 不进入爬行;
-                # 真威胁由 BRAKE/EMERGENCY 接管
-                v_cap = max(v_cap, 4.0)
-        if new == 'BRAKE' and np.isfinite(a_req):
-            self._ped_guard_acc = -float(min(max(a_req, 2.5), 4.5))
+        if new == 'SLOW' and np.isfinite(d_eff):
+            # 通过速度帽: 舒适停车剖面但下限 3.0 m/s, 保持接近由势场绕行;
+            # 3m/s 下限保证 EMERGENCY 触发时 1-2m 内可刹停
+            v_cap = max(float(np.sqrt(max(2.0 * 3.0 * max(d_eff, 0.0), 0.0))), 3.0)
         elif new == 'EMERGENCY':
+            v_cap = 0.0
             a_r = a_req if np.isfinite(a_req) else 6.0
             self._ped_guard_acc = -float(min(max(a_r, 4.5), 6.0))
         if _env_flag('PED_GUARD_DEBUG') and new != 'NORMAL':

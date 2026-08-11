@@ -42,7 +42,8 @@ def _env_float(name, default):
 
 
 # ==== 行人 v2 长尾核权重 (2026-08-11 行人避撞修复, env 可调便于 A/B) ====
-_PED_W_TAIL = _env_float('PED_W_TAIL', 80.0)    # 长尾引导项 (1+q)^-2
+# v2.3: w_tail 80->55, 用户实测绕行方向打得略多, 减弱远场引导
+_PED_W_TAIL = _env_float('PED_W_TAIL', 55.0)    # 长尾引导项 (1+q)^-2
 _PED_W_CORE = _env_float('PED_W_CORE', 400.0)   # 近距核心项 (1+q)^-6
 
 
