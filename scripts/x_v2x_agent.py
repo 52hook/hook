@@ -52,9 +52,11 @@ def _env_float(name, default):
         return float(default)
 
 
-# ==== 行人避撞修复开关 (2026-08-11, 默认开; 置 0 回退旧行为做 A/B) ====
-_PED_FIELD_V2 = _env_flag('PED_FIELD_V2', True)   # 前移椭圆 + 长尾核风险场
-_PED_GUARD_ON = _env_flag('PED_GUARD', True)      # MPC 外层行人安全监护
+# ==== 行人避撞修复开关 (2026-08-11) ====
+_PED_FIELD_V2 = _env_flag('PED_FIELD_V2', True)   # 前移椭圆 + 长尾核风险场 (默认开)
+# 监护默认关 (v2.5): 用户实测纯势场即可稳定绕行, 监护 EMERGENCY 存在
+# "急刹杀死绕行规划 -> 冲突不消失 -> 自锁刹停"缺陷; PED_GUARD=1 可重启用
+_PED_GUARD_ON = _env_flag('PED_GUARD', False)
 
 
 class RoadOption(Enum):
