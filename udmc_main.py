@@ -158,7 +158,9 @@ else:
 env.reset(start_transform)
 
 # - Dynamic model(for MPC control)
-dynamic_model = Vehicle(actor=env.ego_vehicle, horizon=10, target_v=target_v, delta_t=simu_step, max_iter=30)
+dynamic_model = Vehicle(actor=env.ego_vehicle,
+                        horizon=int(os.environ.get('MPC_HORIZON', '10')),
+                        target_v=target_v, delta_t=simu_step, max_iter=30)
 
 # - Allocate Agent（传入消融开关）
 agent = Xagent(env, dynamic_model, dt=simu_step,

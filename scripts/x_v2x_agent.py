@@ -58,6 +58,7 @@ _BS_DEV_CAP = _env_float('BS_DEV_CAP', 0.35)
 # ==== 转向链路诊断开关 (2026-08-18, PIO 极限环判决实验, 默认全关) ====
 _CTRL_LPF_BYPASS = _env_flag('CTRL_LPF_BYPASS', False)  # 旁路环外低通+限步
 _CTRL_U00_BOUND = _env_flag('CTRL_U00_BOUND', False)    # 启用 MPC 内首步速率约束
+_REF_DEDUP_EGO = _env_flag('REF_DEDUP_EGO', False)      # 首点对(ego-wp1)纳入0.1m去重
 
 # ==== 行人避撞修复开关 (2026-08-11) ====
 _PED_FIELD_V2 = _env_flag('PED_FIELD_V2', True)   # 前移椭圆 + 长尾核风险场 (默认开)
@@ -671,7 +672,11 @@ class Xagent(BasicAgent):
             cnt = 0
 
             # --- [FIX START] 修改路点过滤逻辑 ---
-            last_loc = None # 改用记录上一个点的坐标
+            # v2 (2026-08-18, REF_DEDUP_EGO): 原 last_loc=None 使第 0 点(ego位置)
+            # 与第一个路线点从不做距离检查, ego 贴线时首两点近重合 -> 样条头部
+            # (MPC 时域所在)节点病态 -> 曲率尖峰长在车头前
+            last_loc = ([current_state[0], current_state[1]]
+                        if _REF_DEDUP_EGO else None)
             for wp in carla_wp:
                 if cnt > 30:
                     break
