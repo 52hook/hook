@@ -55,11 +55,6 @@ def _env_float(name, default):
 # ==== B-spline 参考线横向位移上限 (2026-08-11, 治出弯转向极限环) ====
 _BS_DEV_CAP = _env_float('BS_DEV_CAP', 0.35)
 
-# ==== 转向链路诊断开关 (2026-08-18, PIO 极限环判决实验, 默认全关) ====
-_CTRL_LPF_BYPASS = _env_flag('CTRL_LPF_BYPASS', False)  # 旁路环外低通+限步
-_CTRL_U00_BOUND = _env_flag('CTRL_U00_BOUND', False)    # 启用 MPC 内首步速率约束
-_REF_DEDUP_EGO = _env_flag('REF_DEDUP_EGO', False)      # 首点对(ego-wp1)纳入0.1m去重
-
 # ==== 行人避撞修复开关 (2026-08-11) ====
 _PED_FIELD_V2 = _env_flag('PED_FIELD_V2', True)   # 前移椭圆 + 长尾核风险场 (默认开)
 # 监护默认关 (v2.5): 用户实测纯势场即可稳定绕行, 监护 EMERGENCY 存在
@@ -672,11 +667,7 @@ class Xagent(BasicAgent):
             cnt = 0
 
             # --- [FIX START] 修改路点过滤逻辑 ---
-            # v2 (2026-08-18, REF_DEDUP_EGO): 原 last_loc=None 使第 0 点(ego位置)
-            # 与第一个路线点从不做距离检查, ego 贴线时首两点近重合 -> 样条头部
-            # (MPC 时域所在)节点病态 -> 曲率尖峰长在车头前
-            last_loc = ([current_state[0], current_state[1]]
-                        if _REF_DEDUP_EGO else None)
+            last_loc = None # 改用记录上一个点的坐标
             for wp in carla_wp:
                 if cnt > 30:
                     break
@@ -754,17 +745,11 @@ class Xagent(BasicAgent):
                     elif self._bspline_adaptive:
                         # Route Z: 曲率 sigmoid 逐点 α
                         # α_i = α_max − (α_max−α_min) / (1 + exp(−β·(|κ_i|−κ0)))
-                        # 方案A (2026-08-18): α 调度输入对头部免疫 — 头部曲率
-                        # 因样条穿 ego 而虚高, 会把 α 错误压低; 仅改调度输入,
-                        # 不改混合与跟踪几何
-                        ck0_sched = np.abs(ck0).copy()
-                        if len(ck0_sched) > 7:
-                            ck0_sched[:5] = ck0_sched[5]
                         alpha_bs = self._alpha_bs_max - (
                             self._alpha_bs_max - self._alpha_bs_min
                         ) / (
                             1.0 + np.exp(
-                                -self._alpha_bs_beta * (ck0_sched - self._alpha_bs_kappa0)
+                                -self._alpha_bs_beta * (np.abs(ck0) - self._alpha_bs_kappa0)
                             )
                         )
                     else:
@@ -1099,10 +1084,7 @@ class Xagent(BasicAgent):
         # === 根据前方一段路径的“最大曲率”判断：是否进入环岛 / 紧弯区域 ===
         try:
             k_abs = np.abs(ck)
-            # 方案A (2026-08-18): 前瞻窗跳过头部 5 点 — 参考线样条被迫穿过
-            # ego 位姿, 偏离时头部 1-2m 内出现真实大曲率, 构成"偏离→急弯档
-            # →猛修正→更偏离"正反馈; 跳过头部切断该反馈边
-            idx0 = min(max(int(target_ind), 0) + 5, len(k_abs) - 1)
+            idx0 = max(int(target_ind), 0)
             idx1 = min(len(k_abs), idx0 + 20)
             if idx0 < idx1:
                 k_window_max = float(np.max(k_abs[idx0:idx1]))
@@ -1491,8 +1473,6 @@ class Xagent(BasicAgent):
                     obca_active_mask[m] = True
 
         # ========== 5. 原始求解流程（每步重编译，轻量高效） ==========
-        # 首步时间一致性锚定: 把上一拍实际执行的 (a, δ) 交给求解器 (2026-08-11)
-        self._model.u_prev_exec = (self._a_cmd, self._delta_cmd)
         self._model.solver_add_cost()
 
         # 车道线 APF
@@ -1573,13 +1553,7 @@ class Xagent(BasicAgent):
                 self._model.set_ellip_backup_obstacles([])
 
         # 编译并求解
-        if _CTRL_U00_BOUND:
-            # 诊断 (2026-08-18): 激活从未启用的首步速率约束 (u00=上一拍执行值),
-            # 界宽由 CTRL_DU0_ACC/CTRL_DU0_STEER 控制 — "限幅进优化器"生产级做法
-            self._model.solver_add_bounds(
-                u00=np.array([self._a_cmd, self._delta_cmd]))
-        else:
-            self._model.solver_add_bounds()
+        self._model.solver_add_bounds()
 
         tick = time.time()
         state = self._model.solve_MPC(
@@ -1628,15 +1602,10 @@ class Xagent(BasicAgent):
             alpha_delta = 0.50
             max_delta_step = 0.15
 
-        if _CTRL_LPF_BYPASS:
-            # 诊断 (2026-08-18): 旁路环外低通+限步, MPC 原始解直出末端钳制
-            # — PIO-II 极限环假说的直接判决 (锯齿消失/变形 = 确诊环外滤波)
-            self._delta_cmd = float(raw_delta)
-        else:
-            delta_lp = alpha_delta * raw_delta + (1.0 - alpha_delta) * self._delta_cmd
-            delta_step = np.clip(delta_lp - self._delta_cmd,
-                                 -max_delta_step, max_delta_step)
-            self._delta_cmd = self._delta_cmd + delta_step
+        delta_lp = alpha_delta * raw_delta + (1.0 - alpha_delta) * self._delta_cmd
+        delta_step = np.clip(delta_lp - self._delta_cmd,
+                             -max_delta_step, max_delta_step)
+        self._delta_cmd = self._delta_cmd + delta_step
 
         v_ref = ref_traj[3, 0]
         v_err = cur_v - v_ref
@@ -1673,27 +1642,6 @@ class Xagent(BasicAgent):
             a_floor = -6.0
         self._a_cmd = float(np.clip(safe_acc, a_floor, 3.0))
         self._delta_cmd = float(np.clip(safe_delta, -0.7, 0.7))
-
-        # ==== 控制链路插桩 (2026-08-11, CTRL_DEBUG=1 时启用, 默认零开销) ====
-        # 判决出弯震荡出生层: raw_delta 震 -> 求解层; raw 平 cmd 震 -> 滤波层
-        if _env_flag('CTRL_DEBUG'):
-            if not hasattr(self, '_ctrl_dbg_fp'):
-                import time as _t
-                os.makedirs('logs', exist_ok=True)
-                _p = f"logs/ctrl_debug_{_t.strftime('%Y%m%d_%H%M%S')}.csv"
-                self._ctrl_dbg_fp = open(_p, 'w')
-                self._ctrl_dbg_fp.write(
-                    "t,raw_a,raw_delta,a_cmd,delta_cmd,branch,danger,"
-                    "k_window_max,cur_v,veh_yaw,ref_yaw0,apf_pede\n")
-                print(f"[CtrlDebug] -> {_p}")
-            _branch = 0 if safe_and_straight else (
-                2 if (is_roundabout_like or k_window_max > 0.015) else 1)
-            self._ctrl_dbg_fp.write(
-                f"{self._simu_time:.2f},{raw_a:.4f},{raw_delta:.4f},"
-                f"{self._a_cmd:.4f},{self._delta_cmd:.4f},{_branch},"
-                f"{int(danger)},{k_window_max:.4f},{cur_v:.2f},"
-                f"{current_state[2]:.4f},{ref_traj[2, 0]:.4f},{apf_pede:.2f}\n")
-            self._ctrl_dbg_fp.flush()
 
         # 用“滤波 + 死区 + 安全层”后的指令推进内部模型
         next_state = self._model.predict(
