@@ -40,11 +40,26 @@ set -euo pipefail
 # conda 环境激活 (set +u 因 conda 内部访问 unset 变量)
 # ------------------------------------------------------------------------
 set +u
-source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null || \
-  source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null || \
-  source ~/ljh/miniconda3/etc/profile.d/conda.sh 2>/dev/null || \
-  { echo "ERROR: conda 未找到"; exit 1; }
-conda activate first1
+# 2026-08-18: 优先直接探测 first1 env 的 bin 入 PATH (免疫多 conda 安装遮蔽,
+# 40901 上 conda activate 因搜索链命中他人安装而找不到 first1)
+_env_ok=""
+for _envbin in "$HOME/ljh/miniconda3/envs/first1/bin" \
+               "$HOME/miniconda3/envs/first1/bin" \
+               "$HOME/anaconda3/envs/first1/bin"; do
+    if [ -x "${_envbin}/python" ]; then
+        export PATH="${_envbin}:$PATH"
+        _env_ok=1
+        echo "使用 python: ${_envbin}/python"
+        break
+    fi
+done
+if [ -z "${_env_ok}" ]; then
+    source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null || \
+      source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null || \
+      source ~/ljh/miniconda3/etc/profile.d/conda.sh 2>/dev/null || \
+      { echo "ERROR: conda 未找到"; exit 1; }
+    conda activate first1
+fi
 set -u
 
 # preflight: python 与 carla 包必须可用
