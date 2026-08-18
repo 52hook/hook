@@ -754,11 +754,17 @@ class Xagent(BasicAgent):
                     elif self._bspline_adaptive:
                         # Route Z: 曲率 sigmoid 逐点 α
                         # α_i = α_max − (α_max−α_min) / (1 + exp(−β·(|κ_i|−κ0)))
+                        # 方案A (2026-08-18): α 调度输入对头部免疫 — 头部曲率
+                        # 因样条穿 ego 而虚高, 会把 α 错误压低; 仅改调度输入,
+                        # 不改混合与跟踪几何
+                        ck0_sched = np.abs(ck0).copy()
+                        if len(ck0_sched) > 7:
+                            ck0_sched[:5] = ck0_sched[5]
                         alpha_bs = self._alpha_bs_max - (
                             self._alpha_bs_max - self._alpha_bs_min
                         ) / (
                             1.0 + np.exp(
-                                -self._alpha_bs_beta * (np.abs(ck0) - self._alpha_bs_kappa0)
+                                -self._alpha_bs_beta * (ck0_sched - self._alpha_bs_kappa0)
                             )
                         )
                     else:
@@ -1093,7 +1099,10 @@ class Xagent(BasicAgent):
         # === 根据前方一段路径的“最大曲率”判断：是否进入环岛 / 紧弯区域 ===
         try:
             k_abs = np.abs(ck)
-            idx0 = max(int(target_ind), 0)
+            # 方案A (2026-08-18): 前瞻窗跳过头部 5 点 — 参考线样条被迫穿过
+            # ego 位姿, 偏离时头部 1-2m 内出现真实大曲率, 构成"偏离→急弯档
+            # →猛修正→更偏离"正反馈; 跳过头部切断该反馈边
+            idx0 = min(max(int(target_ind), 0) + 5, len(k_abs) - 1)
             idx1 = min(len(k_abs), idx0 + 20)
             if idx0 < idx1:
                 k_window_max = float(np.max(k_abs[idx0:idx1]))
