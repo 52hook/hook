@@ -793,6 +793,18 @@ class Xagent(BasicAgent):
                 cyaw, ck = cyaw0.copy(), ck0.copy()
 
 
+        # ==== 参考线数值消毒 (2026-08-18) ====
+        # 混合参考线存在近重合点 -> np.gradient 曲率/航向数值爆炸 (插桩实测
+        # k_window_max 尖峰达 100, Opt 路线 27 处 >1), 急弯段跟踪爆炸 yaw
+        # 引发满舵甩摆链 -> "缠斗/趴窝"双稳态。物理钳制: |ck|<=0.25 (R>=4m);
+        # cyaw unwrap 后 5 点滑动平均。位置在所有分支汇合点, 全路径覆盖。
+        ck = np.clip(np.nan_to_num(np.asarray(ck, dtype=float),
+                                   nan=0.0, posinf=0.25, neginf=-0.25),
+                     -0.25, 0.25)
+        cyaw = np.convolve(
+            np.pad(np.unwrap(np.asarray(cyaw, dtype=float)), 2, mode='edge'),
+            np.ones(5) / 5.0, mode='valid')
+
         # -------- 1.3 生成速度曲线 & PATH 对象 --------
         sp = itp.calc_speed_profile(cx, cy, cyaw, self._model.target_v)
         ref_path = itp.PATH(cx, cy, cyaw, ck)
@@ -1598,8 +1610,11 @@ class Xagent(BasicAgent):
             alpha_delta = 0.20
             max_delta_step = 0.03
         elif is_roundabout_like or k_window_max > 0.015:
-            alpha_delta = 0.70
-            max_delta_step = 0.25
+            # v2 (2026-08-18): 0.70/0.25 -> 0.55/0.15 — 急弯档原参数把满舵
+            # 甩摆逐字放行 (插桩: cmd≈raw 逐拍跟随); 0.15/拍=3rad/s 斜率
+            # 环岛转向仍充分, 共振级甩摆被斩断
+            alpha_delta = 0.55
+            max_delta_step = 0.15
         else:
             alpha_delta = 0.50
             max_delta_step = 0.15
