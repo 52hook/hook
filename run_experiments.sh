@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ========================================================================
-# GRIPC 完整实验自动化脚本 (v5 - final 50r)
+# GRIPC 完整实验自动化脚本 (v6 - pedfix 50r)
 #
 # 实验设计:
 #   A) 对比实验: 4 场景 × 3 方法 (GRIPC/UDMC_original/FSM) × 50 轮 = 600 次
@@ -42,6 +42,7 @@ set -euo pipefail
 set +u
 source ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null || \
   source ~/anaconda3/etc/profile.d/conda.sh 2>/dev/null || \
+  source ~/ljh/miniconda3/etc/profile.d/conda.sh 2>/dev/null || \
   { echo "ERROR: conda 未找到"; exit 1; }
 conda activate first1
 set -u
@@ -54,9 +55,42 @@ python -c "import carla" 2>/dev/null || { echo "ERROR: carla 包未安装"; exit
 # 基础路径与参数
 # ------------------------------------------------------------------------
 CARLA_PORT=2001
-PROJECT_DIR="$HOME/phd/0.9.16udmc_carla-main_myfinal"
-RESULTS_DIR="${PROJECT_DIR}/experiment_results/v5_final_50r"
+# 2026-08-18: 脚本所在目录自动定位 (本地/40901 服务器通用)
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESULTS_DIR="${PROJECT_DIR}/experiment_results/v6_pedfix_50r"
 REPEATS=50    # 每个配置重复次数（final paper campaign）
+
+# ------------------------------------------------------------------------
+# CARLA 自管 (2026-08-18): 无人值守跑批自动拉起/复活
+#   本地 ~/CARLA_0.9.16; 服务器 ~/ljh/carla/CARLA_0.9.16
+#   服务器手册: 禁 -quality-level=Low(必崩), DISPLAY= 前缀, nice 让位共用户
+# ------------------------------------------------------------------------
+CARLA_ROOT="${CARLA_ROOT:-$HOME/CARLA_0.9.16}"
+[ -d "${CARLA_ROOT}" ] || CARLA_ROOT="$HOME/ljh/carla/CARLA_0.9.16"
+
+ensure_carla() {
+    if ss -ltn 2>/dev/null | grep -q ":${CARLA_PORT} "; then
+        return 0
+    fi
+    log "CARLA 不在端口 ${CARLA_PORT}, 重新拉起..."
+    # 按进程名清理 (服务器手册安全式, 不用 pkill -f)
+    for p in $(ps -eo pid,comm | awk '$2 ~ /^CarlaUE4/ {print $1}'); do
+        kill -9 "$p" 2>/dev/null || true
+    done
+    sleep 4
+    ( cd "${CARLA_ROOT}" && DISPLAY= nohup nice -n 10 ./CarlaUE4.sh -RenderOffScreen \
+        -carla-rpc-port="${CARLA_PORT}" > /tmp/carla_batch.log 2>&1 & )
+    local i
+    for i in $(seq 1 60); do
+        if ss -ltn 2>/dev/null | grep -q ":${CARLA_PORT} "; then
+            sleep 15
+            return 0
+        fi
+        sleep 3
+    done
+    log "警告: CARLA 拉起超时(180s)"
+    return 1
+}
 
 mkdir -p "${RESULTS_DIR}"
 cd "${PROJECT_DIR}"
@@ -138,6 +172,7 @@ run_udmc() {
 
     local attempt
     for attempt in 1 2 3; do
+        ensure_carla || true
         log "运行 ${label} | ${scenario} | r=${repeat} | seed=${seed} | attempt=${attempt}/3"
         (
             CARLA_PORT=${CARLA_PORT} \
@@ -185,6 +220,7 @@ run_fsm() {
     fi
 
     log "运行 FSM | ${scenario} | r=${repeat} | seed=${seed} | attempt=1/1 (no retry)"
+    ensure_carla || true
     (
         CARLA_PORT=${CARLA_PORT} \
         PLOT_RESULT=0 \
@@ -227,6 +263,7 @@ run_udmc_original() {
     fi
 
     log "运行 UDMC-orig | ${scenario} | r=${repeat} | seed=${seed} | attempt=1/1 (no retry)"
+    ensure_carla || true
     (
         cd "${PROJECT_DIR}/udmc_carla-main" && \
         CARLA_PORT=${CARLA_PORT} \
