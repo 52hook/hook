@@ -55,6 +55,10 @@ def _env_float(name, default):
 # ==== B-spline 参考线横向位移上限 (2026-08-11, 治出弯转向极限环) ====
 _BS_DEV_CAP = _env_float('BS_DEV_CAP', 0.35)
 
+# ==== 转向链路诊断开关 (2026-08-18, PIO 极限环判决实验, 默认全关) ====
+_CTRL_LPF_BYPASS = _env_flag('CTRL_LPF_BYPASS', False)  # 旁路环外低通+限步
+_CTRL_U00_BOUND = _env_flag('CTRL_U00_BOUND', False)    # 启用 MPC 内首步速率约束
+
 # ==== 行人避撞修复开关 (2026-08-11) ====
 _PED_FIELD_V2 = _env_flag('PED_FIELD_V2', True)   # 前移椭圆 + 长尾核风险场 (默认开)
 # 监护默认关 (v2.5): 用户实测纯势场即可稳定绕行, 监护 EMERGENCY 存在
@@ -1555,7 +1559,13 @@ class Xagent(BasicAgent):
                 self._model.set_ellip_backup_obstacles([])
 
         # 编译并求解
-        self._model.solver_add_bounds()
+        if _CTRL_U00_BOUND:
+            # 诊断 (2026-08-18): 激活从未启用的首步速率约束 (u00=上一拍执行值),
+            # 界宽由 CTRL_DU0_ACC/CTRL_DU0_STEER 控制 — "限幅进优化器"生产级做法
+            self._model.solver_add_bounds(
+                u00=np.array([self._a_cmd, self._delta_cmd]))
+        else:
+            self._model.solver_add_bounds()
 
         tick = time.time()
         state = self._model.solve_MPC(
@@ -1604,10 +1614,15 @@ class Xagent(BasicAgent):
             alpha_delta = 0.50
             max_delta_step = 0.15
 
-        delta_lp = alpha_delta * raw_delta + (1.0 - alpha_delta) * self._delta_cmd
-        delta_step = np.clip(delta_lp - self._delta_cmd,
-                             -max_delta_step, max_delta_step)
-        self._delta_cmd = self._delta_cmd + delta_step
+        if _CTRL_LPF_BYPASS:
+            # 诊断 (2026-08-18): 旁路环外低通+限步, MPC 原始解直出末端钳制
+            # — PIO-II 极限环假说的直接判决 (锯齿消失/变形 = 确诊环外滤波)
+            self._delta_cmd = float(raw_delta)
+        else:
+            delta_lp = alpha_delta * raw_delta + (1.0 - alpha_delta) * self._delta_cmd
+            delta_step = np.clip(delta_lp - self._delta_cmd,
+                                 -max_delta_step, max_delta_step)
+            self._delta_cmd = self._delta_cmd + delta_step
 
         v_ref = ref_traj[3, 0]
         v_err = cur_v - v_ref

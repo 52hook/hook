@@ -50,6 +50,10 @@ _PED_W_CORE = _env_float('PED_W_CORE', 400.0)   # 近距核心项 (1+q)^-6
 _CTRL_W_DACC0   = _env_float('CTRL_W_DACC0', 30.0)
 _CTRL_W_DSTEER0 = _env_float('CTRL_W_DSTEER0', 400.0)
 
+# ==== 首步速率硬约束界宽 (2026-08-18, 配合 CTRL_U00_BOUND 实验) ====
+_CTRL_DU0_ACC   = _env_float('CTRL_DU0_ACC', 3.0)
+_CTRL_DU0_STEER = _env_float('CTRL_DU0_STEER', 0.7)
+
 
 # estimated parameters by SLSQP with steering transformation of 70 deg
 
@@ -1519,11 +1523,12 @@ class Vehicle:
 
         # (2) jerk / rate 约束对 lbg / ubg 的写入
         if u00 is not None:
-            # 第一个控制步的 acc/steer rate
-            self.lbg.append(-3.0)
-            self.ubg.append(3.0)
-            self.lbg.append(-0.7)
-            self.ubg.append(0.7)
+            # 第一个控制步的 acc/steer rate (2026-08-18: 界宽 env 可调,
+            # 默认值保持原语义; CTRL_U00_BOUND=1 实验时配合收紧)
+            self.lbg.append(-_CTRL_DU0_ACC)
+            self.ubg.append(_CTRL_DU0_ACC)
+            self.lbg.append(-_CTRL_DU0_STEER)
+            self.ubg.append(_CTRL_DU0_STEER)
 
         for _ in range(self.horizon - 1):
             self.lbg.append(-0.9)   # acc rate
