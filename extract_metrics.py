@@ -230,7 +230,7 @@ def print_single(log_file: str, metrics: dict):
 
 KNOWN_METHODS = [
     'GRIPC_noOBCA', 'GRIPC_noIGPR', 'GRIPC_noBSP', 'GRIPC_noQP',
-    'GRIPC', 'UDMC', 'FSM',
+    'GRIPC', 'UDMC', 'FSM', 'FRENET', 'TCP',
 ]
 KNOWN_SCENARIOS = [
     'unsig_crossroad', 'roundabout', 'multilaneACC', 'mixed_traffic',

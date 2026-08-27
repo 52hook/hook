@@ -257,6 +257,45 @@ run_fsm() {
 }
 
 # ------------------------------------------------------------------------
+# run_frenet: 运行 Frenet 采样规划基线 (1 次 attempt, 不 retry - 与基线语义一致)
+# ------------------------------------------------------------------------
+run_frenet() {
+    local scenario=$1 repeat=$2 seed=${3:-}
+    local logfile="${RESULTS_DIR}/FRENET_${scenario}_r${repeat}.log"
+    local datafile="${RESULTS_DIR}/FRENET_${scenario}_r${repeat}.txt"
+
+    if is_valid "${datafile}"; then
+        log "跳过 (已有 valid 文件) FRENET | ${scenario} | r=${repeat}"
+        return 0
+    fi
+    # 1-attempt 语义: 已在 failed.tsv 留痕则永久跳过, 不因 resume 续跑而重跑
+    if already_failed "FRENET" "${scenario}" "${repeat}" "${seed}"; then
+        log "跳过 (1-attempt 已用尽, failed.tsv 留痕) FRENET | ${scenario} | r=${repeat}"
+        return 0
+    fi
+
+    log "运行 FRENET | ${scenario} | r=${repeat} | seed=${seed} | attempt=1/1 (no retry)"
+    ensure_carla || true
+    (
+        CARLA_PORT=${CARLA_PORT} \
+        PLOT_RESULT=0 \
+        RANDOM_SEED=${seed} \
+        LOG_OUTPUT="${datafile}" \
+        timeout 300 python "frenet_main(baseline).py" "${scenario}" "True" \
+            > "${logfile}" 2>&1
+    ) || true
+    if is_valid "${datafile}"; then
+        log "成功 FRENET | ${scenario} | r=${repeat}"
+        sleep 8
+        return 0
+    fi
+    echo -e "FRENET\t${scenario}\t${repeat}\t${seed}" >> "${RESULTS_DIR}/failed.tsv"
+    log "失败 FRENET | ${scenario} | r=${repeat} (no retry, recorded to failed.tsv)"
+    sleep 8
+    return 1
+}
+
+# ------------------------------------------------------------------------
 # run_udmc_original: 运行原版 UDMC baseline (udmc_carla-main/udmc_main.py)
 #                    1 次 attempt, 不 retry - 防 survivorship bias
 #   原版仅打"禁倒车补丁" (vehicle_obs.py:611 lbx[3]=0.0),
@@ -316,6 +355,7 @@ for r in $(seq 1 ${REPEATS}); do
         run_udmc          "$sc" "GRIPC" "$r"  1 1 1 1  ${seed} || true
         run_udmc_original "$sc"          "$r"           ${seed} || true
         run_fsm           "$sc"          "$r"           ${seed} || true
+        run_frenet        "$sc"          "$r"           ${seed} || true
     done
     log "--- 对比实验: 完成第 ${r}/${REPEATS} 轮 ---"
 done
