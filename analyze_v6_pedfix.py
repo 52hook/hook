@@ -8,7 +8,7 @@ v6_pedfix_50r 数据分析脚本（论文最终 50 轮 campaign）
         （v4 分析用的 >=40 行，本脚本从严对齐 campaign 标准，并单独报告 40~99 行的边缘样本数）
 - 跨方法 RMSE 口径（沿用 v5 报告 §6.1）：
     GRIPC / GRIPC_noOBCA / GRIPC_noIGPR / GRIPC_noQP → rmse_dist_err_raw（到原始车道中心）
-    UDMC / FSM / GRIPC_noBSP                         → rmse_dist_err
+    UDMC / FSM / FRENET / TCP / GRIPC_noBSP          → rmse_dist_err（无 B-spline 参考线，两口径同源）
 - 碰撞口径（沿用 v5 报告 §6.2）：主指标 any_vp_collision = 车-车 ∨ 车-人；type-3 路缘不计
 - 输出：
     1) per-run CSV:  experiment_results/v6_pedfix_50r_analysis/per_run.csv
@@ -42,7 +42,7 @@ PAIRED_CSV = OUT_DIR / "paired.csv"
 RMSE_RAW_METHODS = {"GRIPC", "GRIPC_noOBCA", "GRIPC_noIGPR", "GRIPC_noQP"}
 
 METHODS_ORDER = [
-    "GRIPC", "UDMC", "FSM",
+    "GRIPC", "UDMC", "FSM", "FRENET", "TCP",
     "GRIPC_noOBCA", "GRIPC_noIGPR", "GRIPC_noBSP", "GRIPC_noQP",
 ]
 SCENARIOS = ["unsig_crossroad", "roundabout", "multilaneACC", "mixed_traffic"]
@@ -224,6 +224,7 @@ PAIR_METRICS = [
 ]
 PAIRS = [
     ("GRIPC", "UDMC"), ("GRIPC", "FSM"),
+    ("GRIPC", "FRENET"), ("GRIPC", "TCP"),
     ("GRIPC", "GRIPC_noOBCA"), ("GRIPC", "GRIPC_noIGPR"),
     ("GRIPC", "GRIPC_noBSP"), ("GRIPC", "GRIPC_noQP"),
 ]
