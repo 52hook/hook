@@ -52,6 +52,7 @@ for r in $(seq 1 50); do
         log "运行 TCP | $sc | r=$r | seed=$seed | attempt=1/1"
         CARLA_PORT=2001 PLOT_RESULT=0 RANDOM_SEED=$seed \
             TCP_REPO=~/ljh/Bench2DriveZoo_tcp TCP_CKPT=~/ljh/tcp_b2d.ckpt \
+            TCP_PLANNER_TYPE=only_traj \
             LOG_OUTPUT="$f" \
             timeout 1200 nice -n 10 "$PY" "tcp_main(baseline).py" "$sc" True \
             > "$R/TCP_${sc}_r${r}.log" 2>&1 || true

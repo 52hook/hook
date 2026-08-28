@@ -303,6 +303,7 @@ cnt = 0
 _log_data = []
 computing_times = []
 _first_tick_skipped = False
+_reached_destination = False
 for _ in range(10000):
     try:
         # 先 tick 世界, 让传感器出当拍帧 (同步模式)
@@ -428,6 +429,7 @@ for _ in range(10000):
                   f'thr={control.throttle:.2f} brk={control.brake:.1f} str={control.steer:+.2f} '
                   f'剩余={_rem:.0f}m 推理={1000*(tock-tick):.0f}ms', flush=True)
         if np.sqrt((ego_loc.x - destination_transform.location.x)**2 + (ego_loc.y - destination_transform.location.y)**2) < 5:
+            _reached_destination = True
             break
         # 诊断模式下的仿真时长帽: 到点即优雅收尾并落盘 (批跑不开, 保持与 FSM
         # 一致的 "超时无产物→failed" 语义)
@@ -459,6 +461,14 @@ with open('computing_time.txt', 'a') as f:
     f.write('Time to pass: '+str(cnt*simu_step)+'\n')
 
 # ================ 保存 16 列日志（LOG_OUTPUT 契约）================
+# 步数打满仍未到终点 = 冻结/未完成: 不落盘, 与 FSM "超时无产物→failed" 语义
+# 对齐, 杜绝 10000 步伪成功污染数据 (诊断可用 TCP_SIM_CAP/TCP_SAVE_PARTIAL 豁免)
+if (not _reached_destination
+        and not float(os.environ.get('TCP_SIM_CAP', '0') or 0)
+        and not os.environ.get('TCP_SAVE_PARTIAL')):
+    print(f'未到达终点 (仿真 {cnt*simu_step:.0f}s), 按失败语义不落盘')
+    _log_data = []
+
 _log_output = os.environ.get('LOG_OUTPUT', '')
 if _log_output and _log_data:
     os.makedirs(os.path.dirname(_log_output) or '.', exist_ok=True)
