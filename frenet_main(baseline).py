@@ -111,12 +111,12 @@ elif scenario == 'comprehensive':
 elif scenario == 'mixed_traffic':
     traffic_lights = env.world.get_actors().filter('*traffic_light*')
     for traffic_light in traffic_lights:
-        traffic_light.set_state(carla.TrafficLightState.Red)
+        traffic_light.set_state(carla.TrafficLightState.Green)
         traffic_light.freeze(True)
     gen_dis_min = 3
     gen_dis_max = 200
     veh_num = 100
-    target_v = 25
+    target_v = 35  # 2026-09-03: 与 udmc_main.py 混合场景协议对齐 (原 25)
     start_transform = carla.Transform(carla.Location(x=170.7, y=94.3, z=0.3), carla.Rotation(pitch=0.0, yaw=-85, roll=0.0))
     destination_transform = carla.Transform(carla.Location(x=126.4, y=62.5, z=0.3), carla.Rotation(pitch=0.0, yaw=0, roll=0.0))
 else:

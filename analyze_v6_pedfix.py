@@ -39,7 +39,8 @@ SUMMARY_CSV = OUT_DIR / "summary.csv"
 PAIRED_CSV = OUT_DIR / "paired.csv"
 
 # 跨方法 RMSE 口径（v5 报告 §6.1 确立）
-RMSE_RAW_METHODS = {"GRIPC", "GRIPC_noOBCA", "GRIPC_noIGPR", "GRIPC_noQP"}
+# 2026-09-03: RMSE 统一口径改为全部方法取第 14 列 (到原始车道中心点集最近距离),
+# 不再按方法分流; UDMC 原版入口自该日起也记录该列 (udmc_carla-main 补丁).
 
 METHODS_ORDER = [
     "GRIPC", "UDMC", "FSM", "FRENET", "TCP",
@@ -56,13 +57,11 @@ MIN_STEPS_MARGINAL = 40        # v4 分析旧标准，仅用于报告边缘样�
 # 数据收集
 # ========================================================================
 def rmse_unified(method: str, m: dict) -> float:
-    """按方法选统一口径 RMSE。"""
-    if method in RMSE_RAW_METHODS:
-        v = m.get("rmse_dist_err_raw")
-        if v is None or (isinstance(v, float) and (math.isnan(v) or v < 0)):
-            return float("nan")
-        return float(v)
-    return float(m["rmse_dist_err"])
+    """统一口径 RMSE: 全部方法取第 14 列 (最近点横向误差); 该列缺失/无效时回退第 1 列。"""
+    v = m.get("rmse_dist_err_raw")
+    if v is None or (isinstance(v, float) and (math.isnan(v) or v < 0)):
+        return float(m["rmse_dist_err"])
+    return float(v)
 
 
 def collect_per_run() -> tuple[list[dict], list[tuple]]:

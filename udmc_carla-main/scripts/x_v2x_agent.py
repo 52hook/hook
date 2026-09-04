@@ -497,7 +497,7 @@ class Xagent(BasicAgent):
         # ========================================================================
         # 16 列 log 契约 (与主线 scripts/x_v2x_agent.py 一致, 便于 extract_metrics 统一处理)
         #  col  1: simu_time       col  9: apf_pede     col 14: min_dist_to_obs (含行人)
-        #  col  2: dist_error      col 10: apf_nc_road  col 15: dist_error_raw  (原版 = dist_error)
+        #  col  2: dist_error      col 10: apf_nc_road  col 15: dist_error_raw  (到参考线采样点最近距离)
         #  col  3: yaw_error       col 11: apf_c_road   col 16: collision_flag  (CollisionSensor 写)
         #  col  4: vel_error       col 12: apf_traffic
         #  col 5/6: acc/steer      col 13: cost_time
@@ -516,8 +516,18 @@ class Xagent(BasicAgent):
             _d = math.hypot(_p[0] - current_state[0], _p[1] - current_state[1])
             if _d < _min_d:
                 _min_d = _d
-        # 原版无 B-spline 平滑, ref_traj 即 raw lane center, dist_error_raw 与 dist_error 一致
-        dist_error_raw = dist_error
+        # ------------------------------------------------------------------
+        # dist_error_raw (第 15 列): 自车预测状态到本步参考线采样点集 (cx, cy,
+        # ds = 0.4 m) 的最近欧氏距离, 与主线 GRIPC 家族第 15 列口径完全一致
+        # (纯几何最近点; dist_error 为时间索引参考点距离, 含纵向滞后, 停车让行
+        # 时可达 v_ref*dt). 仅写日志, 不进入任何控制量. 2026-09-03 口径统一补丁.
+        # ------------------------------------------------------------------
+        try:
+            dist_error_raw = float(np.min(np.hypot(
+                np.asarray(cx, dtype=float) - next_state[0],
+                np.asarray(cy, dtype=float) - next_state[1])))
+        except Exception:
+            dist_error_raw = dist_error
         collision_flag = 0  # 默认无碰撞, 由 udmc_main.py 主循环根据 CollisionSensor 覆写
 
         self._log_data.append([
