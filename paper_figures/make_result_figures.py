@@ -238,7 +238,7 @@ def fig9_panel_c(ax):
     ax.set_yscale("log")
     ax.set_ylim(0.04, 8)
     set_log_ticks(ax.yaxis, [0.05, 0.1, 0.2, 0.5, 1, 2, 5])
-    ax.set_ylabel("Lateral RMSE (m)")
+    ax.set_ylabel("Lane-centre deviation RMSE (m)")
     style_scenario_axis(ax)
 
 
@@ -432,7 +432,7 @@ def fig10_panel_d(ax):
     ymax = max(ea.max(), eb.max())
     ax.set_ylim(0, ymax * 1.25)
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Lateral error (m)")
+    ax.set_ylabel("Lane-centre deviation (m)")
     ax.legend(loc="upper right", handlelength=1.4, borderaxespad=0.2)
     ax.text(0.02, 0.96, f"Intersection, seed {info['seed']}", transform=ax.transAxes,
             ha="left", va="top", fontsize=6.5,
