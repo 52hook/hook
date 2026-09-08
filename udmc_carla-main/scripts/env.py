@@ -40,6 +40,25 @@ RES_Y = 720
 
 START_TIME = 3
 
+# ======================================================================
+#   论文插图采集 (FIG_CAPTURE=1 专用) —— 复用主线 utils/carla_utils.FigCaptureSession
+#   未设置 FIG_CAPTURE 时: 不 import、不建 actor, 原版 UDMC 基线路径逐字节不变。
+# ======================================================================
+_FIG_CAPTURE = os.environ.get('FIG_CAPTURE', '0') == '1'
+# ==== 每步墙钟计时 (STEP_TIMING=1 专用; 采集协议核查用, 默认关, 关闭时零改动) ====
+_STEP_TIMING = os.environ.get('STEP_TIMING', '0') == '1'
+
+
+def _fig_capture_module():
+    """按文件路径加载主线仓库 utils/carla_utils.py (本目录也有同名 utils 包)。"""
+    import importlib.util
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(root, 'utils', 'carla_utils.py')
+    spec = importlib.util.spec_from_file_location('gripc_fig_capture_utils', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
 DISPLAY_METHOD= 'spec' # 'pygame' or 'spec'
 
 if DISPLAY_METHOD == 'pygame':
@@ -271,6 +290,14 @@ class Env:
 
         self.recording = recording
 
+        # ==== 论文插图采集会话 (FIG_CAPTURE=1 时于 reset() 创建, 否则恒为 None) ====
+        self._fig = None
+        # ==== 每步墙钟计时 (STEP_TIMING=1): 记录相邻两次 step() 调用的间隔 ====
+        self._step_dts = []
+        self._step_t_last = None
+        if _STEP_TIMING:
+            atexit.register(self._print_step_timing)
+
         # ========================================================================
         # CollisionSensor (移植自主线 scripts/env.py): 实测车体碰撞 → 第 16 列 collision_flag
         # 主线契约: 0=无碰撞, 1=车-车, 2=车-人, 3=车-其他静态物
@@ -355,6 +382,16 @@ class Env:
 
         # 挂载 CollisionSensor (reset 重入安全: 内部先 destroy 旧 sensor)
         self._attach_collision_sensor(self.ego_vehicle)
+
+        # ==== 论文插图采集 (FIG_CAPTURE=1 专用): BEV 相机 + sidecar 会话 ====
+        if _FIG_CAPTURE:
+            try:
+                if self._fig is not None:
+                    self._fig.finalize()
+                self._fig = _fig_capture_module().FigCaptureSession(self.world, self.ego_vehicle, DT_)
+            except Exception as _fig_err:
+                print('[FigCapture] session init failed, capture disabled:', _fig_err)
+                self._fig = None
 
         self.world.tick()
         if DISPLAY_METHOD == 'pygame':
@@ -724,6 +761,11 @@ class Env:
         state: if state is action, it's type is carla.VehicleControl or [steer_, throttle_, brake_]
                other is the transform data(carla.Transform or [x,y,z,roll,pitch,yaw])
         """
+        if _STEP_TIMING:                       # 每步墙钟: 含 agent.run_step + 主循环 + tick
+            _now = time.time()
+            if self._step_t_last is not None:
+                self._step_dts.append(_now - self._step_t_last)
+            self._step_t_last = _now
         if not transform_mode:
             steer_ = state[1]*self.steer_ratio # transform the steering angle from rad to -1~1
             print("steer_:", steer_)
@@ -739,6 +781,9 @@ class Env:
                 print("steer_processed:", steer_)
             self._acc_controller.last_control[1] = steer_
             
+
+            if self._fig is not None:          # 论文插图采集: tick 前移 BEV 相机
+                self._fig.before_tick()
 
             for i in range(HFC_HZ):
                 throttle_tmp = self._acc_controller.run_step(state[0])
@@ -779,6 +824,8 @@ class Env:
             self.clock.tick()
         # self.world.tick()
         self.time += DT_
+        if self._fig is not None:              # 论文插图采集: tick 后取当拍帧
+            self._fig.after_tick(self.time)
 
         # image_rgb = self.image_queue.get()
         # image_array = np.reshape(np.frombuffer(image_rgb.raw_data, dtype=np.dtype('uint8')),
@@ -901,7 +948,21 @@ class Env:
         logging.info('done')
 
 
+    def _print_step_timing(self):
+        """STEP_TIMING=1: 进程退出时打印每步墙钟统计 (ms), 供采集协议核查。"""
+        d = np.asarray(self._step_dts, dtype=float) * 1000.0
+        if d.size == 0:
+            print('[StepTiming] no steps recorded')
+            return
+        print('[StepTiming] n=%d mean=%.1f ms p50=%.1f p95=%.1f max=%.1f (FIG_CAPTURE=%s)'
+              % (d.size, d.mean(), np.percentile(d, 50), np.percentile(d, 95), d.max(),
+                 os.environ.get('FIG_CAPTURE', '0')))
+
     def clean_all_actors(self):
+        # ==== 论文插图采集: 先收尾 (写 sidecar + 销毁相机), 再清 actor ====
+        if self._fig is not None:
+            self._fig.finalize()
+            self._fig = None
         actors = self.world.get_actors().filter("*veh*")
         for actor in actors:
             actor.destroy()

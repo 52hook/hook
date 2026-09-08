@@ -28,6 +28,10 @@ from official.global_route_planner import GlobalRoutePlanner
 import matplotlib.pyplot as plt
 import time
 
+# ==== 论文插图采集 (FIG_CAPTURE=1 专用): IGPR 预测点尺寸; 未设置时保持原值 0.06 ====
+_FIG_PT_SIZE = (float(os.environ.get('FIG_PT_SIZE', '0.20') or 0.20)
+                if os.environ.get('FIG_CAPTURE', '0') == '1' else 0.06)
+
 class RoadOption(Enum):
     """
     RoadOption represents the possible topological configurations when moving from a segment of lane to other.
@@ -77,10 +81,23 @@ class Xagent(BasicAgent):
         self.dist_move = 0.2
         self.dist_step = 1.5
 
+        # ==== 论文插图采集 (FIG_CAPTURE=1 专用; 会话由 env.reset() 创建) ====
+        _fig = getattr(env, '_fig', None)
+        if _fig is not None:
+            _fig.bind_log(self._log_data)
+
     def plan_route(self, start_location, end_location):
         self._route = self.trace_route(start_location.location, end_location.location)
         for i in self._route:
             self._waypoints_queue.append(i)
+        # ==== 论文插图采集 (FIG_CAPTURE=1 专用): 全局路线 -> 世界系灰线 + 起终点 ====
+        _fig = getattr(self._env, '_fig', None)
+        if _fig is not None:
+            try:
+                _fig.set_route([[wp.transform.location.x, wp.transform.location.y,
+                                 wp.transform.location.z] for wp, _ in self._route])
+            except Exception as _fe:
+                print('[FigCapture] set_route failed:', _fe)
 
     def calc_ref_trajectory_in_T_step(self, node, ref_path, sp):
         """
@@ -227,6 +244,10 @@ class Xagent(BasicAgent):
     
         # - Obstacle constraints
         obs, heights, obs_infer = self._env.get_obs(current_state)
+        # ==== 论文插图采集 (FIG_CAPTURE=1 专用): 暂存障碍全集 (原版无预测方差) ====
+        _fig = getattr(self._env, '_fig', None)
+        if _fig is not None:
+            _fig.stash_obs(obs, obs_infer, None)
         obs_infer = list(obs_infer)
         for i in range(len(obs_infer)):
             obs_infer[i] = obs_infer[i].tolist()
@@ -241,7 +262,7 @@ class Xagent(BasicAgent):
                                        carla.Vector3D(2, 1, 0.8))
                 self._world.debug.draw_box(bb, carla.Rotation(yaw=np.degrees(-temp_obs[i][2])), thickness=0.03, life_time=2*self._dt)
                 for j in range(len(obs_infer[i])):
-                    self._world.debug.draw_point(carla.Location(x=obs_infer[i][j][0], y=-obs_infer[i][j][1], z=heights[i]+1.5), size=0.06,  life_time=2*self._dt)
+                    self._world.debug.draw_point(carla.Location(x=obs_infer[i][j][0], y=-obs_infer[i][j][1], z=heights[i]+1.5), size=_FIG_PT_SIZE,  life_time=2*self._dt)
                 # self._world.debug.draw_point(carla.Location(x=centers[0][0], y=-centers[0][1], z=heights[i]), size=0.2,  life_time=2*self._dt)
 
         # - Pedestrian constraints
@@ -260,7 +281,7 @@ class Xagent(BasicAgent):
                                        carla.Vector3D(0.6, 0.6, 1.8))
                 self._world.debug.draw_box(bb, carla.Rotation(yaw=np.degrees(-temp_pedes[i][2])), thickness=0.03, life_time=2*self._dt)
                 for j in range(len(pedes_infer[i])):
-                    self._world.debug.draw_point(carla.Location(x=pedes_infer[i][j][0], y=-pedes_infer[i][j][1], z=pede_heights[i]+1.5), size=0.06,  life_time=2*self._dt)
+                    self._world.debug.draw_point(carla.Location(x=pedes_infer[i][j][0], y=-pedes_infer[i][j][1], z=pede_heights[i]+1.5), size=_FIG_PT_SIZE,  life_time=2*self._dt)
                 # self._world.debug.draw_point(carla.Location(x=centers[0][0], y=-centers[0][1], z=heights[i]), size=0.2,  life_time=2*self._dt)
         apf_obs = apf_pede = apf_nc_road = apf_c_road = apf_traffic = apf_ttc = 0
 
@@ -535,6 +556,20 @@ class Xagent(BasicAgent):
             apf_obs, apf_ttc, apf_pede, apf_nc_road, apf_c_road, apf_traffic, cost_time,
             _min_d, dist_error_raw, collision_flag,
         ])
+
+        # ==== 论文插图采集 (FIG_CAPTURE=1 专用): sidecar 行 (与日志行同序) + 画线画框 ====
+        # 原版无 B-spline: ref_raw0 == ref_blend0 == 本步样条参考线 (cx, cy, 右手系);
+        # 本目录 utils.carla_utils.draw_planned_trj 不画线, 参考线/MPC 预测线由会话补画。
+        _fig = getattr(self._env, '_fig', None)
+        if _fig is not None:
+            try:
+                _ref_rh = np.column_stack([np.asarray(cx, dtype=float), np.asarray(cy, dtype=float)])
+                # 车顶 (≈height+1.5) 之上 0.3 m, 粗 0.30 m: 参考线红 / MPC 预测青
+                _fig.draw_polyline_rh(ref_traj[:2, :].T, height + 1.8, color=(255, 0, 0), stride=2, max_len=30.0)
+                _fig.draw_polyline_rh(np.asarray(state[2])[:, :2], height + 1.8, color=(0, 255, 255))
+                _fig.capture_step(self._simu_time, state[2], _ref_rh, _ref_rh)
+            except Exception as _fe:
+                print('[FigCapture] capture_step failed:', _fe)
         return self._a_opt[0], self._delta_opt[0], (next_state, height+0.05)
 
     def trace_route(self, start_location, end_location):

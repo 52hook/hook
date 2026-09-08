@@ -31,6 +31,9 @@ from utils.global_bspline_smoother import BSplineGlobalSmoother
 # polygon helpers (CARLA actors -> convex polygon half-spaces)
 from utils.geometry_poly import actors_to_Ab, actors_to_Ab_horizon
 
+# ==== 论文插图采集 (FIG_CAPTURE=1 专用): IGPR 预测点尺寸; 未设置时保持原值 0.06 ====
+_FIG_PT_SIZE = ca_u.FIG_PT_SIZE if getattr(ca_u, 'FIG_CAPTURE', False) else 0.06
+
 
 def _env_flag(name, default=False):
     """读取诊断开关, 支持 1/true/on/yes。"""
@@ -196,6 +199,11 @@ class Xagent(BasicAgent):
         # 车道半宽（右手系下，Town03 单车道大概 3.5m 左右，半宽 ~1.75m）
         # 4.0 太宽会导致 B-spline 外凸到对向车道，收紧到 2.5m
         self._lane_half_width = 2.5
+
+        # ==== 论文插图采集 (FIG_CAPTURE=1 专用; 会话由 env.reset() 创建) ====
+        _fig = getattr(env, '_fig', None)
+        if _fig is not None:
+            _fig.bind_log(self._log_data)
     
  
     # ======================================================================
@@ -339,6 +347,14 @@ class Xagent(BasicAgent):
         self._route = self.trace_route(start_location.location, end_location.location)
         for i in self._route:
             self._waypoints_queue.append(i)
+        # ==== 论文插图采集 (FIG_CAPTURE=1 专用): 全局路线 -> 世界系灰线 + 起终点 ====
+        _fig = getattr(self._env, '_fig', None)
+        if _fig is not None:
+            try:
+                _fig.set_route([[wp.transform.location.x, wp.transform.location.y,
+                                 wp.transform.location.z] for wp, _ in self._route])
+            except Exception as _fe:
+                print('[FigCapture] set_route failed:', _fe)
 
     def calc_ref_trajectory_in_T_step(self, node, ref_path, sp):
         """
@@ -837,6 +853,10 @@ class Xagent(BasicAgent):
         # codex 风险点 #2 修复: 原版 get_obs 在 OBCA 之后调用, 导致 horizon
         # 内 (A_k,b_k) 永远只有 k=0 一帧。这里前置, 让 obs_infer 可被 OBCA 使用。
         obs, heights, obs_infer, obs_stds = self._env.get_obs(current_state)
+        # ==== 论文插图采集 (FIG_CAPTURE=1 专用): 暂存过滤前的障碍全集 ====
+        _fig = getattr(self._env, '_fig', None)
+        if _fig is not None:
+            _fig.stash_obs(obs, obs_infer, obs_stds)
         # Step 5 (G1): _use_dual=False 时也要有此 set, partition 阶段 always-True 兜底
         obca_obs_idx_set = set()
 
@@ -1209,7 +1229,7 @@ class Xagent(BasicAgent):
                         carla.Location(x=obs_infer[i][j][0],
                                        y=-obs_infer[i][j][1],
                                        z=heights[i] + 1.5),
-                        size=0.06, life_time=2 * self._dt
+                        size=_FIG_PT_SIZE, life_time=2 * self._dt
                     )
 
         # === 行人感知 + debug 可视化 ===
@@ -1240,7 +1260,7 @@ class Xagent(BasicAgent):
                         carla.Location(x=pedes_infer[i][j][0],
                                        y=-pedes_infer[i][j][1],
                                        z=pede_heights[i] + 1.5),
-                        size=0.06, life_time=2 * self._dt
+                        size=_FIG_PT_SIZE, life_time=2 * self._dt
                     )
 
         # APF diagnostics
@@ -1693,6 +1713,18 @@ class Xagent(BasicAgent):
             min_dist_to_obs, dist_error_raw,
             0,  # 第 16 列 collision_flag：默认 0，由 udmc_main.py 主循环 env.step 后填写
         ])
+
+        # ==== 论文插图采集 (FIG_CAPTURE=1 专用): sidecar 行 (与日志行同序) + 画框 ====
+        # state[2] = MPC 预测状态序列 (右手系, horizon+1 行); cx0/cy0 原始参考线,
+        # cx/cy B-spline 混合参考线 (右手系); 会话内统一转回 CARLA 世界系。
+        _fig = getattr(self._env, '_fig', None)
+        if _fig is not None:
+            try:
+                _fig.capture_step(self._simu_time, state[2],
+                                  np.column_stack([cx0, cy0]),
+                                  np.column_stack([cx, cy]))
+            except Exception as _fe:
+                print('[FigCapture] capture_step failed:', _fe)
 
         return self._a_cmd, self._delta_cmd, (next_state, height + 0.05)
 
