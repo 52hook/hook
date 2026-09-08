@@ -605,7 +605,8 @@ def _inset_bounds(ax, pts: np.ndarray, size: float = 0.33):
     return [best[0] + 0.02 if best[0] == 0 else best[0] - 0.02, best[1] + 0.02 if best[1] == 0 else best[1] - 0.02, size, size]
 
 
-def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool, title_a: str):
+def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool, title_a: str,
+               method_only: bool = False):
     """Fig.2 三面板绘制；window_mode=True 画单步窗口，False 画整条路线（环岛放大）。"""
     s, cx0, cy0, ck0 = res["s"], res["cx0"], res["cy0"], res["ck0"]
     cx, cy, ck = res["cx"], res["cy"], res["ck"]
@@ -681,50 +682,78 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
         sp_.set_linewidth(0.5)
     ins.set_facecolor("white")
 
-    # ---------- (b) 曲率：线性轴裁剪 ±0.4，越界段用上下边缘三角标记并在图例计数 ----------
-    series = [("Raw course", ck0, "#555555", 0.8, 0.0), ("B-spline", ck_bsp, OI["blue"], 0.6, 0.06),
-              ("Blended", ck, OI["vermillion"], 0.9, 0.03)]
     beyond = {}
-    for label, k, col, lw, inset_ in series:
-        runs = runs_beyond(k, K_CLIP)
-        beyond[label] = len(runs)
-        ax_b.plot(s, np.clip(k, -K_CLIP, K_CLIP), color=col, lw=lw, label=f"{label} ({len(runs)} beyond)")
-        for a, b, sign in runs:
-            ax_b.plot(0.5 * (s[a] + s[b]), sign * (K_CLIP - inset_), marker="^" if sign > 0 else "v", ms=3.2,
-                      color=col, ls="none", clip_on=False, zorder=6)
-    ax_b.axhline(0, color="k", lw=0.4, alpha=0.4)
-    ax_b.set_ylim(-K_CLIP, K_CLIP)
-    ax_b.set_ylabel(r"Curvature $\kappa$ (1/m), clipped $\pm$0.4")
-    ax_b.set_xlabel("Arc length s (m)")
-    ax_b.set_xlim(0, s[-1])
-    ax_b.grid(True, axis="y")
-    ax_b.legend(loc="lower right", bbox_to_anchor=(1.03, 0.995), ncol=2, fontsize=5.6, handlelength=1.1,
-                columnspacing=0.5, borderaxespad=0.0, handletextpad=0.35, labelspacing=0.2)
-    panel_label(ax_b, "(b)", dx=-0.27)
+    if method_only:
+        # ---------- (b) 曲率调度权重: sigmoid 原值 vs 限幅 + 滑动平均后的有效权重 ----------
+        ax_b.plot(s, res["alpha_sig"], color=OI["blue"], lw=0.8, ls="--", label=r"$\alpha_i$ from $\kappa$ sigmoid")
+        ax_b.plot(s, res["alpha_eff"], color=OI["blue"], lw=1.1, label=r"$\alpha_{\rm eff}$ after cap and averaging")
+        ax_b.axhline(ALPHA_BS_MAX, color="k", lw=0.4, ls=":", alpha=0.6)
+        ax_b.axhline(ALPHA_BS_MIN, color="k", lw=0.4, ls=":", alpha=0.6)
+        ax_b.text(s[0] + 1.0, ALPHA_BS_MAX + 0.012, r"$\alpha_{\max}$", ha="left", va="bottom", fontsize=6)
+        ax_b.text(s[-1] - 1.0, ALPHA_BS_MIN - 0.012, r"$\alpha_{\min}$", ha="right", va="top", fontsize=6)
+        ax_b.set_ylim(0, 0.6)
+        ax_b.set_xlim(0, s[-1])
+        ax_b.set_xlabel("Arc length s (m)")
+        ax_b.set_ylabel(r"Blend weight $\alpha$")
+        ax_b.grid(True, axis="y")
+        ax_b.legend(loc="lower right", bbox_to_anchor=(1.03, 0.995), fontsize=5.8, handlelength=1.3, borderaxespad=0.0)
+        panel_label(ax_b, "(b)", dx=-0.27)
+        # ---------- (c) 融合线相对原始线的偏离与 0.35 m 位移上限 ----------
+        ax_c.plot(s, dev_lat, color=OI["vermillion"], lw=1.0, label="Lateral deviation")
+        ax_c.plot(s, res["dev_blend"], color=OI["vermillion"], lw=0.6, ls="--", label="Point-wise $|$blend $-$ raw$|$")
+        ax_c.axhline(BS_DEV_CAP, color="k", lw=0.7, ls=":", label="0.35 m cap")
+        ax_c.set_ylim(0, 0.45)
+        ax_c.set_xlim(0, s[-1])
+        ax_c.set_xlabel("Arc length s (m)")
+        ax_c.set_ylabel("Deviation from raw course (m)")
+        ax_c.grid(True, axis="y")
+        ax_c.legend(loc="lower right", bbox_to_anchor=(1.03, 0.995), fontsize=5.8, handlelength=1.3, borderaxespad=0.0)
+        panel_label(ax_c, "(c)", dx=-0.27)
+    else:
+        # ---------- (b) 曲率：线性轴裁剪 ±0.4，越界段用上下边缘三角标记并在图例计数 ----------
+        series = [("Raw course", ck0, "#555555", 0.8, 0.0), ("B-spline", ck_bsp, OI["blue"], 0.6, 0.06),
+                  ("Blended", ck, OI["vermillion"], 0.9, 0.03)]
+        beyond = {}
+        for label, k, col, lw, inset_ in series:
+            runs = runs_beyond(k, K_CLIP)
+            beyond[label] = len(runs)
+            ax_b.plot(s, np.clip(k, -K_CLIP, K_CLIP), color=col, lw=lw, label=f"{label} ({len(runs)} beyond)")
+            for a, b, sign in runs:
+                ax_b.plot(0.5 * (s[a] + s[b]), sign * (K_CLIP - inset_), marker="^" if sign > 0 else "v", ms=3.2,
+                          color=col, ls="none", clip_on=False, zorder=6)
+        ax_b.axhline(0, color="k", lw=0.4, alpha=0.4)
+        ax_b.set_ylim(-K_CLIP, K_CLIP)
+        ax_b.set_ylabel(r"Curvature $\kappa$ (1/m), clipped $\pm$0.4")
+        ax_b.set_xlabel("Arc length s (m)")
+        ax_b.set_xlim(0, s[-1])
+        ax_b.grid(True, axis="y")
+        ax_b.legend(loc="lower right", bbox_to_anchor=(1.03, 0.995), ncol=2, fontsize=5.6, handlelength=1.1,
+                    columnspacing=0.5, borderaxespad=0.0, handletextpad=0.35, labelspacing=0.2)
+        panel_label(ax_b, "(b)", dx=-0.27)
 
-    # ---------- (c) 有效混合权重 + 横向偏差（最近点）与逐点位移 ----------
-    ax_c.plot(s, res["alpha_eff"], color=OI["blue"], lw=1.0, label=r"$\alpha_{\rm eff}$")
-    ax_c.set_ylim(0, 0.6)
-    ax_c.set_xlim(0, s[-1])
-    ax_c.set_xlabel("Arc length s (m)")
-    ax_c.set_ylabel(r"Blend weight $\alpha_{\rm eff}$", color=OI["blue"])
-    ax_c.tick_params(axis="y", colors=OI["blue"])
-    ax_c.spines["left"].set_color(OI["blue"])
-    ax_c2 = ax_c.twinx()
-    ax_c2.spines["top"].set_visible(False)
-    ax_c2.spines["right"].set_visible(True)
-    ax_c2.spines["right"].set_color(OI["vermillion"])
-    ax_c2.plot(s, dev_lat, color=OI["vermillion"], lw=1.0, label="Lateral dev.")
-    ax_c2.plot(s, res["dev_blend"], color=OI["vermillion"], lw=0.6, ls="--", label="Point-wise |blend $-$ raw|")
-    ax_c2.axhline(BS_DEV_CAP, color=OI["vermillion"], lw=0.7, ls=":", label="0.35 m cap")
-    ax_c2.set_ylim(0, 0.6)
-    ax_c2.set_ylabel("Deviation from raw (m)", color=OI["vermillion"])
-    ax_c2.tick_params(axis="y", colors=OI["vermillion"])
-    h1, l1 = ax_c.get_legend_handles_labels()
-    h2, l2 = ax_c2.get_legend_handles_labels()
-    ax_c.legend(h1 + h2, l1 + l2, loc="lower right", bbox_to_anchor=(1.03, 0.995), ncol=2, fontsize=5.8,
-                handlelength=1.3, columnspacing=0.6, borderaxespad=0.0, handletextpad=0.4, labelspacing=0.2)
-    panel_label(ax_c, "(c)", dx=-0.27)
+        # ---------- (c) 有效混合权重 + 横向偏差（最近点）与逐点位移 ----------
+        ax_c.plot(s, res["alpha_eff"], color=OI["blue"], lw=1.0, label=r"$\alpha_{\rm eff}$")
+        ax_c.set_ylim(0, 0.6)
+        ax_c.set_xlim(0, s[-1])
+        ax_c.set_xlabel("Arc length s (m)")
+        ax_c.set_ylabel(r"Blend weight $\alpha_{\rm eff}$", color=OI["blue"])
+        ax_c.tick_params(axis="y", colors=OI["blue"])
+        ax_c.spines["left"].set_color(OI["blue"])
+        ax_c2 = ax_c.twinx()
+        ax_c2.spines["top"].set_visible(False)
+        ax_c2.spines["right"].set_visible(True)
+        ax_c2.spines["right"].set_color(OI["vermillion"])
+        ax_c2.plot(s, dev_lat, color=OI["vermillion"], lw=1.0, label="Lateral dev.")
+        ax_c2.plot(s, res["dev_blend"], color=OI["vermillion"], lw=0.6, ls="--", label="Point-wise |blend $-$ raw|")
+        ax_c2.axhline(BS_DEV_CAP, color=OI["vermillion"], lw=0.7, ls=":", label="0.35 m cap")
+        ax_c2.set_ylim(0, 0.6)
+        ax_c2.set_ylabel("Deviation from raw (m)", color=OI["vermillion"])
+        ax_c2.tick_params(axis="y", colors=OI["vermillion"])
+        h1, l1 = ax_c.get_legend_handles_labels()
+        h2, l2 = ax_c2.get_legend_handles_labels()
+        ax_c.legend(h1 + h2, l1 + l2, loc="lower right", bbox_to_anchor=(1.03, 0.995), ncol=2, fontsize=5.8,
+                    handlelength=1.3, columnspacing=0.6, borderaxespad=0.0, handletextpad=0.4, labelspacing=0.2)
+        panel_label(ax_c, "(c)", dx=-0.27)
 
     # ---- 整图底部图例（(a) 的元素）----
     handles = [
@@ -795,6 +824,14 @@ def fig2_context(ctx: "Ctx", scen: str, s_ego: float | None = None):
     out = (route, full, win, stats)
     _FIG2_CACHE[key] = out
     return out
+
+
+def fig2_bspline_method(ctx: "Ctx"):
+    """方法示意版（论文正式采用）：(a) 环岛入口窗口俯视 (b) 曲率调度权重 (c) 偏离与限幅；不含曲率对比。"""
+    route, full, win, stats = fig2_context(ctx, "roundabout")
+    _fig2_draw(route, win, full, ctx.stem("fig2_bspline_method"), True,
+               "Roundabout entry, 31-waypoint window", method_only=True)
+    return stats
 
 
 def fig2_bspline(ctx: "Ctx"):
@@ -1471,6 +1508,7 @@ def check_projection(ctx: Ctx, out_dir: Path):
 # ==============================================================================
 FIGS = {
     "fig2_bspline": fig2_bspline,
+    "fig2_bspline_method": fig2_bspline_method,
     "fig2_bspline_int": fig2_bspline_int,
     "fig2_bspline_mul": fig2_bspline_mul,
     "fig2_bspline_full": fig2_bspline_full,

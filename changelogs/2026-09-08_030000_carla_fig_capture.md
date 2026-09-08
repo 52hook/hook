@@ -18,3 +18,6 @@ tools/fig_capture_batch.sh 日志（batch_v3/v4/v5）逐集记录 rows/sim/vp/ot
 
 ## 备注
 论文文件与 latex/figures 不入 git；experiment_results/fig_capture 与 images/fig_capture 为数据不入 git。
+
+## 追加（03:55）：图 2 参考线方法示意入稿
+- 用户决定 B 样条论述保持原样；参考线图采用「方法示意」版 fig2_bspline_method：(a) 环岛入口 31 点窗口俯视与走廊 (b) 曲率调度权重 α_i 与 α_eff (c) 融合线相对基准线的偏离与 0.35 m 上限；不含曲率对比面板。插入 §4.2 Route Z 段后，图号变为图 2，后续顺延至图 9；编译 25 页 0 error。
