@@ -274,6 +274,21 @@ class Env:
             fixed_delta_seconds=DT_/HFC_HZ))
         self.world.tick()
         print('world in sync mode')
+
+        # ==== 论文插图采集专用 (FIG_TM_SYNC=1): 交通管理器同步 + 固定随机种子 ====
+        # 世界为同步模式而 TM 默认异步, 背景车行为随墙钟变化; 采集运行开销不可为零,
+        # 故让 TM 跟随 tick 推进以消除墙钟依赖. 未设置时零改动 (批次协议不变).
+        self._fig_tm = None
+        if os.environ.get('FIG_TM_SYNC', '0') == '1':
+            try:
+                self._fig_tm = self.client.get_trafficmanager()
+                self._fig_tm.set_synchronous_mode(True)
+                _sd = os.environ.get('RANDOM_SEED', '')
+                if _sd.strip():
+                    self._fig_tm.set_random_device_seed(int(float(_sd)))
+                print('[FigCapture] traffic manager synchronous, seed=%s' % (_sd or 'none'))
+            except Exception as _e:
+                print('[FigCapture] TM sync failed:', _e)
         # birdeye view setting informationget_obsget_obs
         self.birdview_on = birdeye_view
         if birdeye_view:
@@ -1051,6 +1066,11 @@ class Env:
         #         print('image saving: ', image.frame_number)
         #         image.save_to_disk('image/%s/%08d.jpg' % (dir_name, image.frame_number))
 
+        if getattr(self, '_fig_tm', None) is not None:
+            try:
+                self._fig_tm.set_synchronous_mode(False)
+            except Exception:
+                pass
         self.world.apply_settings(self.original_settings)
         logging.info('destroying actors')
         self.client.apply_batch([carla.command.DestroyActor(x)

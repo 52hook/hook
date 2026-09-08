@@ -1117,6 +1117,9 @@ def pick_keyframe_times(t: np.ndarray, v: np.ndarray, min_dist: np.ndarray, obs,
     return out, cand
 
 
+FIG6_CROP_PX = 600      # 关键帧裁剪边长 (px); cam_z 45 m/FOV 90 时 ≈ ±26 m
+
+
 def fig6_keyframes(ctx: Ctx):
     left, right, top, bottom = 0.035, 0.995, 0.995, 0.005
     cell_w = DOUBLE_COL_IN * (right - left) / 4.0
@@ -1147,10 +1150,14 @@ def fig6_keyframes(ctx: Ctx):
             img = load_image(fpaths[j])
             res_px = img.shape[0]
             mpp = metres_per_pixel(cam_z, fov, res_px)
-            crop = 768 if res_px >= 768 else res_px
+            crop = min(FIG6_CROP_PX, res_px)          # 更紧的裁剪, 让自车与周车在栏宽下可辨
             o = (res_px - crop) // 2
             img_d = rotate_for_rh(img)[o:o + crop, o:o + crop]
             ax.imshow(img_d, extent=(0, crop, crop, 0), interpolation="lanczos")
+            # 自车标记: BEV 相机每步置于自车正上方, 自车恒在画面中心 (滞后 1 步 ≤ 0.5 m)
+            _r_ego = 4.0 / mpp
+            ax.add_patch(plt.Circle((crop / 2.0, crop / 2.0), _r_ego, fill=False, ec="white", lw=1.4, zorder=6))
+            ax.add_patch(plt.Circle((crop / 2.0, crop / 2.0), _r_ego, fill=False, ec="black", lw=0.5, zorder=6, alpha=0.6))
             ax.set_xlim(0, crop)
             ax.set_ylim(crop, 0)
             ax.set_xticks([])
@@ -1158,8 +1165,8 @@ def fig6_keyframes(ctx: Ctx):
             for sp_ in ax.spines.values():
                 sp_.set_visible(False)
             ax.text(0.03, 0.97, f"t = {ftimes[j]:.1f} s", transform=ax.transAxes, ha="left", va="top",
-                    fontsize=6.5, color="white",
-                    bbox=dict(boxstyle="round,pad=0.25", fc="black", ec="none", alpha=0.55))
+                    fontsize=7.5, color="white",
+                    bbox=dict(boxstyle="round,pad=0.25", fc="black", ec="none", alpha=0.6))
             if c == 0:
                 ax.text(-0.03, 0.5, SCENARIO_LABELS[scen], transform=ax.transAxes, rotation=90,
                         ha="right", va="center", fontsize=8)

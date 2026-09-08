@@ -36,6 +36,8 @@ class FigOverviewDone(Exception):
     """FIG_OVERVIEW_ONLY=1: 全景帧已落盘, 主动结束本集 (由 udmc_main 主循环 except 收尾)。"""
 
 def draw_planned_trj(world, x_trj, car_z, color=(200,0,0)):
+    if FIG_NO_DRAW:
+        return
     color = carla.Color(r=color[0],g=color[1],b=color[2],a=0)
     length = x_trj.shape[0]
     xx = x_trj[:,0]
@@ -123,7 +125,12 @@ def _rect_vertices_carla(cx, cy, yaw_rad, L, W):
     return [(cx + c * lx - s * ly, cy + s * lx + c * ly) for lx, ly in local]
 
 
+FIG_NO_DRAW = os.environ.get('FIG_NO_DRAW', '0') == '1'   # 诊断: 关闭叠加绘制
+FIG_NO_CAM = os.environ.get('FIG_NO_CAM', '0') == '1'     # 诊断: 不建相机
+
 def draw_polygon(world, vertices_xy_carla, z, color=(0, 200, 0), life_time=0.1, thickness=0.06):
+    if FIG_NO_DRAW:
+        return
     """闭合多边形 (CARLA 世界系顶点列表 [(x, y), ...], 高度 z)。"""
     pts = [(float(v[0]), float(v[1])) for v in vertices_xy_carla]
     n = len(pts)
@@ -140,6 +147,8 @@ def draw_polygon(world, vertices_xy_carla, z, color=(0, 200, 0), life_time=0.1, 
 
 
 def draw_polyline_carla(world, xy_carla, z, color=(200, 0, 0), life_time=0.1, thickness=0.08):
+    if FIG_NO_DRAW:
+        return
     """开放折线 (CARLA 世界系 (N,2) 或 (N,3): 第三列为逐点高度)。"""
     arr = np.asarray(xy_carla, dtype=float)
     if arr.ndim != 2 or arr.shape[0] < 2:
@@ -186,6 +195,8 @@ class FigCaptureSession:
         self._tag = tag or env.get('FIG_TAG') or ('fig_' + time.strftime('%Y%m%d_%H%M%S'))
         self._cam_z = float(env.get('FIG_CAM_Z', '45') or 45.0)
         self._every = max(int(float(env.get('FIG_EVERY', '10') or 10)), 1)
+        # 相机按 every*dt 的周期渲染 (FIG_SENSOR_TICK=0 退回每 tick 渲染)
+        self._sensor_tick = (self._every * self._dt) if env.get('FIG_SENSOR_TICK', '1') != '0' else None
         _ov_env = (env.get('FIG_OVERVIEW_Z') or '').strip()
         self._ov_z_fixed = float(_ov_env) if _ov_env else None   # 显式给定则不自适应
         self._ov_z = self._ov_z_fixed if self._ov_z_fixed is not None else 150.0
@@ -261,8 +272,11 @@ class FigCaptureSession:
         self._step = 0
         self._finalized = False
 
-        self._bev_cam = self._make_cam(self._bev_transform())
-        self._bev_cam.listen(self._bev_cb)
+        if FIG_NO_CAM:
+            self._bev_cam = None
+        else:
+            self._bev_cam = self._make_cam(self._bev_transform(), sensor_tick=self._sensor_tick)
+            self._bev_cam.listen(self._bev_cb)
         atexit.register(self.finalize)
         print('[FigCapture] session tag=%s frame_dir=%s npz=%s cam_z=%.1f every=%d'
               % (self._tag, self._frame_dir, self._npz_path, self._cam_z, self._every))
@@ -270,8 +284,11 @@ class FigCaptureSession:
     # ------------------------------------------------------------------
     #   相机 / 帧管线 (主线程零阻塞: 帧由回调线程按登记表交给写盘线程)
     # ------------------------------------------------------------------
-    def _make_cam(self, transform):
+    def _make_cam(self, transform, sensor_tick=None):
         bp = self._world.get_blueprint_library().find('sensor.camera.rgb')
+        # sensor_tick: 相机只按该周期渲染 (秒); 其余 tick 零渲染开销, 避免采集拖慢同步步进
+        if sensor_tick is not None and bp.has_attribute('sensor_tick'):
+            bp.set_attribute('sensor_tick', str(float(sensor_tick)))
         bp.set_attribute('image_size_x', str(self._res))
         bp.set_attribute('image_size_y', str(self._res))
         bp.set_attribute('fov', str(self._fov))
@@ -341,12 +358,13 @@ class FigCaptureSession:
         try:
             if self._bev_cam is not None:
                 self._bev_cam.set_transform(self._bev_transform())      # 异步 RPC
-            if k % self._every == 0:
+            if self._sensor_tick is not None or k % self._every == 0:
                 fid = int(self._world.get_snapshot().frame) + 1       # 本 tick 的 frame (客户端缓存态)
                 path = os.path.join(self._frame_dir, 'bev_%06d_t%.2f.png' % (k, (k + 1) * self._dt))
-                self._want_last = fid
+                if k % self._every == 0:
+                    self._want_last = fid
                 with self._want_lock:
-                    self._want[fid] = path
+                    self._want[fid] = path        # sensor_tick 模式: 每步登记, 相机发哪帧存哪帧
                     for old in [f for f in self._want if f < fid - 50]:   # 漏帧登记清理
                         self._want.pop(old, None)
             if not self._ov_done:
@@ -358,6 +376,9 @@ class FigCaptureSession:
                         cx, cy = loc.x, loc.y
                     self._meta['overview_center'] = [float(cx), float(cy)]
                     self._meta['overview_z'] = float(self._ov_z)
+                    if FIG_NO_CAM:
+                        self._ov_done = True
+                        return
                     self._ov_cam = self._make_cam(carla.Transform(
                         carla.Location(x=float(cx), y=float(cy), z=self._ov_z),
                         carla.Rotation(pitch=-90.0, yaw=0.0, roll=0.0)))
