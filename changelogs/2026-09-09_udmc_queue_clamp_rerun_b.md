@@ -35,3 +35,4 @@ unsig_crossroad、roundabout、multilaneACC、mixed_traffic 的 UDMC 臂。
 - 两套入口 `udmc_main.py` 的 `except Exception` 块加入 `PRINT_TRACEBACK=1` 门控诊断：打印回溯、`other_vehicles_list` 句柄存活数与世界中车辆数，用于定位周车被销毁的来源。默认关闭，不影响批次行为。
 - 用户决定（同日）：`trying to operate on a destroyed actor` 一律判仿真失败，理由是自车长时间找不到可行路卡死，周车才会静止到被交通管理器清除；不在 env 中加句柄守卫（已写好的守卫改动撤销未提交）。`rerun_b_40901.sh` 据此把该异常的 run 记入 `failed.tsv`（原因列 `stuck_destroyed_actor`）并删除其日志文件，超时或无效产物记 `invalid_or_timeout`。
 - 冒烟核验：钳位补丁版 UDMC 环岛 seed 60 于 20.3 s 以 `No waypoints to follow`（路点耗尽）结束，405 行 16 列，无碰撞；结束判据已与 GRIPC 一致。
+- 服务器 ssh 自 17:30 起握手阶段持续被断（含 ControlMaster 复用尝试均失败），用户指示改本地跑：新增 `rerun_b_local.sh`（同协议：只跑一遍、300 s 超时、卡死异常判失败；本机 CARLA 离屏、每 25 集例行重启），结果目录 `experiment_results/rerun_b_local/`，启动日志 `experiment_results/rerun_b_local_launch.log`，15:43 起批。服务器上 `~/ljh/code` 已同步至 f6de3e6 但批未启动。
