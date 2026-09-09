@@ -33,3 +33,5 @@ unsig_crossroad、roundabout、multilaneACC、mixed_traffic 的 UDMC 臂。
 ## 追加（同日）：诊断发现与仪表化
 - 补丁后的服务器冒烟（环岛 seed 60）运行 101.3 s 后以 `trying to operate on a destroyed actor` 结束，而非路点耗尽。回查正式数据：该异常在所有 OCP 臂的长 run 中普遍出现，首次出现时刻集中在 93 到 111 s；UDMC 环岛慢峰 29 个 run 全部以此结束，混合 28 个、交叉口 12 个；GRIPC 各消融臂的超过 93 s 的 run 同样受影响。FSM、FRENET、TCP 不调用 `env.get_obs`，不受影响。
 - 两套入口 `udmc_main.py` 的 `except Exception` 块加入 `PRINT_TRACEBACK=1` 门控诊断：打印回溯、`other_vehicles_list` 句柄存活数与世界中车辆数，用于定位周车被销毁的来源。默认关闭，不影响批次行为。
+- 用户决定（同日）：`trying to operate on a destroyed actor` 一律判仿真失败，理由是自车长时间找不到可行路卡死，周车才会静止到被交通管理器清除；不在 env 中加句柄守卫（已写好的守卫改动撤销未提交）。`rerun_b_40901.sh` 据此把该异常的 run 记入 `failed.tsv`（原因列 `stuck_destroyed_actor`）并删除其日志文件，超时或无效产物记 `invalid_or_timeout`。
+- 冒烟核验：钳位补丁版 UDMC 环岛 seed 60 于 20.3 s 以 `No waypoints to follow`（路点耗尽）结束，405 行 16 列，无碰撞；结束判据已与 GRIPC 一致。

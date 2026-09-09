@@ -6,6 +6,7 @@
 # - 本批目的: 路点队列钳位补丁 (_wq) 使 UDMC 与 GRIPC 同以路点耗尽结束,
 #   消除原版在终点前约 18 m 越界报错提前结束造成的通行时间偏置
 # - 每格只跑一遍, 不重试; 无效产物记 failed.tsv 留痕并删除
+# - 周车 actor 被销毁异常 (自车卡死 ≥90 s 致交通管理器清车) 按仿真失败计 (用户规则)
 # - 结果: ~/ljh/rerun_b_results/UDMC_<scenario>_r<N>.txt (16 列)
 # - CARLA 自管: 批开始先杀本端口旧进程再离屏拉起 (手册规范式:
 #   DISPLAY= / nice -n 10 / 禁 Low 画质), 端口掉线时自动重拉
@@ -66,12 +67,18 @@ run_one() {
     log "运行 $label | $sc | r=$r | seed=$seed"
     ( cd "$wd" && CARLA_PORT=$PORT PLOT_RESULT=0 RANDOM_SEED=$seed LOG_OUTPUT="$f" \
         timeout 300 nice -n 10 "$PY" "$entry" "$sc" True > "$R/${label}_${sc}_r${r}.log" 2>&1 ) || true
-    if is_valid "$f"; then
-        log "成功 $label | $sc | r=$r | 结束原因: $(grep -m1 -E 'No waypoints to follow|deque index out of range' "$R/${label}_${sc}_r${r}.log" || echo 其他)"
-    else
-        printf '%s\t%s\t%s\t%s\n' "$label" "$sc" "$r" "$seed" >> "$R/failed.tsv"
+    local lg="$R/${label}_${sc}_r${r}.log"
+    if grep -aq "trying to operate on a destroyed actor" "$lg"; then
+        # 用户规则 (2026-09-09): 周车 actor 被销毁异常 = 自车长时间卡死找不到可行路 → 判仿真失败
+        printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$sc" "$r" "$seed" "stuck_destroyed_actor" >> "$R/failed.tsv"
         rm -f "$f"
-        log "失败 $label | $sc | r=$r (留痕 failed.tsv)"
+        log "失败 (卡死: 周车被销毁异常) $label | $sc | r=$r (留痕 failed.tsv)"
+    elif is_valid "$f"; then
+        log "成功 $label | $sc | r=$r | 结束原因: $(grep -a -m1 -E 'No waypoints to follow|deque index out of range' "$lg" || echo 其他)"
+    else
+        printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$sc" "$r" "$seed" "invalid_or_timeout" >> "$R/failed.tsv"
+        rm -f "$f"
+        log "失败 (无效或超时) $label | $sc | r=$r (留痕 failed.tsv)"
     fi
     sleep 8
 }
