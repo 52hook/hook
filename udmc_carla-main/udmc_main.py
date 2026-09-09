@@ -253,6 +253,11 @@ for _ in range(10000):
         except Exception:
             pass
         # ----------------------- The above code is for the UDMC execution -----------------------
+        # 修复 (2026-09-09): vel_ev_dir 原只在检出前车的分支内定义, 混合场景无前车时行人 TTC/THW
+        # 统计分支引用它会抛 NameError 终止整集 (旧批次混合场景多集因此在 8-27 s 被截断)。改为每步先算。
+        _ev_vel = navigation_agent._vehicle.get_velocity()
+        _ev_yaw = np.deg2rad(navigation_agent._vehicle.get_transform().rotation.yaw)
+        vel_ev_dir = float(np.dot([_ev_vel.x, _ev_vel.y], [np.cos(_ev_yaw), np.sin(_ev_yaw)]))
         if lv_state:
             # relative velocity of the leading vehicle
             delta_vel_lv = np.array([lv.get_velocity().x - navigation_agent._vehicle.get_velocity().x, lv.get_velocity().y - navigation_agent._vehicle.get_velocity().y])
