@@ -351,6 +351,17 @@ for _ in range(10000):
     except Exception as e:
         # time.sleep(5)
         print(e)
+        # ---- 诊断 (PRINT_TRACEBACK=1): 回溯 + 周车句柄存活数, 定位周车被销毁的位置 ----
+        if os.environ.get('PRINT_TRACEBACK', '0') == '1':
+            import traceback
+            traceback.print_exc()
+            try:
+                _alive = sum(1 for _a in env.other_vehicles_list if _a.is_alive)
+                _world_veh = len(env.world.get_actors().filter('vehicle.*'))
+                print(f'[diag] simu_time={agent._simu_time:.2f} other_vehicles_list={len(env.other_vehicles_list)} '
+                      f'alive={_alive} world_vehicles={_world_veh}', flush=True)
+            except Exception as _e2:
+                print('[diag] alive-count failed:', _e2, flush=True)
         if env.If_record_sv_history:
             np.save('sv_history.npy', np.array(env.other_vehicles_history_list))
         if env.If_record_pede_history:
