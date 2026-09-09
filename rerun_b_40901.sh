@@ -1,0 +1,93 @@
+#!/bin/bash
+# ========================================================================
+# 重跑批 B (40901 服务器专用, 2026-09-09)
+# ------------------------------------------------------------------------
+# - UDMC 原版入口 (udmc_carla-main, 含防倒车补丁) 4 场景 x 50 seed
+# - 本批目的: 路点队列钳位补丁 (_wq) 使 UDMC 与 GRIPC 同以路点耗尽结束,
+#   消除原版在终点前约 18 m 越界报错提前结束造成的通行时间偏置
+# - 每格只跑一遍, 不重试; 无效产物记 failed.tsv 留痕并删除
+# - 结果: ~/ljh/rerun_b_results/UDMC_<scenario>_r<N>.txt (16 列)
+# - CARLA 自管: 批开始先杀本端口旧进程再离屏拉起 (手册规范式:
+#   DISPLAY= / nice -n 10 / 禁 Low 画质), 端口掉线时自动重拉
+# - 断点续跑: 已 valid 或已记 failed 的格子自动跳过
+# ========================================================================
+set -u
+R=~/ljh/rerun_b_results
+mkdir -p "$R"
+CODE=~/ljh/code
+PY=~/ljh/miniconda3/envs/first1/bin/python
+GIT=~/ljh/miniconda3/envs/first1/bin/git
+PORT=${CARLA_PORT:-2001}
+
+log() { echo "[$(date '+%F %T')] $*"; }
+
+is_valid() {
+    [ -f "$1" ] || return 1
+    awk 'NF!=16{exit 1} ($16!=0&&$16!=1&&$16!=2&&$16!=3){exit 1} END{if(NR<100) exit 1}' "$1" 2>/dev/null
+}
+
+kill_port_carla() {
+    local p
+    for p in $(ps -eo pid,args | awk -v P="-carla-rpc-port=${PORT}" '/CarlaUE4/ && index($0, P) {print $1}'); do
+        kill -9 "$p" 2>/dev/null || true
+    done
+}
+
+start_carla() {
+    log "拉起 CARLA (端口 ${PORT}, 离屏)..."
+    ( cd ~/ljh/carla/CARLA_0.9.16 && DISPLAY= nohup nice -n 10 ./CarlaUE4.sh -RenderOffScreen \
+        -carla-rpc-port="${PORT}" > /tmp/carla_rerun_b.log 2>&1 & )
+    local i
+    for i in $(seq 1 60); do
+        ss -ltn 2>/dev/null | grep -q ":${PORT} " && { sleep 20; return 0; }
+        sleep 3
+    done
+    log "警告: CARLA 拉起超时"
+    return 1
+}
+
+ensure_carla() {
+    ss -ltn 2>/dev/null | grep -q ":${PORT} " && return 0
+    log "CARLA 不在 ${PORT}, 重新拉起..."
+    kill_port_carla
+    sleep 4
+    start_carla
+}
+
+already_failed() { grep -q "^$1	$2	$3	" "$R/failed.tsv" 2>/dev/null; }
+
+# run_one <label> <scenario> <r> <seed> <workdir> <entry.py>
+run_one() {
+    local label=$1 sc=$2 r=$3 seed=$4 wd=$5 entry=$6
+    local f="$R/${label}_${sc}_r${r}.txt"
+    if is_valid "$f"; then log "跳过 (valid) $label | $sc | r=$r"; return 0; fi
+    if already_failed "$label" "$sc" "$r"; then log "跳过 (已记 failed) $label | $sc | r=$r"; return 0; fi
+    ensure_carla || true
+    log "运行 $label | $sc | r=$r | seed=$seed"
+    ( cd "$wd" && CARLA_PORT=$PORT PLOT_RESULT=0 RANDOM_SEED=$seed LOG_OUTPUT="$f" \
+        timeout 300 nice -n 10 "$PY" "$entry" "$sc" True > "$R/${label}_${sc}_r${r}.log" 2>&1 ) || true
+    if is_valid "$f"; then
+        log "成功 $label | $sc | r=$r | 结束原因: $(grep -m1 -E 'No waypoints to follow|deque index out of range' "$R/${label}_${sc}_r${r}.log" || echo 其他)"
+    else
+        printf '%s\t%s\t%s\t%s\n' "$label" "$sc" "$r" "$seed" >> "$R/failed.tsv"
+        rm -f "$f"
+        log "失败 $label | $sc | r=$r (留痕 failed.tsv)"
+    fi
+    sleep 8
+}
+
+log "=== 重跑批 B 开始: HEAD=$(cd $CODE && $GIT log --oneline -1) ==="
+log "补丁核验: _wq 出现次数=$(grep -c '_wq(' $CODE/udmc_carla-main/scripts/x_v2x_agent.py), 防倒车 lbx=0 出现次数=$(grep -c 'self.lbx.append(0.0)' $CODE/udmc_carla-main/scripts/vehicle_obs.py)"
+log "批开始: 杀本端口旧 CARLA 并重新拉起"
+kill_port_carla
+sleep 4
+start_carla || true
+for r in $(seq 1 50); do
+    seed=$((42 + r))
+    for sc in unsig_crossroad roundabout multilaneACC mixed_traffic; do
+        run_one UDMC "$sc" "$r" "$seed" "$CODE/udmc_carla-main" udmc_main.py
+    done
+    log "--- 完成第 $r/50 轮 --- UDMC valid=$(ls $R/UDMC_*_r*.txt 2>/dev/null | wc -l) failed=$(wc -l < $R/failed.tsv 2>/dev/null || echo 0)"
+done
+log ALL_DONE
+touch "$R/COMPLETED"

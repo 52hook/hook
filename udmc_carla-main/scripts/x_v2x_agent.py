@@ -146,6 +146,22 @@ class Xagent(BasicAgent):
         ev_loc = self.rotate(ev_loc[0], ev_loc[1], np.deg2rad(wp_yaw))
         return np.abs(wp_loc[1] - ev_loc[1])
     
+    # ==========================================================================
+    #  路点队列钳位访问 (2026-09-09 补丁, 与主线 scripts/x_v2x_agent.py::_wq 同源)
+    #  原版直接用下标 0/1/3 访问 deque, 终点前剩余路点不足 4 个时抛
+    #  "deque index out of range", 使 UDMC 在距终点约 18 m 处提前结束;
+    #  钳位后队列耗尽才结束, 结束判据与 GRIPC 主线一致。仅改访问方式, 不改逻辑。
+    # ==========================================================================
+    def _wq(self, idx):
+        n = len(self._waypoints_queue)
+        if n == 0:
+            raise Exception("No waypoints to follow")
+        if idx < 0:
+            idx = 0
+        elif idx >= n:
+            idx = n - 1
+        return self._waypoints_queue[idx]
+
     def run_step(self,lv=None):
         self._simu_time += self._dt
         state, height = self._model.get_state_carla() # return the car's state and height
@@ -317,9 +333,9 @@ class Xagent(BasicAgent):
         vpf_offset = 0.25
         
         # if the vehicle will turn left or right, set nc_road_pf
-        if self._waypoints_queue[0][1].value == 2 or self._waypoints_queue[3][1].value == 2:
+        if self._wq(0)[1].value == 2 or self._wq(3)[1].value == 2:
             # if rhe vehicle has crossed the road lane, set ordinary PF
-            if self.lat_dis_wp_ev(self._waypoints_queue[1][0], self._env.ego_vehicle) < 1.7:
+            if self.lat_dis_wp_ev(self._wq(1)[0], self._env.ego_vehicle) < 1.7:
                 self._model.solver_add_nc_road_pf([[left_bound, 1]], wp_yaw, carla=True)
                 apf_nc_road += self._model.nc_road_pf([[left_bound, 1]], ref_traj, wp_yaw)
             elif wp.left_lane_marking.type in lcrossable_list:
