@@ -394,9 +394,9 @@ class Xagent(BasicAgent):
         #     self._model.solver_add_nc_road_pf([[left_bound+vpf_offset, -1]], wp_yaw, carla=True)
         #     apf_nc_road += self._model.nc_road_pf([[left_bound+vpf_offset, -1]], ref_traj, wp_yaw)
         # if the vehicle will turn left or right, set nc_road_pf
-        if self._waypoints_queue[0][1].value == 1 or self._waypoints_queue[3][1].value == 1:
+        if self._wq(0)[1].value == 1 or self._wq(3)[1].value == 1:
             # if the vehicle has crossed the road lane, set ordinary PF
-            if self.lat_dis_wp_ev(self._waypoints_queue[0][0], self._env.ego_vehicle) < 1.70:
+            if self.lat_dis_wp_ev(self._wq(0)[0], self._env.ego_vehicle) < 1.70:
                 self._model.solver_add_nc_road_pf([[right_bound, -1]], wp_yaw, carla=True)
                 apf_nc_road += self._model.nc_road_pf([[right_bound, -1]], ref_traj, wp_yaw)
             elif wp.right_lane_marking.type in rcrossable_list:
