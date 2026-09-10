@@ -219,6 +219,10 @@ for _ in range(10000):
         # time.sleep(simu_step)
         # - check TTC
         ego_vehicle_loc = env.ego_vehicle.get_location()
+        # 到达判据 (2026-09-09): 距终点 < 5 m 即结束, 与 FSM/FRENET/TCP 基线一致。原先只靠路点队列耗尽结束,
+        # 末路点须在 1 m 内才出队, 自车若在相邻车道到达则永不结束, 会按参考线尽头继续巡航直至异常。
+        if ego_vehicle_loc.distance(destination_transform.location) < 5.0:
+            raise Exception('Reached destination (< 5 m)')
         vehicle_list = [v for v in vehicle_list_all if dist(v) < 45 and v.id != navigation_agent._vehicle.id]
         lv_state, lv, distance = navigation_agent._vehicle_obstacle_detected(vehicle_list, 15, up_angle_th=45)
         # ----------------------- The following code is for the UDMC execution -----------------------

@@ -22,7 +22,7 @@ RESTART_EVERY=25
 TIMEOUT_S=${TIMEOUT_S:-420}          # 本机每仿真秒约 2 s 墙钟, 300 s 只够约 150 s 仿真, 放宽到 420 s
 # BLAS 线程限 1: 本机 numpy/OpenBLAS 默认 32 线程, 单集 python 占 11 核以上空转, 拖慢每步墙钟并改变异步交通管理器行为
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
-PROBE="${PROBE-multilaneACC:7 multilaneACC:9 multilaneACC:10}"   # 起批先探测的格子 (attempt1 中卡死的多车道种子)
+PROBE="${PROBE-multilaneACC:7 roundabout:1}"   # 起批先探测的格子 (attempt1/2 中"卡死"的种子, 到达判据修复后应正常完成)
 
 log() { echo "[$(date '+%F %T')] $*"; }
 
@@ -83,7 +83,7 @@ run_one() {
         [ -f "$f" ] && mv "$f" "${f%.txt}.failed.txt"     # 保留数据供审计, is_valid 不再匹配
         log "失败 (卡死: 周车被销毁异常) $label | $sc | r=$r (留痕 failed.tsv)"
     elif is_valid "$f"; then
-        log "成功 $label | $sc | r=$r | 结束原因: $(grep -a -m1 -E 'No waypoints to follow|deque index out of range' "$lg" || echo 其他)"
+        log "成功 $label | $sc | r=$r | 结束原因: $(grep -a -m1 -E 'Reached destination|No waypoints to follow|deque index out of range' "$lg" || echo 其他)"
     else
         printf '%s\t%s\t%s\t%s\t%s\n' "$label" "$sc" "$r" "$seed" "invalid_or_timeout" >> "$R/failed.tsv"
         [ -f "$f" ] && mv "$f" "${f%.txt}.failed.txt"
