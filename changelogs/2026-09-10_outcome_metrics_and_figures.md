@@ -29,7 +29,14 @@
 用户 2026-09-10 决定：按全 50 集算碰撞率、不补跑 FSM、采用到达率/停滞率口径、把防倒车约束写入论文并借此展开停滞率讨论。
 
 ## 验证结果
-（完成后追加）
+- `analyze_v6_pedfix.py`：样本量核对无缺口（每格 50 = 到达 + 停滞 + 超时/掠过），有数据 run 共 1767；结局表与 `summary.csv` 一致；`tools/audit_rerun_b.py` 对 UDMC 200 格无异常结束。
+- `tools/make_paper_tables.py` 生成的表 1（20 行）与表 2（5 行）已替换入稿；数字与 summary.csv 逐格一致。
+- 补跑 8 格：GRIPC r5、noBSP r2、noOBCA r2/r8、noIGPR r2/r21/r8、noQP r21 全部以 `Reached destination` 到达（GRIPC r5 第一次尝试因本机负载 300 s 超时无产物，第二次成功）。
+- 图 9/10 由 `make_result_figures.py` 重出（碰撞率分母 50；到达率面板；成功 run 通行时间；FSM 混合无成功 run 不绘制）；图 5 用 `FIG_OVERVIEW_LAYER=0` 采集的四张干净全景底图叠加 GRIPC 实际轨迹，无折线与烘焙终点框；图 6 混合行改用 1.9/3.4/7.1/25.4 s 帧，行人穿越可见；图 7 点线因原始样条在环岛接缝回折处自交而整图删除；图 8 改为 4 面板。
+- 论文 xelatex + bibtex + xelatex×2：0 error、26 页、无未定义引用；表 1 以 `\resizebox{\textwidth}{!}` 收进版心后无 overfull；其余 overfull 均为改动前已有的小量（≤11.6 pt）与模板 \maketitle 一处。
+- 实时率核实：GRIPC 到达 run 91748 步中 45 步超过 50 ms，实时率 99.96%，摘要/§5.2/结论均改为该值（原"精确 100%"不成立）。
+- 远近拆分在到达 run 上重算：环岛远离交通 GRIPC 0.167 m 对 w/o B-spline 0.105 m，贴近 6 m 内 0.261 m 对 w/o OBCA 0.191 m；旧稿 0.043 m 等数字受停滞 run 拉低，已更正。
+- 未完成项：图 7/8 仍用未打补丁 UDMC 的旧采集（终点前 18 m 结束）。补丁版 UDMC 重录在本机高负载（用户另一组实验，负载 30 到 39）下两次失败（环岛 60 卡死超时、交叉口 83 连接超时），换 seed 51 重试时 GRIPC 在采集里碰撞，判定高负载下采集不可用；`tools/fig_capture_run.sh` 加 `FIG_CARLA_WAIT` 环境变量，待负载降低后重录并重出图 7/8。
 
 ## 关联场景
 四场景全部方法。

@@ -78,7 +78,7 @@ ensure_carla() {
 # 每次运行前重启 CARLA: 清掉上次残留的 debug 绘制与状态, 保证与正式批同样从干净世界开始
 for p in $(ps -eo pid,comm | awk '$2 ~ /^CarlaUE4/ {print $1}'); do kill $p 2>/dev/null || true; done; sleep 4
 ensure_carla || true
-sleep 20   # 端口就绪后再等地图加载 (Town10->Town03), 否则客户端 10 s 超时
+sleep "${FIG_CARLA_WAIT:-20}"   # 端口就绪后再等地图加载 (高负载时用 FIG_CARLA_WAIT=60) (Town10->Town03), 否则客户端 10 s 超时
 
 # shellcheck disable=SC1090
 source "${HOME}/anaconda3/etc/profile.d/conda.sh" && conda activate first1
