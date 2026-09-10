@@ -440,7 +440,10 @@ class FigCaptureSession:
 
     def _draw_overview_layer(self):
         """全景抓拍专用图层: 粗橙色全程路线 (0.006*z m) + 起终点 1.5 m 实心方块 (绿/红)。
-        寿命 0.3 s, 仅在全景相机存活的 1-2 步内重画; 常规集中只会出现在 bev_000020 一帧。"""
+        寿命 0.3 s, 仅在全景相机存活的 1-2 步内重画; 常规集中只会出现在 bev_000020 一帧。
+        FIG_OVERVIEW_LAYER=0 时不画 (2026-09-10: 论文图 5 改在 matplotlib 侧叠加实际轨迹, 底图须干净)。"""
+        if os.environ.get('FIG_OVERVIEW_LAYER', '1') == '0':
+            return
         arr = self._route
         life = self._ov_layer_life
         thick = 0.006 * float(self._ov_z)

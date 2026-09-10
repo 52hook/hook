@@ -25,7 +25,7 @@ python make_carla_figures.py --check-proj /tmp/proj  # 把路线叠到 overview.
 | `fig5_scenarios` | 四场景总览（overview.png 裁剪 + 起终点 + 行人路径） | 采集 |
 | `fig6_keyframes` | 四场景 × 四关键帧 BEV | 采集 |
 | `fig7_trajectories` | 环岛 / 路口：GRIPC（按速度着色）vs UDMC 轨迹 | 采集 |
-| `fig8_timeseries` | 环岛五通道时序 GRIPC vs UDMC | 采集 |
+| `fig8_timeseries` | 环岛四通道时序 GRIPC vs UDMC | 采集 |
 
 ## 种子与备用种子
 

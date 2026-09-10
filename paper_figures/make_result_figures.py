@@ -57,14 +57,33 @@ ECDF_XMIN_MS, ECDF_XMAX_MS, ECDF_GRID_N = 0.1, 300.0, 600
 PER_RUN = load_per_run()
 
 
+REPEATS_PER_CELL = 50     # 到达率 / 碰撞率的分母 (论文 §5.1: 每格计划 50 次重复)
+
+
 def cell(method: str, scenario: str) -> dict:
-    """方法 x 场景 一格的 per_run 行。"""
+    """方法 x 场景 一格的全部 per_run 行 (含结局为 stall 的 run; 2026-09-10 起 per_run.csv 带 outcome 列)。"""
     return select(PER_RUN, method, scenario)
 
 
+def _subset(rows: dict, mask: np.ndarray) -> dict:
+    return {k: v[mask] for k, v in rows.items()}
+
+
+def cell_arrived(method: str, scenario: str) -> dict:
+    """到达的 run (连续指标只在这些 run 上统计)。"""
+    rows = cell(method, scenario)
+    return _subset(rows, rows["outcome"] == "arrived")
+
+
+def cell_success(method: str, scenario: str) -> dict:
+    """成功的 run = 到达且无车-车/车-人碰撞 (通行时间只在这些 run 上统计)。"""
+    rows = cell(method, scenario)
+    return _subset(rows, (rows["outcome"] == "arrived") & (rows["any_vp_collision"] == 0))
+
+
 def repeats_of(method: str, scenario: str) -> np.ndarray:
-    """该格全部有效 run 的 repeat 编号（与 per_run.csv 严格一致，自动排除无效 run）。"""
-    return cell(method, scenario)["repeat"].astype(int)
+    """该格到达 run 的 repeat 编号 (停滞 run 的逐步日志为 .failed.txt, 不参与逐步统计)。"""
+    return cell_arrived(method, scenario)["repeat"].astype(int)
 
 
 _STEP_CACHE: dict = {}
@@ -93,8 +112,14 @@ def pooled_step_column(method: str, scenario: str, col_name: str) -> np.ndarray:
 
 
 def collision_rates(methods: list[str]) -> dict:
-    """碰撞率 (%) = 100 * mean(any_vp_collision)，按方法 -> [4 场景]。"""
-    return {m: np.array([100.0 * cell(m, s)["any_vp_collision"].mean()
+    """碰撞率 (%) = 100 * sum(any_vp_collision) / 50，分母为每格计划重复数 (超时无数据的 run 按未碰撞计)。"""
+    return {m: np.array([100.0 * cell(m, s)["any_vp_collision"].sum() / REPEATS_PER_CELL
+                         for s in SCENARIO_ORDER]) for m in methods}
+
+
+def arrival_rates(methods: list[str]) -> dict:
+    """到达率 (%) = 100 * n_arrived / 50。"""
+    return {m: np.array([100.0 * np.sum(cell(m, s)["outcome"] == "arrived") / REPEATS_PER_CELL
                          for s in SCENARIO_ORDER]) for m in methods}
 
 
@@ -203,27 +228,34 @@ def fig9_panel_a(ax):
     ax.set_yticks([0, 25, 50, 75, 100])
 
 
+def fig9_panel_arrival(ax):
+    """(b) 到达率 (%), 分母 50; 未到达 = 停滞 (GRIPC/UDMC) 或仿真超时/掠过误判 (三条基线)。"""
+    rates = arrival_rates(METHOD_ORDER)
+    print_rate_table("Fig.9(b) arrival", rates, METHOD_LABELS)
+    grouped_bars(ax, METHOD_ORDER, METHOD_COLORS, METHOD_LABELS, rates)
+    ax.set_ylim(0, 105)
+    ax.set_yticks([0, 25, 50, 75, 100])
+    ax.set_ylabel("Arrival rate (%)")
+
+
 def fig9_panel_b(ax):
+    """(c) 成功 run 的通行时间分布; 无成功 run 的格子 (FSM x Mixed) 不画。"""
     n = len(METHOD_ORDER)
+    print("\n[Fig.9(c)] travel time over successful runs (n):")
     for j, s in enumerate(SCENARIO_ORDER):
         for i, m in enumerate(METHOD_ORDER):
             pos = SCEN_X[j] + (i - (n - 1) / 2.0) * SPACING_5
-            tt = cell(m, s)["total_time"]
-            # FSM x Mixed：全部 run 以行人碰撞终止，行程时间不可比 -> 淡化 + 斜纹
-            degraded = (m == "FSM" and s == "mixed_traffic")
-            log_violin(ax, tt, pos, WIDTH_5, METHOD_COLORS[m],
-                       alpha=0.35 if degraded else 0.75,
-                       hatch="////" if degraded else None)
+            tt = cell_success(m, s)["total_time"]
+            print(f"  {METHOD_LABELS[m]:9s} {SCENARIO_LABELS[s]:13s} n={tt.size:2d}" +
+                  (f" median={np.median(tt):6.1f} s" if tt.size else "  (no successful run)"))
+            if tt.size < 2:
+                continue
+            log_violin(ax, tt, pos, WIDTH_5, METHOD_COLORS[m], alpha=0.75)
     ax.set_yscale("log")
     ax.set_ylim(7, 600)
     set_log_ticks(ax.yaxis, [10, 20, 50, 100, 200, 500])
-    ax.set_ylabel("Travel time (s)")
+    ax.set_ylabel("Travel time of successful runs (s)")
     style_scenario_axis(ax)
-    # 打印 UDMC 环岛双模态证据
-    tt = np.sort(cell("UDMC", "roundabout")["total_time"])
-    print(f"\n[Fig.9(b)] UDMC roundabout travel time: n={tt.size}, "
-          f"fast mode <= 25 s: {np.sum(tt <= 25)} runs ({tt[tt <= 25].min():.1f}-{tt[tt <= 25].max():.1f} s), "
-          f"slow mode > 25 s: {np.sum(tt > 25)} runs ({tt[tt > 25].min():.1f}-{tt[tt > 25].max():.1f} s)")
 
 
 def fig9_panel_c(ax):
@@ -231,9 +263,10 @@ def fig9_panel_c(ax):
     data, positions, colors = [], [], []
     for j, s in enumerate(SCENARIO_ORDER):
         for i, m in enumerate(METHOD_ORDER):
-            data.append(cell(m, s)["rmse_unified"])
+            data.append(cell_arrived(m, s)["rmse_unified"])
             positions.append(SCEN_X[j] + (i - (n - 1) / 2.0) * SPACING_5)
             colors.append(METHOD_COLORS[m])
+    data = [d if d.size else np.array([np.nan]) for d in data]      # FSM x Mixed 无到达 run
     colored_boxplot(ax, data, positions, colors, WIDTH_5, flier_size=1.5)
     ax.set_yscale("log")
     ax.set_ylim(0.04, 8)
@@ -269,10 +302,10 @@ def fig9_panel_d(ax):
 
 def make_fig9():
     fig, axes = plt.subplots(2, 2, figsize=(DOUBLE_COL_IN, FIG_H_IN))
-    fig9_panel_a(axes[0, 0])
-    fig9_panel_b(axes[0, 1])
-    fig9_panel_c(axes[1, 0])
-    fig9_panel_d(axes[1, 1])
+    fig9_panel_a(axes[0, 0])          # (a) 碰撞率
+    fig9_panel_arrival(axes[0, 1])    # (b) 到达率
+    fig9_panel_b(axes[1, 0])          # (c) 成功 run 通行时间
+    fig9_panel_c(axes[1, 1])          # (d) 车道中心偏差 (到达 run); 原耗时 ECDF 面板移除 (表 1 已含耗时列)
     for ax, lab in zip(axes.flat, "abcd"):
         panel_label(ax, f"({lab})")
     handles = [Patch(facecolor=METHOD_COLORS[m], edgecolor="black", linewidth=0.4,
@@ -304,7 +337,7 @@ def fig10_panel_b(ax):
     scen_means = {m: [] for m in pair}
     for j, s in enumerate(SCENARIO_ORDER):
         for i, m in enumerate(pair):
-            d = cell(m, s)["min_dist_overall"]
+            d = cell_arrived(m, s)["min_dist_overall"]
             scen_means[m].append(d.mean())
             data.append(d)
             positions.append(SCEN_X[j] + (i - 0.5) * SPACING_2)

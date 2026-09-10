@@ -68,7 +68,7 @@ DUMP_DONE = ROUTE_DIR / "DUMP_DONE"
 CAPTURE_DONE = CAP_DIR / "CAPTURE_DONE"
 CAPTURE_BACKUP_DONE = CAP_DIR / "CAPTURE_BACKUP_DONE"
 
-DEFAULT_SEEDS = {"roundabout": 60, "unsig_crossroad": 83, "multilaneACC": 82, "mixed_traffic": 69}
+DEFAULT_SEEDS = {"roundabout": 60, "unsig_crossroad": 83, "multilaneACC": 82, "mixed_traffic": 84}
 DEFAULT_UDMC_SEEDS = {"roundabout": 60, "unsig_crossroad": 83}
 ALT_SEEDS = {"roundabout": 74, "unsig_crossroad": 75, "multilaneACC": 72, "mixed_traffic": 84}
 ALT_UDMC_SEEDS = {"roundabout": 74, "unsig_crossroad": 75}
@@ -329,13 +329,17 @@ def blend_stats(res: dict) -> dict:
                 n_ctrl=res["n_ctrl"], degenerate=bool(res["bsp_degenerate"]))
 
 
-def route_seams(route_xy) -> list:
-    """GRP 路线中的回折点（相邻段夹角 > 150°），用于报告；智能体同样会遇到它们。"""
-    pts = to_rh_xy(route_xy)
-    seg = np.diff(pts, axis=0)
+def polyline_reversals(xy: np.ndarray, thr_deg: float = 150.0) -> list:
+    """折线 xy (N,2) 中相邻两段方向夹角 > thr_deg 的顶点 [(idx, deg), ...]——自交回折的判据。"""
+    seg = np.diff(np.asarray(xy, dtype=float).reshape(-1, 2), axis=0)
     ang = np.arctan2(seg[:, 1], seg[:, 0])
     turn = np.degrees(np.abs((np.diff(ang) + np.pi) % (2 * np.pi) - np.pi))
-    return [(int(i + 1), float(turn[i])) for i in np.flatnonzero(turn > 150.0)]
+    return [(int(i + 1), float(turn[i])) for i in np.flatnonzero(turn > thr_deg)]
+
+
+def route_seams(route_xy) -> list:
+    """GRP 路线中的回折点（相邻段夹角 > 150°），用于报告；智能体同样会遇到它们。"""
+    return polyline_reversals(to_rh_xy(route_xy), 150.0)
 
 
 # ------------------------------------------------------------------------------
@@ -981,6 +985,60 @@ def overview_geometry(meta: dict, route: dict, res_px: int):
 
 
 # ------------------------------------------------------------------------------
+#  Fig.5 底图与轨迹来源（2026-09-10 改）
+#    早期 overview.png 由采集端的 CARLA 调试图层烘焙了一条橙黄色 GlobalRoutePlanner 路线
+#    （utils/carla_utils.py:_draw_overview_layer）。那条折线只是规划器的 2 m 路点：路口 / 环岛内
+#    是 10–13 m 的换道直弦，路段接缝处还有 0.9–1.4 m 回折（环岛处肉眼可见的锯齿）；它不是任何
+#    一臂实际驶过的路径。matplotlib 侧无法从像素里抹掉烘焙线，因此：
+#      (1) 轨迹改画 GRIPC sidecar 的自车实际行驶轨迹 ego[:, :2]（CARLA 系），与起终点用同一套
+#          world_to_pix + pix_rotate_for_rh 投影；
+#      (2) 底图优先取 images/fig_capture/OVERVIEW_<scenario>/overview.png —— 采集端以
+#          FIG_OVERVIEW_LAYER=0 关闭图层后抓的干净全景；相机几何（overview_z / overview_center）
+#          取同名 sidecar experiment_results/fig_capture/OVERVIEW_<scenario>_fig.npz 的 meta，
+#          该 sidecar 不存在或缺几何键时回退到 GRIPC tag 的 meta；干净全景不存在时仍用 GRIPC tag
+#          的 overview.png（此时烘焙路线与实际轨迹会同时出现）。
+# ------------------------------------------------------------------------------
+OVERVIEW_TAG_FMT = "OVERVIEW_{scenario}"
+OVERVIEW_GEOM_KEYS = ("overview_z", "overview_center")   # overview_geometry 读取的相机几何键
+
+
+def load_meta_only(tag: str) -> dict:
+    """只读 sidecar 的 meta JSON；全景专用 tag 可能没有逐步数据，不走 load_sidecar 的形状契约。"""
+    path = CAP_DIR / f"{tag}_fig.npz"
+    if not path.exists():
+        return {}
+    d = np.load(path, allow_pickle=True)
+    if "meta" not in d.files:
+        note_issue(f"{path.name}: missing key 'meta'")
+        return {}
+    raw = d["meta"]
+    raw = raw.item() if isinstance(raw, np.ndarray) and raw.ndim == 0 else raw
+    try:
+        return json.loads(str(raw))
+    except Exception as e:   # noqa: BLE001
+        note_issue(f"{path.name}: meta is not a JSON string ({e}); raw={str(raw)[:80]!r}")
+        return {}
+
+
+def resolve_overview(scen: str, gripc_tag: str, gripc_meta: dict):
+    """
+    Fig.5 底图选择：返回 (overview.png 路径, 相机几何 meta, 来源说明)。
+    干净全景 OVERVIEW_<scenario> 优先；其 sidecar 缺失或缺几何键时，几何回退到 GRIPC tag 的 meta。
+    """
+    ov_tag = OVERVIEW_TAG_FMT.format(scenario=scen)
+    ov_png = IMG_DIR / ov_tag / "overview.png"
+    if not ov_png.exists():
+        return IMG_DIR / gripc_tag / "overview.png", gripc_meta, f"{gripc_tag}/overview.png (baked route layer)"
+    meta = load_meta_only(ov_tag)
+    if all(k in meta for k in OVERVIEW_GEOM_KEYS):
+        return ov_png, meta, f"{ov_tag}/overview.png (clean; geometry from {ov_tag}_fig.npz)"
+    if meta:
+        note_issue(f"{ov_tag}_fig.npz: meta lacks {[k for k in OVERVIEW_GEOM_KEYS if k not in meta]}; "
+                   f"overview geometry taken from {gripc_tag}")
+    return ov_png, gripc_meta, f"{ov_tag}/overview.png (clean; geometry from {gripc_tag}_fig.npz)"
+
+
+# ------------------------------------------------------------------------------
 #  俯视相机投影：CARLA 世界 (x, y) → 像素 (col, row)
 #  默认取 pitch=-90, yaw=0 的 UE4 相机：图像上方 = +x, 右方 = +y。
 #  实际取向由 --bev-up / --bev-right 覆盖（用 --check-proj 叠加路线目检核实）。
@@ -1047,14 +1105,14 @@ def add_scale_bar(ax, mpp: float, length_m: float, x0_frac=0.06, y0_frac=0.08,
 #  Fig.5  fig5_scenarios —— 四场景总览
 # ==============================================================================
 def fig5_scenarios(ctx: Ctx):
-    fig, axes = plt.subplots(2, 2, figsize=(DOUBLE_COL_IN, 6.9))
-    fig.subplots_adjust(left=0.01, right=0.99, top=0.965, bottom=0.01, wspace=0.03, hspace=0.06)
+    fig, axes = plt.subplots(2, 2, figsize=(DOUBLE_COL_IN, 7.1))
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.965, bottom=0.04, wspace=0.03, hspace=0.06)
     info = {}
     for ax, scen in zip(axes.ravel(), SCENARIO_ORDER):
         tag = ctx.gripc(scen)
         route = load_route(scen)
         sc = load_sidecar(tag)
-        ov_path = IMG_DIR / tag / "overview.png"
+        ov_path, ov_meta, ov_src = resolve_overview(scen, tag, sc["meta"])   # 干净全景优先，见上方说明
         if not ov_path.exists():
             note_issue(f"{ov_path} missing")
             ax.set_axis_off()
@@ -1063,15 +1121,18 @@ def fig5_scenarios(ctx: Ctx):
         res_px = img.shape[0]
         if img.shape[0] != img.shape[1]:
             note_issue(f"{ov_path.name}: non-square image {img.shape}")
-        cam_z, fov, cam_xy, mpp = overview_geometry(sc["meta"], route, res_px)
+        cam_z, fov, cam_xy, mpp = overview_geometry(ov_meta, route, res_px)
         rxy = route["route_xy"]
+        exy = np.asarray(sc["ego"], dtype=float)[:, :2]      # 自车实际行驶轨迹（CARLA 系）
 
-        # 裁剪：包含整条路线的正方形（含边距）
+        # 裁剪：包含整条路线与实际轨迹的正方形（含边距）
         pix = pix_rotate_for_rh(world_to_pix(rxy, cam_xy, mpp, res_px), res_px)
+        epix = pix_rotate_for_rh(world_to_pix(exy, cam_xy, mpp, res_px), res_px)
+        allpix = np.vstack([pix, epix])
         img_d = rotate_for_rh(img)
         margin_px = 22.0 / mpp
-        c0, c1 = pix[:, 0].min() - margin_px, pix[:, 0].max() + margin_px
-        r0, r1 = pix[:, 1].min() - margin_px, pix[:, 1].max() + margin_px
+        c0, c1 = allpix[:, 0].min() - margin_px, allpix[:, 0].max() + margin_px
+        r0, r1 = allpix[:, 1].min() - margin_px, allpix[:, 1].max() + margin_px
         side = max(c1 - c0, r1 - r0)
         cc, rc = 0.5 * (c0 + c1), 0.5 * (r0 + r1)
         c0, c1 = cc - side / 2, cc + side / 2
@@ -1084,7 +1145,13 @@ def fig5_scenarios(ctx: Ctx):
         ax.imshow(img_d[r0i:r1i, c0i:c1i], extent=(c0i, c1i, r1i, r0i), interpolation="lanczos")
         ax.set_xlim(c0i, c1i)
         ax.set_ylim(r1i, r0i)
-        info[scen] = dict(cam_z=cam_z, mpp=mpp, crop_px=(c0i, c1i, r0i, r1i), crop_m=side * mpp)
+        info[scen] = dict(cam_z=cam_z, mpp=mpp, crop_px=(c0i, c1i, r0i, r1i), crop_m=side * mpp, overview=ov_src)
+        print(f"[fig5] {scen}: overview {ov_src}; Z={cam_z:.1f} m, {mpp:.3f} m/px; "
+              f"ego trajectory from {tag}: {len(exy)} rows, {float(np.asarray(sc['t'])[-1]):.1f} s")
+
+        # 自车实际行驶轨迹（GRIPC sidecar，同一投影；白色描边保证在深色路面 / 烘焙路线上可辨）
+        ax.plot(epix[:, 0], epix[:, 1], color=METHOD_COLORS["GRIPC"], lw=1.3, zorder=5, solid_capstyle="round",
+                solid_joinstyle="round", path_effects=[pe.Stroke(linewidth=2.4, foreground="white"), pe.Normal()])
 
         # 起终点（同一投影）
         st = pix_rotate_for_rh(world_to_pix(route["start"], cam_xy, mpp, res_px), res_px)[0]
@@ -1113,6 +1180,15 @@ def fig5_scenarios(ctx: Ctx):
         ax.set_yticks([])
         for sp_ in ax.spines.values():
             sp_.set_visible(False)
+    # 整图底部图例：实际轨迹 / 起点 / 终点（行人路径仍由 (d) 面板内文字标注）
+    handles = [
+        Line2D([], [], color=METHOD_COLORS["GRIPC"], lw=1.3, label="Ego trajectory (GRIPC)",
+               path_effects=[pe.Stroke(linewidth=2.4, foreground="white"), pe.Normal()]),
+        Line2D([], [], marker="o", ms=5, mfc=OI["green"], mec="white", mew=0.8, ls="none", label="Start"),
+        Line2D([], [], marker="s", ms=5, mfc=OI["vermillion"], mec="white", mew=0.8, ls="none", label="Goal"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=6.5, handlelength=1.9,
+               columnspacing=1.2, bbox_to_anchor=(0.5, 0.0), frameon=False)
     savefig(fig, ctx.stem("fig5_scenarios"))
     plt.close(fig)
     return info
@@ -1155,6 +1231,8 @@ def pick_keyframe_times(t: np.ndarray, v: np.ndarray, min_dist: np.ndarray, obs,
 
 
 FIG6_CROP_PX = 600      # 关键帧裁剪边长 (px); cam_z 45 m/FOV 90 时 ≈ ±26 m
+# 按场景固定关键帧时刻 (s)：表内场景直接用这些时刻（取最近可用帧），不走 pick_keyframe_times；其余场景不变
+FIG6_FIXED_TIMES = {"mixed_traffic": [1.9, 3.4, 7.1, 25.4]}
 
 
 def fig6_keyframes(ctx: Ctx):
@@ -1175,6 +1253,14 @@ def fig6_keyframes(ctx: Ctx):
         n_eff = max(n_eff, min(len(t), 40))
         times, cand = pick_keyframe_times(t[:n_eff], ego[:n_eff, 3], np.asarray(sc["min_dist"], dtype=float)[:n_eff],
                                           None if sc.get("obs") is None else sc["obs"][:n_eff], ego[:n_eff])
+        source = "auto"
+        fixed = FIG6_FIXED_TIMES.get(scen)
+        if fixed is not None:
+            if len(fixed) == axes.shape[1]:
+                times, source = [float(x) for x in fixed], "fixed"
+            else:
+                note_issue(f"fig6 {scen}: FIG6_FIXED_TIMES has {len(fixed)} entries, expected {axes.shape[1]}; "
+                           f"falling back to automatic picks")
         steps, ftimes, fpaths = list_frames(tag)
         cam_z = float(meta.get("cam_z", 45.0))
         fov = float(meta.get("fov", 90.0))
@@ -1210,7 +1296,7 @@ def fig6_keyframes(ctx: Ctx):
             if r == 0 and c == 0:
                 add_scale_bar(ax, mpp, 10.0, x0_frac=0.06, y0_frac=0.07)
             chosen[scen].append(dict(target=round(tk, 2), frame_t=float(ftimes[j]), file=fpaths[j].name))
-        print(f"[fig6] {tag}: candidates={[None if c is None else round(c, 2) for c in cand]} "
+        print(f"[fig6] {tag}: times={source} candidates={[None if c is None else round(c, 2) for c in cand]} "
               f"chosen={[round(x, 2) for x in times]} frames={[c['frame_t'] for c in chosen[scen]]}")
     savefig(fig, ctx.stem("fig6_keyframes"))
     plt.close(fig)
@@ -1223,6 +1309,7 @@ def fig6_keyframes(ctx: Ctx):
 GOAL_RADIUS = 20.0     # 到达判定半径：UDMC 跑批在距终点 17–19 m 处终止，取 20 m 与之一致
 PROGRESS_MIN = 0.75    # 到达还须沿路线推进 ≥ 75%（避免起点附近"路过"终点误判：环岛入口与出口车道相邻；
                        # UDMC 路口运行在推进 82% 处即终止）
+FIG7_REVERSAL_DEG = 150.0   # 参考线原始样条相邻段方向反转 > 此角 ⇒ 视为自交回折，整图不画虚线
 
 
 def route_progress(ego_xy_carla: np.ndarray, route: dict) -> np.ndarray:
@@ -1309,13 +1396,27 @@ def fig7_trajectories(ctx: Ctx):
         data[scen] = (load_route(scen), g, u)
         vmax_all = max(vmax_all, float(np.nanmax(g["ego"][:, 3])))
     norm = mcolors.Normalize(vmin=0.0, vmax=math.ceil(vmax_all))
-    summary = {}
+    # 参考线：两臂实际跟踪的原始三次样条（agent_reference_pipeline 的 cx0/cy0，穿过 2 m 路点）。
+    # 不再画 dense_xy —— 那是另一条 0.5 m 规划器轨迹，入口车道与两臂路线不同且有 4–5 m 横向跳变。
+    # 若样条在路线接缝的回折处自交（相邻段方向反转 > FIG7_REVERSAL_DEG），整图不画虚线，只留车道刻度。
+    ref_course, ref_rev = {}, {}
+    for scen in scens:
+        res = agent_reference_pipeline(data[scen][0]["route_xy"], data[scen][0]["route_yaw_deg"])
+        ref_course[scen] = np.column_stack([res["cx0"], res["cy0"]])
+        ref_rev[scen] = polyline_reversals(ref_course[scen], FIG7_REVERSAL_DEG)
+        print(f"[fig7] {scen}: raw spline course {len(ref_course[scen])} pts / {res['s'][-1]:.1f} m; "
+              f"segment reversals > {FIG7_REVERSAL_DEG:.0f} deg: {[(i, round(a, 1)) for i, a in ref_rev[scen]]}")
+    show_ref = not any(ref_rev.values())
+    print("[fig7] planner-reference dotted line: " + ("KEPT" if show_ref else
+          "DROPPED for the whole figure (raw course folds back on itself at a route seam; lane ticks only)"))
+    summary = {"planner_reference": dict(shown=show_ref, reversals=ref_rev)}
     any_ucol, any_gcol = False, False
     for k, (ax, scen) in enumerate(zip(axes, scens)):
         route, g, u = data[scen]
         draw_lane_ticks(ax, route["bg_wp"], color="#C8C8C8", lw=0.7, length=1.6, zorder=0)
-        dxy = to_rh_xy(route["dense_xy"])
-        ax.plot(dxy[:, 0], dxy[:, 1], ls=(0, (1, 1.5)), color="k", lw=0.6, zorder=2)
+        rxy = ref_course[scen]
+        if show_ref:
+            ax.plot(rxy[:, 0], rxy[:, 1], ls=(0, (1, 1.5)), color="k", lw=0.6, zorder=2)
         gxy = to_rh_xy(g["ego"][:, :2])
         gv = np.asarray(g["ego"][:, 3], dtype=float)
         segs = np.stack([gxy[:-1], gxy[1:]], axis=1)
@@ -1337,8 +1438,8 @@ def fig7_trajectories(ctx: Ctx):
         if gs_["i_col"] is not None:
             any_gcol = True
             ax.plot(*gxy[gs_["i_col"]], marker="x", ms=7, mew=1.5, color=OI["purple"], ls="none", zorder=7)
-        # 视窗：包含路线与两条轨迹 + 8 m 边距；等比由 datalim 自动扩张（不设固定 lim，避免告警）
-        allxy = np.vstack([dxy, uxy, gxy])
+        # 视窗：包含路线（2 m 路点 + 所画参考线）与两条轨迹 + 8 m 边距；等比由 datalim 自动扩张（不设固定 lim，避免告警）
+        allxy = np.vstack([to_rh_xy(route["route_xy"]), rxy if show_ref else np.empty((0, 2)), uxy, gxy])
         m = 8.0
         ax.update_datalim(np.array([[allxy[:, 0].min() - m, allxy[:, 1].min() - m],
                                     [allxy[:, 0].max() + m, allxy[:, 1].max() + m]]))
@@ -1352,8 +1453,10 @@ def fig7_trajectories(ctx: Ctx):
                      f"{outcome_text('GRIPC', gs_)}\n{outcome_text('UDMC', us_)}", fontsize=6.8, pad=3, linespacing=1.25)
         panel_label(ax, "(a)" if k == 0 else "(b)", dx=-0.14, dy=1.02)
     # 共享图例（整图底部一行）
-    handles = [
-        Line2D([], [], ls=(0, (1, 1.5)), color="k", lw=0.6, label="Route centreline"),
+    handles = []
+    if show_ref:
+        handles.append(Line2D([], [], ls=(0, (1, 1.5)), color="k", lw=0.6, label="Planner reference"))
+    handles += [
         Line2D([], [], color=plt.cm.viridis(0.75), lw=1.8, label="GRIPC (colour = speed)",
                path_effects=[pe.Stroke(linewidth=2.6, foreground="k"), pe.Normal()]),
         Line2D([], [], ls=(0, (3, 1.6)), color=METHOD_COLORS["UDMC"], lw=1.0, label="UDMC"),
@@ -1377,7 +1480,8 @@ def fig7_trajectories(ctx: Ctx):
 
 
 # ==============================================================================
-#  Fig.8  fig8_timeseries —— 环岛五通道时序（GRIPC vs UDMC）
+#  Fig.8  fig8_timeseries —— 环岛四通道时序（GRIPC vs UDMC）
+#    2026-09-10：去掉 (e) MPC 求解时间面板与 (c) 中的 2.0 m 参考线；保留 速度 / 车道中心偏差 / 最近车距 / 转向。
 # ==============================================================================
 def fig8_timeseries(ctx: Ctx):
     scen = "roundabout"
@@ -1388,8 +1492,8 @@ def fig8_timeseries(ctx: Ctx):
         runs[meth] = (sc, log)
         if abs(len(log) - len(sc["t"])) > 2:
             note_issue(f"{tag}: log rows {len(log)} vs sidecar T {len(sc['t'])} differ by more than 2")
-    fig, axes = plt.subplots(5, 1, figsize=(SINGLE_COL_IN, 5.2), sharex=True)
-    fig.subplots_adjust(left=0.20, right=0.98, top=0.95, bottom=0.075, hspace=0.20)
+    fig, axes = plt.subplots(4, 1, figsize=(SINGLE_COL_IN, 4.3), sharex=True)   # 四面板：面板高度与五面板版一致
+    fig.subplots_adjust(left=0.20, right=0.98, top=0.94, bottom=0.09, hspace=0.20)
     t_col = None
     t_show = 0.0
     route = load_route(scen)
@@ -1403,22 +1507,12 @@ def fig8_timeseries(ctx: Ctx):
         md = np.where(md >= MIN_DIST_SENTINEL - 1e-6, np.nan, md)
         axes[2].plot(t_log, md, color=c, lw=0.9)
         axes[3].plot(t_log, log[:, LOG_COLS["steer"]], color=c, lw=0.9)
-        axes[4].plot(t_log, 1000.0 * log[:, LOG_COLS["cost_time"]], color=c, lw=0.9)
         rs = run_summary(sc, route)
         t_show = max(t_show, rs["t_last"] + 3.0)
         if meth == "UDMC":
             t_col = rs["t_col"]
-    axes[2].axhline(2.0, color="k", ls="--", lw=0.6, alpha=0.7)
-    axes[2].annotate("2.0 m", xy=(0.995, 2.0), xycoords=("axes fraction", "data"), xytext=(0, 1.5),
-                     textcoords="offset points", ha="right", va="bottom", fontsize=6,
-                     bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.8))
-    axes[4].axhline(CONTROL_PERIOD_MS, color="k", ls="--", lw=0.6, alpha=0.7)
-    axes[4].annotate("50 ms", xy=(0.995, CONTROL_PERIOD_MS), xycoords=("axes fraction", "data"), xytext=(0, 1.5),
-                     textcoords="offset points", ha="right", va="bottom", fontsize=6,
-                     bbox=dict(boxstyle="square,pad=0.1", fc="white", ec="none", alpha=0.8))
-    labels = ["Speed (m/s)", "Lane-centre\ndeviation (m)", "Nearest vehicle\ndistance (m)",
-              "Steering (rad)", "MPC solve\ntime (ms)"]
-    for ax, lab, pl in zip(axes, labels, "abcde"):
+    labels = ["Speed (m/s)", "Lane-centre\ndeviation (m)", "Nearest vehicle\ndistance (m)", "Steering (rad)"]
+    for ax, lab, pl in zip(axes, labels, "abcd"):
         ax.set_ylabel(lab)
         ax.grid(True, axis="y")
         ax.tick_params(pad=1.5)
@@ -1478,15 +1572,19 @@ def check_projection(ctx: Ctx, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
     for scen in SCENARIO_ORDER:
         tag = ctx.gripc(scen)
-        ov = IMG_DIR / tag / "overview.png"
-        if not ov.exists() or not (CAP_DIR / f"{tag}_fig.npz").exists():
-            print(f"[check-proj] {tag}: overview.png or sidecar not yet available, skipped")
+        if not (CAP_DIR / f"{tag}_fig.npz").exists():
+            print(f"[check-proj] {tag}: sidecar not yet available, skipped")
             continue
         route = load_route(scen)
         sc = load_sidecar(tag)
+        ov, ov_meta, ov_src = resolve_overview(scen, tag, sc["meta"])   # 与 Fig.5 同一底图与相机几何
+        if not ov.exists():
+            print(f"[check-proj] {tag}: overview.png not yet available, skipped")
+            continue
+        print(f"[check-proj] {tag}: overview {ov_src}")
         img = load_image(ov)
         res_px = img.shape[0]
-        cam_z, fov, cam_xy, mpp = overview_geometry(sc["meta"], route, res_px)
+        cam_z, fov, cam_xy, mpp = overview_geometry(ov_meta, route, res_px)
         pix = world_to_pix(route["route_xy"], cam_xy, mpp, res_px)
         exy = np.asarray(sc["ego"], dtype=float)[:, :2]
         epix = world_to_pix(exy, cam_xy, mpp, res_px)
