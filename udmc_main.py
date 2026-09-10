@@ -266,8 +266,10 @@ for _ in range(10000):
         ego_vehicle_loc = env.ego_vehicle.get_location()
         # 到达判据 (2026-09-09): 距终点 < 5 m 即结束, 与 FSM/FRENET/TCP 基线一致。原先只靠路点队列耗尽结束,
         # 末路点须在 1 m 内才出队, 自车若在相邻车道到达则永不结束, 会按参考线尽头继续巡航直至异常。
-        if ego_vehicle_loc.distance(destination_transform.location) < 5.0:
-            raise Exception('Reached destination (< 5 m)')
+        # 加路点队列门限 (剩余 ≤10 个, 约 20 m): 混合场景路线在 9-11 s 从对向车道以 2.6-2.9 m 掠过终点后再绕环返回,
+        # 单靠距离会在掠过时误判到达 (attempt3 混合场景 38 集 9.1 s 结束即此), 队列门限保证只在路线末端触发。
+        if ego_vehicle_loc.distance(destination_transform.location) < 5.0 and len(agent._waypoints_queue) <= 10:
+            raise Exception('Reached destination (< 5 m, route end)')
         vehicle_list = [v for v in vehicle_list_all if dist(v) < 45 and v.id != navigation_agent._vehicle.id]
         lv_state, lv, distance = navigation_agent._vehicle_obstacle_detected(vehicle_list, 15, up_angle_th=45)
 
