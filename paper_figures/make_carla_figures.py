@@ -1410,7 +1410,7 @@ def fig7_trajectories(ctx: Ctx):
     print("[fig7] planner-reference dotted line: " + ("KEPT" if show_ref else
           "DROPPED for the whole figure (raw course folds back on itself at a route seam; lane ticks only)"))
     summary = {"planner_reference": dict(shown=show_ref, reversals=ref_rev)}
-    any_ucol, any_gcol = False, False
+    any_ucol, any_gcol, any_ustop = False, False, False
     for k, (ax, scen) in enumerate(zip(axes, scens)):
         route, g, u = data[scen]
         draw_lane_ticks(ax, route["bg_wp"], color="#C8C8C8", lw=0.7, length=1.6, zorder=0)
@@ -1432,6 +1432,11 @@ def fig7_trajectories(ctx: Ctx):
         ax.plot(*go, marker="s", ms=5, mfc="white", mec="k", mew=0.7, ls="none", zorder=6)
         gs_, us_ = run_summary(g, route), run_summary(u, route)
         summary[scen] = dict(GRIPC=gs_, UDMC=us_)
+        if not us_["reached"] and not us_["aborted"]:
+            # 停滞 run（未到达且非碰撞中止）：在运动结束位置标出停车点，轨迹本身在此处终止
+            any_ustop = True
+            i_stop = max(int(np.searchsorted(np.asarray(u["t"], dtype=float), us_["t_stop"], side="right")) - 1, 0)
+            ax.plot(*uxy[i_stop], marker="v", ms=6, mfc=METHOD_COLORS["UDMC"], mec="k", mew=0.6, ls="none", zorder=7)
         if us_["i_col"] is not None:
             any_ucol = True
             ax.plot(*uxy[us_["i_col"]], marker="x", ms=7, mew=1.5, color="red", ls="none", zorder=7)
@@ -1468,6 +1473,9 @@ def fig7_trajectories(ctx: Ctx):
     if any_gcol:
         handles.append(Line2D([], [], marker="x", color=OI["purple"], mew=1.5, ms=7, ls="none",
                               label="GRIPC collision"))
+    if any_ustop:
+        handles.append(Line2D([], [], marker="v", mfc=METHOD_COLORS["UDMC"], mec="k", mew=0.6, ms=6, ls="none",
+                              label="UDMC stop (no arrival)"))
     fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=6.5, handlelength=1.9,
                columnspacing=1.0, bbox_to_anchor=(0.49, 0.01), frameon=False)
     cax = fig.add_axes([0.915, ax_bottom, 0.015, ax_top - ax_bottom])
@@ -1495,19 +1503,26 @@ def fig8_timeseries(ctx: Ctx):
     fig, axes = plt.subplots(4, 1, figsize=(SINGLE_COL_IN, 4.3), sharex=True)   # 四面板：面板高度与五面板版一致
     fig.subplots_adjust(left=0.20, right=0.98, top=0.94, bottom=0.09, hspace=0.20)
     t_col = None
+    t_stop_u = None
     t_show = 0.0
     route = load_route(scen)
     for meth, (sc, log) in runs.items():
         c = METHOD_COLORS[meth]
+        rs = run_summary(sc, route)
         t_sc = np.asarray(sc["t"], dtype=float)
         t_log = log[:, LOG_COLS["simu_time"]]
         axes[0].plot(t_sc, sc["ego"][:, 3], color=c, lw=0.9, label=meth)
-        axes[1].plot(t_log, log[:, LOG_COLS["dist_error_raw"]], color=c, lw=0.9)
+        dev = log[:, LOG_COLS["dist_error_raw"]].astype(float)
+        if not rs["reached"] and not rs["aborted"]:
+            # 停滞 run：停车后参考点不再推进，日志中的车道偏差退化为 0，停车之后不绘制
+            dev = np.where(t_log > rs["t_stop"], np.nan, dev)
+            if meth == "UDMC":
+                t_stop_u = rs["t_stop"]
+        axes[1].plot(t_log, dev, color=c, lw=0.9)
         md = log[:, LOG_COLS["min_dist_to_obs"]].astype(float)
         md = np.where(md >= MIN_DIST_SENTINEL - 1e-6, np.nan, md)
         axes[2].plot(t_log, md, color=c, lw=0.9)
         axes[3].plot(t_log, log[:, LOG_COLS["steer"]], color=c, lw=0.9)
-        rs = run_summary(sc, route)
         t_show = max(t_show, rs["t_last"] + 3.0)
         if meth == "UDMC":
             t_col = rs["t_col"]
@@ -1522,6 +1537,11 @@ def fig8_timeseries(ctx: Ctx):
     if t_col is not None:
         axes[0].annotate("UDMC\ncollision", xy=(t_col, 1.0), xycoords=("data", "axes fraction"), xytext=(2.5, -1),
                          textcoords="offset points", ha="left", va="top", color="red", fontsize=6)
+    if t_stop_u is not None:
+        for ax in axes:
+            ax.axvline(t_stop_u, color=METHOD_COLORS["UDMC"], ls=":", lw=0.8)
+        axes[0].annotate("UDMC\nstops", xy=(t_stop_u, 1.0), xycoords=("data", "axes fraction"), xytext=(2.5, -1),
+                         textcoords="offset points", ha="left", va="top", color=METHOD_COLORS["UDMC"], fontsize=6)
     axes[0].legend(loc="lower right", bbox_to_anchor=(1.0, 0.98), ncol=2, fontsize=6.5, borderaxespad=0.0,
                    handlelength=1.6)   # 面板上方，不压曲线
     axes[-1].set_xlabel("Time (s)")
