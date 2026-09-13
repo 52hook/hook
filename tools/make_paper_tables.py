@@ -5,8 +5,8 @@
 ================================================================================
 从 experiment_results/v6_pedfix_50r_analysis/summary.csv (analyze_v6_pedfix.py 结局口径) 生成 LaTeX 表格行,
 避免手抄数字。口径 (论文 §5.1):
-  到达率 / 停滞率 / 成功率 / 碰撞率 : 分母 50; 通行时间: success run; 其余指标: arrived run。
-加粗规则 (与原稿一致): 每场景各列最优 (碰撞率、停滞率、偏差、通行时间、jerk、耗时 取最小; 到达率、成功率 取最大);
+  成功率 / 碰撞率 : 分母 50; 通行时间: 无碰撞 run (到达 + 停滞, 停滞 run 按其仿真时长计入; 2026-09-13 口径); 其余指标: arrived run。
+加粗规则: 每场景各列最优 (碰撞率、偏差、通行时间、jerk、耗时 取最小; 成功率 取最大);
   FSM 混合场景通行时间不可比 (掠过终点误判), 记为 -- 且不参与加粗; 并列最优同时加粗。
 用法: python tools/make_paper_tables.py [--csv PATH]
 """
@@ -53,12 +53,12 @@ def best(vals, lower=True):
 
 
 def main_table(rows):
-    print("% ---- 表 1 主对比 (自动生成: tools/make_paper_tables.py); 列: 方法 到达% Coll.% 成功% 偏差 通行时间(成功) jerk 耗时均值 P95 ----")
+    print("% ---- 表 1 主对比 (自动生成: tools/make_paper_tables.py); 列: 方法 Coll.% 成功% 偏差 通行时间(无碰撞 run, 停滞按时长计) jerk 耗时均值 P95 ----")
     for sc, label in SCEN:
         cells = {}
         for m in MAIN_METHODS:
             r = rows[(CSV_NAME.get(m, m), sc)]
-            tt = ms(r["travel_time_success"])
+            tt = ms(r["travel_time_nocoll"])
             if m == "FSM" and sc == "mixed_traffic":
                 tt = (math.nan, math.nan)
             cells[m] = dict(
@@ -78,7 +78,7 @@ def main_table(rows):
                 if math.isnan(v[0]):
                     return "--"
                 return bold(f"{v[0]:.{digits}f}$\\pm${v[1]:.{digits}f}", v[0] == b[key])
-            line = (f" & {m} & {bold(pct(c['arr']), c['arr'] == b['arr'])}"
+            line = (f" & {m}"
                     f" & {bold(pct(c['coll']), c['coll'] == b['coll'])} & {bold(pct(c['succ']), c['succ'] == b['succ'])}"
                     f" & {ms_cell(c['rmse'], 3, 'rmse')} & {tt} & {ms_cell(c['jerk'], 2, 'jerk')}"
                     f" & {ms_cell(c['mpc'], 1, 'mpc')} & {ms_cell(c['p95'], 1, 'p95')} \\\\")
@@ -88,13 +88,13 @@ def main_table(rows):
 
 def ablation_table(rows):
     print("\n% ---- 表 2 消融 (自动生成: tools/make_paper_tables.py) ----")
-    # 列: 变体 | 到达率 4 场景 | 碰撞率 4 场景 | 偏差 | 通行时间(成功) | MPC 均值 | MPC P95 | jerk | 最小间距  (四场景平均)
+    # 列: 变体 | 成功率 4 场景 | 碰撞率 4 场景 | 偏差 | 通行时间(无碰撞 run) | MPC 均值 | MPC P95 | jerk | 最小间距  (四场景平均)
     data = {}
     for key, label in ABL:
-        arr = [float(rows[(key, sc)]["arrival_rate"]) for sc, _ in SCEN]
+        arr = [float(rows[(key, sc)]["success_rate"]) for sc, _ in SCEN]
         coll = [float(rows[(key, sc)]["collision_rate_all50"]) for sc, _ in SCEN]
         avg = lambda col: sum(ms(rows[(key, sc)][col])[0] for sc, _ in SCEN) / 4
-        tt = [ms(rows[(key, sc)]["travel_time_success"])[0] for sc, _ in SCEN]
+        tt = [ms(rows[(key, sc)]["travel_time_nocoll"])[0] for sc, _ in SCEN]
         data[key] = dict(label=label, arr=arr, coll=coll, rmse=avg("rmse_unified"), tt=sum(tt) / 4,
                          mpc=avg("mean_mpc_ms"), p95=avg("p95_mpc_ms"), jerk=avg("mean_jerk"), md=avg("min_dist_overall"))
     keys = [k for k, _ in ABL]

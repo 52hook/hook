@@ -1335,6 +1335,52 @@ def route_progress(ego_xy_carla: np.ndarray, route: dict) -> np.ndarray:
     return prog
 
 
+def longitudinal_speed(ego: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """位移在航向上的投影除以 dt (m/s), 负值为倒车; 与 t 等长 (末尾复制)。ego 为 CARLA 系 (x, y, yaw_deg, v)。"""
+    ego = np.asarray(ego, dtype=float)
+    t = np.asarray(t, dtype=float)
+    if len(t) < 2:
+        return np.zeros(len(t))
+    dp = np.diff(ego[:, :2], axis=0)
+    yaw = np.deg2rad(ego[:-1, 2])
+    lon = dp[:, 0] * np.cos(yaw) + dp[:, 1] * np.sin(yaw)
+    dt = np.diff(t)
+    dt = np.where(dt <= 0, np.nan, dt)
+    v = lon / dt
+    return np.append(v, v[-1])
+
+
+def mask_runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """布尔序列中连续 True 段的 (起, 止) 下标 (含止)。"""
+    runs, i, n = [], 0, len(mask)
+    while i < n:
+        if mask[i]:
+            j = i
+            while j < n and mask[j]:
+                j += 1
+            runs.append((i, j - 1))
+            i = j
+        else:
+            i += 1
+    return runs
+
+
+REVERSE_V_THR = -0.2   # 纵向速度低于此值视为倒车 (m/s)
+REVERSE_MIN_S = 0.3    # 短于此时长的倒车段忽略 (s)
+
+
+def reversing_segments(ego: np.ndarray, t: np.ndarray) -> list[tuple[int, int, float]]:
+    """倒车段列表 (起下标, 止下标, 倒车距离 m); 原版 UDMC 允许倒车, GRIPC 参考线无方向反转不会倒车。"""
+    t = np.asarray(t, dtype=float)
+    v = longitudinal_speed(ego, t)
+    out = []
+    for a, b in mask_runs(v < REVERSE_V_THR):
+        if t[b] - t[a] >= REVERSE_MIN_S:
+            dist = float(np.nansum(-v[a:b + 1] * np.diff(t, append=t[-1])[a:b + 1]))
+            out.append((a, b, dist))
+    return out
+
+
 def run_summary(sc: dict, route: dict) -> dict:
     """
     单次运行摘要（来自 sidecar）：到达时刻（推进 ≥ 85% 且距终点 < 20 m）、运动结束时刻（最后一次 v > 0.5 m/s）、
@@ -1421,7 +1467,7 @@ def fig7_trajectories(ctx: Ctx):
     print("[fig7] planner-reference dotted line: " + ("KEPT" if show_ref else
           "DROPPED for the whole figure (raw course folds back on itself at a route seam; lane ticks only)"))
     summary = {"planner_reference": dict(shown=show_ref, reversals=ref_rev)}
-    any_ucol, any_gcol, any_ustop = False, False, False
+    any_ucol, any_gcol, any_ustop, any_urev = False, False, False, False
     for k, (ax, scen) in enumerate(zip(axes, scens)):
         route, g, u = data[scen]
         draw_lane_ticks(ax, route["bg_wp"], color="#C8C8C8", lw=0.7, length=1.6, zorder=0)
@@ -1438,6 +1484,12 @@ def fig7_trajectories(ctx: Ctx):
         # UDMC 画在最上层：与 GRIPC 重合处仍可见虚线
         uxy = to_rh_xy(u["ego"][:, :2])
         ax.plot(uxy[:, 0], uxy[:, 1], ls=(0, (3, 1.6)), color=METHOD_COLORS["UDMC"], lw=1.0, zorder=5)
+        # 倒车段 (原版 UDMC 允许倒车): 位移与航向反向的采样段用红色实线加粗
+        rev_segs = reversing_segments(u["ego"], u["t"])
+        for a, b, _ in rev_segs:
+            any_urev = True
+            ax.plot(uxy[a:b + 1, 0], uxy[a:b + 1, 1], color="red", lw=2.0, zorder=5.5, solid_capstyle="round")
+        rev_note = (f", reverses {len(rev_segs)}x ({sum(d for _, _, d in rev_segs):.0f} m)" if rev_segs else "")
         st, go = to_rh_xy(route["start"])[0], to_rh_xy(route["goal"])[0]
         ax.plot(*st, marker="o", ms=5, mfc=OI["green"], mec="k", mew=0.5, ls="none", zorder=6)
         ax.plot(*go, marker="s", ms=5, mfc="white", mec="k", mew=0.7, ls="none", zorder=6)
@@ -1466,7 +1518,8 @@ def fig7_trajectories(ctx: Ctx):
         ax.set_ylabel("y (m)")
         # 标题第 1 行：场景与种子；第 2/3 行：两方法结果（轴内四角都被路线占用，故放标题）
         ax.set_title(f"{SCENARIO_LABELS[scen]} (seed {g['meta'].get('seed', ctx.gripc_seeds[scen])})\n"
-                     f"{outcome_text('GRIPC', gs_)}\n{outcome_text('UDMC', us_)}", fontsize=6.8, pad=3, linespacing=1.25)
+                     f"{outcome_text('GRIPC', gs_)}\n{outcome_text('UDMC', us_)}{rev_note}", fontsize=6.8, pad=3, linespacing=1.25)
+        summary[scen]["UDMC_reversing"] = [(float(u["t"][a]), float(u["t"][b]), round(d, 1)) for a, b, d in rev_segs]
         panel_label(ax, "(a)" if k == 0 else "(b)", dx=-0.14, dy=1.02)
     # 共享图例（整图底部一行）
     handles = []
@@ -1487,6 +1540,8 @@ def fig7_trajectories(ctx: Ctx):
     if any_ustop:
         handles.append(Line2D([], [], marker="v", mfc=METHOD_COLORS["UDMC"], mec="k", mew=0.6, ms=6, ls="none",
                               label="UDMC stop (no arrival)"))
+    if any_urev:
+        handles.append(Line2D([], [], color="red", lw=2.0, label="UDMC reversing"))
     fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=6.5, handlelength=1.9,
                columnspacing=1.0, bbox_to_anchor=(0.49, 0.01), frameon=False)
     cax = fig.add_axes([0.915, ax_bottom, 0.015, ax_top - ax_bottom])
@@ -1522,7 +1577,9 @@ def fig8_timeseries(ctx: Ctx):
         rs = run_summary(sc, route)
         t_sc = np.asarray(sc["t"], dtype=float)
         t_log = log[:, LOG_COLS["simu_time"]]
-        axes[0].plot(t_sc, sc["ego"][:, 3], color=c, lw=0.9, label=meth)
+        v_mag = np.asarray(sc["ego"][:, 3], dtype=float)
+        v_signed = np.where(longitudinal_speed(sc["ego"], t_sc) < REVERSE_V_THR, -v_mag, v_mag)   # 倒车为负
+        axes[0].plot(t_sc, v_signed, color=c, lw=0.9, label=meth)
         dev = log[:, LOG_COLS["dist_error_raw"]].astype(float)
         if not rs["reached"] and not rs["aborted"]:
             # 停滞 run：停车后参考点不再推进，日志中的车道偏差退化为 0，停车之后不绘制
@@ -1537,7 +1594,7 @@ def fig8_timeseries(ctx: Ctx):
         t_show = max(t_show, rs["t_last"] + 3.0)
         if meth == "UDMC":
             t_col = rs["t_col"]
-    labels = ["Speed (m/s)", "Lane-centre\ndeviation (m)", "Nearest vehicle\ndistance (m)", "Steering (rad)"]
+    labels = ["Longitudinal\nspeed (m/s)", "Lane-centre\ndeviation (m)", "Nearest vehicle\ndistance (m)", "Steering (rad)"]
     for ax, lab, pl in zip(axes, labels, "abcd"):
         ax.set_ylabel(lab)
         ax.grid(True, axis="y")

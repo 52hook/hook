@@ -81,6 +81,12 @@ def cell_success(method: str, scenario: str) -> dict:
     return _subset(rows, (rows["outcome"] == "arrived") & (rows["any_vp_collision"] == 0))
 
 
+def cell_nocoll(method: str, scenario: str) -> dict:
+    """无碰撞 run = 到达或停滞且无车-车/车-人碰撞 (2026-09-13 口径: 通行时间在这些 run 上统计, 停滞按时长计入)。"""
+    rows = cell(method, scenario)
+    return _subset(rows, ((rows["outcome"] == "arrived") | (rows["outcome"] == "stall")) & (rows["any_vp_collision"] == 0))
+
+
 def repeats_of(method: str, scenario: str) -> np.ndarray:
     """该格到达 run 的 repeat 编号 (停滞 run 的逐步日志为 .failed.txt, 不参与逐步统计)。"""
     return cell_arrived(method, scenario)["repeat"].astype(int)
@@ -120,6 +126,12 @@ def collision_rates(methods: list[str]) -> dict:
 def arrival_rates(methods: list[str]) -> dict:
     """到达率 (%) = 100 * n_arrived / 50。"""
     return {m: np.array([100.0 * np.sum(cell(m, s)["outcome"] == "arrived") / REPEATS_PER_CELL
+                         for s in SCENARIO_ORDER]) for m in methods}
+
+
+def success_rates(methods: list[str]) -> dict:
+    """成功率 (%) = 100 * n(到达且无车-车/车-人碰撞) / 50。"""
+    return {m: np.array([100.0 * np.sum((cell(m, s)["outcome"] == "arrived") & (cell(m, s)["any_vp_collision"] == 0)) / REPEATS_PER_CELL
                          for s in SCENARIO_ORDER]) for m in methods}
 
 
@@ -229,32 +241,32 @@ def fig9_panel_a(ax):
 
 
 def fig9_panel_arrival(ax):
-    """(b) 到达率 (%), 分母 50; 未到达 = 停滞 (GRIPC/UDMC) 或仿真超时/掠过误判 (三条基线)。"""
-    rates = arrival_rates(METHOD_ORDER)
-    print_rate_table("Fig.9(b) arrival", rates, METHOD_LABELS)
+    """(b) 成功率 (%) = 到达且无车-车/车-人碰撞, 分母 50 (2026-09-13: 原到达率面板改为成功率)。"""
+    rates = success_rates(METHOD_ORDER)
+    print_rate_table("Fig.9(b) success", rates, METHOD_LABELS)
     grouped_bars(ax, METHOD_ORDER, METHOD_COLORS, METHOD_LABELS, rates)
     ax.set_ylim(0, 105)
     ax.set_yticks([0, 25, 50, 75, 100])
-    ax.set_ylabel("Arrival rate (%)")
+    ax.set_ylabel("Success rate (%)")
 
 
 def fig9_panel_b(ax):
-    """(c) 成功 run 的通行时间分布; 无成功 run 的格子 (FSM x Mixed) 不画。"""
+    """(c) 无碰撞 run (到达 + 停滞, 停滞按仿真时长计入) 的通行时间分布; 无此类 run 的格子 (FSM x Mixed) 不画。"""
     n = len(METHOD_ORDER)
-    print("\n[Fig.9(c)] travel time over successful runs (n):")
+    print("\n[Fig.9(c)] travel time over collision-free runs, stalled runs counted with their logged duration (n):")
     for j, s in enumerate(SCENARIO_ORDER):
         for i, m in enumerate(METHOD_ORDER):
             pos = SCEN_X[j] + (i - (n - 1) / 2.0) * SPACING_5
-            tt = cell_success(m, s)["total_time"]
+            tt = cell_nocoll(m, s)["total_time"]
             print(f"  {METHOD_LABELS[m]:9s} {SCENARIO_LABELS[s]:13s} n={tt.size:2d}" +
-                  (f" median={np.median(tt):6.1f} s" if tt.size else "  (no successful run)"))
+                  (f" median={np.median(tt):6.1f} s" if tt.size else "  (no collision-free run)"))
             if tt.size < 2:
                 continue
             log_violin(ax, tt, pos, WIDTH_5, METHOD_COLORS[m], alpha=0.75)
     ax.set_yscale("log")
     ax.set_ylim(7, 600)
     set_log_ticks(ax.yaxis, [10, 20, 50, 100, 200, 500])
-    ax.set_ylabel("Travel time of successful runs (s)")
+    ax.set_ylabel("Travel time (s)")
     style_scenario_axis(ax)
 
 
@@ -303,8 +315,8 @@ def fig9_panel_d(ax):
 def make_fig9():
     fig, axes = plt.subplots(2, 2, figsize=(DOUBLE_COL_IN, FIG_H_IN))
     fig9_panel_a(axes[0, 0])          # (a) 碰撞率
-    fig9_panel_arrival(axes[0, 1])    # (b) 到达率
-    fig9_panel_b(axes[1, 0])          # (c) 成功 run 通行时间
+    fig9_panel_arrival(axes[0, 1])    # (b) 成功率
+    fig9_panel_b(axes[1, 0])          # (c) 无碰撞 run 通行时间 (停滞按时长计入)
     fig9_panel_c(axes[1, 1])          # (d) 车道中心偏差 (到达 run); 原耗时 ECDF 面板移除 (表 1 已含耗时列)
     for ax, lab in zip(axes.flat, "abcd"):
         panel_label(ax, f"({lab})")

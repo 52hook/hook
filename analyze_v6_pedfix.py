@@ -173,6 +173,8 @@ def outcome_summary(rows: list[dict]) -> dict[tuple[str, str], dict]:
             n_coll = sum(r["any_vp_collision"] for r in runs)
             succ = [r for r in runs if r["success"]]
             arrived = [r for r in runs if r["outcome"] == "arrived"]
+            # 2026-09-13 口径: 通行时间在无碰撞 run 上统计, 停滞 run 按其仿真时长计入 (不再单列停滞率)
+            nocoll = [r for r in runs if r["any_vp_collision"] == 0 and r["outcome"] in ("arrived", "stall")]
             out[(m, sc)] = dict(
                 n_arrived=n_arr, n_stall=n_stall_data, n_passby=n_pass, n_timeout=n_timeout,
                 n_total=n_arr + n_stall_data + n_pass + n_timeout,
@@ -181,6 +183,7 @@ def outcome_summary(rows: list[dict]) -> dict[tuple[str, str], dict]:
                 veh_collision_rate=sum(r["veh_collision"] for r in runs) / REPEATS_PER_CELL,
                 ped_collision_rate=sum(r["ped_collision"] for r in runs) / REPEATS_PER_CELL,
                 travel_success=[r["total_time"] for r in succ],
+                travel_nocoll=[r["total_time"] for r in nocoll], n_nocoll=len(nocoll),
                 arrived_runs=arrived,
             )
     return out
@@ -247,7 +250,8 @@ def write_summary(rows: list[dict]):
         w = csv.writer(fp)
         head = ["method", "scenario", "n_arrived", "n_planned", "n_stall", "n_passby", "n_timeout",
                 "arrival_rate", "stall_rate", "success_rate", "collision_rate_all50",
-                "veh_collision_rate_all50", "ped_collision_rate_all50", "travel_time_success"]
+                "veh_collision_rate_all50", "ped_collision_rate_all50", "travel_time_success",
+                "n_nocoll", "travel_time_nocoll"]
         head += [name for name, _ in metric_specs]
         w.writerow(head)
         for method in METHODS_ORDER:
@@ -257,7 +261,7 @@ def write_summary(rows: list[dict]):
                 row = [method, scenario, o["n_arrived"], REPEATS_PER_CELL, o["n_stall"], o["n_passby"], o["n_timeout"],
                        f"{o['arrival_rate']:.2f}", f"{o['stall_rate']:.2f}", f"{o['success_rate']:.2f}",
                        f"{o['collision_rate']:.2f}", f"{o['veh_collision_rate']:.2f}", f"{o['ped_collision_rate']:.2f}",
-                       fmt_mean_std(o["travel_success"], 1)]
+                       fmt_mean_std(o["travel_success"], 1), o["n_nocoll"], fmt_mean_std(o["travel_nocoll"], 1)]
                 for name, digits in metric_specs:
                     row.append(fmt_mean_std([r[name] for r in runs], digits))
                 w.writerow(row)
@@ -303,6 +307,9 @@ PAIRS = [
 def write_paired(rows: list[dict]):
     # 连续指标只配对 arrived run; 二值指标 (碰撞/到达/成功) 在全部有数据的 run 上配对
     by_key = {(r["method"], r["scenario"], r["seed"]): r for r in rows if r["outcome"] == "arrived"}
+    # 通行时间按 2026-09-13 口径在无碰撞 run (到达 + 停滞) 上配对
+    by_key_nocoll = {(r["method"], r["scenario"], r["seed"]): r for r in rows
+                     if r["any_vp_collision"] == 0 and r["outcome"] in ("arrived", "stall")}
     by_key_all = {(r["method"], r["scenario"], r["seed"]): r for r in rows}
     sig_lines = []
     with open(PAIRED_CSV, "w", newline="") as fp:
@@ -311,7 +318,7 @@ def write_paired(rows: list[dict]):
         for a, b in PAIRS:
             for sc in SCENARIOS:
                 for met in PAIR_METRICS:
-                    src = by_key_all if met in BINARY_METRICS else by_key
+                    src = by_key_all if met in BINARY_METRICS else (by_key_nocoll if met == "total_time" else by_key)
                     paired_seeds = [
                         s for s in range(43, 43 + REPEATS_PER_CELL)
                         if (a, sc, s) in src and (b, sc, s) in src
@@ -370,7 +377,7 @@ def print_outcome_tables(rows: list[dict]):
             print(f"{m:<16}{sc:<18}{o['n_arrived']:>5}{o['n_stall']:>6}{o['n_passby']:>5}{o['n_timeout']:>4}"
                   f"{100*o['arrival_rate']:>7.0f}{100*o['stall_rate']:>7.0f}{100*o['success_rate']:>7.0f}"
                   f"{100*o['collision_rate']:>7.0f}{100*o['veh_collision_rate']:>5.0f}{100*o['ped_collision_rate']:>5.0f}"
-                  f"{fmt_mean_std(o['travel_success'], 1):>16}")
+                  f"{fmt_mean_std(o['travel_success'], 1):>16}{fmt_mean_std(o['travel_nocoll'], 1):>16} (n={o['n_nocoll']})")
 
 
 def print_scenario_tables(rows: list[dict]):
