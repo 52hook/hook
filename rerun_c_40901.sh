@@ -32,7 +32,8 @@ ensure_carla() { ss -ltn 2>/dev/null | grep -q ":${PORT} " && return 0; log "CAR
 already_failed() { grep -q "^$1	$2	$3	" "$R/failed.tsv" 2>/dev/null; }
 
 run_one() {   # <label> <scenario> <r> <seed>
-    local label=$1 sc=$2 r=$3 seed=$4 f="$R/${label}_${sc}_r${r}.txt" lg="$R/${label}_${sc}_r${r}.log"
+    local label=$1 sc=$2 r=$3 seed=$4
+    local f="$R/${label}_${sc}_r${r}.txt" lg="$R/${label}_${sc}_r${r}.log"
     if is_valid "$f"; then log "跳过 (valid) $label | $sc | r=$r"; return 0; fi
     if already_failed "$label" "$sc" "$r"; then log "跳过 (已记 failed) $label | $sc | r=$r"; return 0; fi
     ensure_carla || true
