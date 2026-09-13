@@ -2,6 +2,7 @@ import carla
 import math
 import time
 
+import os
 import numpy as np
 from scipy.optimize import minimize
 import copy
@@ -607,12 +608,16 @@ class Vehicle:
         # ========================================================================
         # 防倒车补丁: v >= 0（原 -self.target_v 允许倒车 → 0.0 禁止）
         # 论文里所有 baseline 同条件，仅作为通用安全底座，不计入消融
+        # UDMC_ALLOW_REVERSE=1 时恢复原版下界 -self.target_v (2026-09-13, 原版倒车对照批专用)
         # ========================================================================
+        _v_lb = -self.target_v if os.environ.get('UDMC_ALLOW_REVERSE', '0') == '1' else 0.0
+        if _v_lb < 0:
+            print('[UDMC] UDMC_ALLOW_REVERSE=1: v lower bound = -target_v (original)', flush=True)
         for _ in range(self.horizon+1):
             self.lbx.append(-np.inf)
             self.lbx.append(-np.inf)
             self.lbx.append(-np.inf)
-            self.lbx.append(0.0)
+            self.lbx.append(_v_lb)
             self.lbx.append(-np.inf)
             self.lbx.append(-np.inf)
 
