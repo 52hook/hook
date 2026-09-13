@@ -6,7 +6,7 @@
 三段录像: paper_figures/fail1.mp4 (UDMC 遇对向两辆直行车后退), fail2.mp4 (UDMC 冲突区内停车后后退), mysuccess.mp4 (GRIPC 通过)。
 均为屏幕录像 (终端 + CarlaUE4 窗口); 原版 env.py 每步把 spectator 置于自车上方 30 m 俯视 (yaw 固定), 自车始终位于窗口中心,
 故以窗口中心为自车裁 600 x 600 方框并画白色圆环。spectator 水平 FOV 90 deg, 窗口宽 ≈ 60 m, 即约 21 px/m (三段一致, 由车长核对)。
-每行时刻以自车车头越过交叉口边界为零点 (ENTRY); UDMC 两行前三列取 -1.0/+1.5/+4.0 s, GRIPC 行取 -1.0/+4.0/+9.5 s (转向中、从对向两直行车前方绕过), 第四列为各自结局帧。
+每行时刻以自车车头越过交叉口边界为零点 (ENTRY); UDMC 两行前三列取 -1.0/+1.5/+4.0 s, GRIPC 行取 -1.0/+4.0/+10.5 s (转向中、从对向两直行车前方绕过), 第四列为各自结局帧。
 用法: /home/jh/anaconda3/envs/first1/bin/python tools/make_video_keyframes.py
 输出: latex/figures/fig7_video_keyframes.pdf, paper_figures/preview/fig7_video_keyframes.png
 """
@@ -28,7 +28,7 @@ FFMPEG = "/home/jh/anaconda3/envs/first1/bin/ffmpeg"
 ROWS = [
     ("UDMC run 1", "paper_figures/fail1.mp4", "1245:735:740:40", (622, 367), 13.0, [-1.0, 1.5, 4.0, 7.0]),
     ("UDMC run 2", "paper_figures/fail2.mp4", "1258:738:140:512", (629, 369), 14.0, [-1.0, 1.5, 4.0, 5.6]),
-    ("GRIPC", "paper_figures/mysuccess.mp4", "1255:735:65:520", (627, 367), 29.0, [-1.0, 4.0, 9.5, 16.0]),   # 2026-09-13 用户: 去掉 +1.5 s, 加 +9.5 s (从对向两直行车前方绕过)
+    ("GRIPC", "paper_figures/mysuccess.mp4", "1255:735:65:520", (627, 367), 29.0, [-1.0, 4.0, 10.5, 16.0]),   # 2026-09-13 用户: 去掉 +1.5 s, 第三帧取 39.5 s 即 +10.5 s (从对向两直行车前方绕过)
 ]
 COLS = ["Approach", "Conflict zone", "Interaction", "Outcome"]
 HALF = 300                  # 自车方框半边长 (px)
