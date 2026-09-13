@@ -68,10 +68,13 @@ DUMP_DONE = ROUTE_DIR / "DUMP_DONE"
 CAPTURE_DONE = CAP_DIR / "CAPTURE_DONE"
 CAPTURE_BACKUP_DONE = CAP_DIR / "CAPTURE_BACKUP_DONE"
 
-DEFAULT_SEEDS = {"roundabout": 60, "unsig_crossroad": 83, "multilaneACC": 82, "mixed_traffic": 84}
-DEFAULT_UDMC_SEEDS = {"roundabout": 60, "unsig_crossroad": 83}
+DEFAULT_SEEDS = {"roundabout": 44, "unsig_crossroad": 83, "multilaneACC": 82, "mixed_traffic": 84}   # 2026-09-13: 环岛 60 -> 44 (60 的 GRIPC 从入口人行道绕行)
+DEFAULT_UDMC_SEEDS = {"roundabout": 44, "unsig_crossroad": 83}
 ALT_SEEDS = {"roundabout": 74, "unsig_crossroad": 75, "multilaneACC": 72, "mixed_traffic": 84}
 ALT_UDMC_SEEDS = {"roundabout": 74, "unsig_crossroad": 75}
+# 图 7 / 图 8 两臂同种子对比专用种子 (两臂同用); 未列出的场景沿用 DEFAULT_SEEDS / DEFAULT_UDMC_SEEDS。
+# 2026-09-13: 交叉口改用 78 (GRIPC 到达、UDMC 于左转出口停滞), 图 5 / 图 6 的交叉口仍用 83。
+PAIR_SEEDS = {"unsig_crossroad": 78}
 
 TEXT_STROKE = [pe.withStroke(linewidth=1.5, foreground="black")]   # 图片上白字描边
 
@@ -87,12 +90,20 @@ class Ctx:
     fig2_window_v: float | None = None  # 队列清理阈值 5 + 0.5 v 所用车速；None → 场景目标车速
     fig2_step_m: float = 5.0           # 滚动窗步长
     fig2_mul_s: float = 40.0           # 多车道直道窗口的自车弧长位置 (m)
+    pair_seeds: dict | None = None     # 图 7 / 图 8 两臂同种子对比的种子覆盖 (见 PAIR_SEEDS)
 
     def gripc(self, scen: str) -> str:
         return f"GRIPC_{scen}_s{self.gripc_seeds[scen]}"
 
     def udmc(self, scen: str) -> str:
         return f"UDMC_{scen}_s{self.udmc_seeds[scen]}"
+
+    def gripc_pair(self, scen: str) -> str:
+        """图 7 / 图 8 专用: 两臂同种子对比, pair_seeds 优先。"""
+        return f"GRIPC_{scen}_s{(self.pair_seeds or {}).get(scen, self.gripc_seeds[scen])}"
+
+    def udmc_pair(self, scen: str) -> str:
+        return f"UDMC_{scen}_s{(self.pair_seeds or {}).get(scen, self.udmc_seeds[scen])}"
 
     def stem(self, base: str) -> str:
         return base + self.suffix
@@ -1391,8 +1402,8 @@ def fig7_trajectories(ctx: Ctx):
     vmax_all = 0.0
     data = {}
     for scen in scens:
-        g = load_sidecar(ctx.gripc(scen))
-        u = load_sidecar(ctx.udmc(scen))
+        g = load_sidecar(ctx.gripc_pair(scen))
+        u = load_sidecar(ctx.udmc_pair(scen))
         data[scen] = (load_route(scen), g, u)
         vmax_all = max(vmax_all, float(np.nanmax(g["ego"][:, 3])))
     norm = mcolors.Normalize(vmin=0.0, vmax=math.ceil(vmax_all))
@@ -1494,7 +1505,7 @@ def fig7_trajectories(ctx: Ctx):
 def fig8_timeseries(ctx: Ctx):
     scen = "roundabout"
     runs = {}
-    for meth, tag in (("GRIPC", ctx.gripc(scen)), ("UDMC", ctx.udmc(scen))):
+    for meth, tag in (("GRIPC", ctx.gripc_pair(scen)), ("UDMC", ctx.udmc_pair(scen))):
         sc = load_sidecar(tag)
         log = load_capture_log(tag)
         runs[meth] = (sc, log)
@@ -1660,6 +1671,7 @@ def main():
     ap.add_argument("--udmc-seeds", default=None, help="UDMC seeds, e.g. roundabout=60,unsig_crossroad=83")
     ap.add_argument("--alt-seeds", default=None, help="backup GRIPC seeds (default 74/75/72/84)")
     ap.add_argument("--alt-udmc-seeds", default=None, help="backup UDMC seeds (default 74/75)")
+    ap.add_argument("--pair-seeds", default=None, help="fig7/fig8 same-seed pair override, e.g. unsig_crossroad=78 (default PAIR_SEEDS)")
     ap.add_argument("--alt", choices=["auto", "force", "skip"], default="auto",
                     help="render *_alt figures for backup seeds: auto = if CAPTURE_BACKUP_DONE exists")
     ap.add_argument("--suffix", default="", help="stem suffix for this run (e.g. _alt)")
@@ -1699,7 +1711,8 @@ def main():
 
     ctx = Ctx(parse_seed_map(args.seeds, DEFAULT_SEEDS), parse_seed_map(args.udmc_seeds, DEFAULT_UDMC_SEEDS),
               suffix=args.suffix, fig2_back_m=args.fig2_back_m, fig2_kappa_thr=args.fig2_kappa_thr,
-              fig2_window_v=args.fig2_window_v, fig2_step_m=args.fig2_step_m, fig2_mul_s=args.fig2_mul_s)
+              fig2_window_v=args.fig2_window_v, fig2_step_m=args.fig2_step_m, fig2_mul_s=args.fig2_mul_s,
+              pair_seeds=parse_seed_map(args.pair_seeds, PAIR_SEEDS))
     alt_ctx = Ctx(parse_seed_map(args.alt_seeds, ALT_SEEDS), parse_seed_map(args.alt_udmc_seeds, ALT_UDMC_SEEDS),
                   suffix="_alt")
 
