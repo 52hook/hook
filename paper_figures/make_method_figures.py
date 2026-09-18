@@ -335,27 +335,22 @@ def panel_ellipse_vs_box(ax):
     ax.plot(*p_cor, marker="o", ms=3.5, color=C_EGO, mec="k", mew=0.5, zorder=6)
 
     # 半径标注：椭圆半径用细引线指到椭圆交点（文字放在椭圆内部空白处），角点半径写在矩形外侧
-    ax.annotate("%.2f m" % r_ell, xy=p_ell, xytext=(0.9, -0.55), ha="center", va="center",
+    ax.annotate("%.2f m" % r_ell, xy=p_ell, xytext=(1.75, -0.6), ha="center", va="center",
                 fontsize=6.5, color="#333333",
                 arrowprops=dict(arrowstyle="-", lw=0.4, color="#777777", shrinkA=0, shrinkB=2.5))
-    ax.text(2.38, 0.85, "%.2f m\n(corner)" % r_cor, ha="left", va="top", fontsize=6.5,
+    # 2026-09-18 重排：角点半径写在矩形右上外侧，间隙标注抬高到射线上方空白处，去掉角度弧（正文不用 theta）
+    ax.text(2.55, 1.85, "%.2f m\n(corner)" % r_cor, ha="left", va="center", fontsize=6.5,
             color=C_EGO, linespacing=1.2)
-    # 间隙括号：置于射线上方（矩形外侧空白处）
-    dim_line(ax, p_ell, p_cor, offset=+0.38, text="%.2f m" % gap, color="k",
-             pad=0.17, text_side=+1.0, fontsize=6.5)
-    # 角度弧 + 标注（射线起点下方）
-    ax.add_patch(Arc((0, 0), 2 * 1.1, 2 * 1.1, angle=0.0, theta1=0.0, theta2=math.degrees(theta),
-                     color="k", lw=0.6, zorder=4))
-    ax.text(1.18, -0.1, r"$\theta\approx%.0f^{\circ}$" % math.degrees(theta),
-            ha="left", va="top", fontsize=6.5)
+    dim_line(ax, p_ell, p_cor, offset=+0.50, text="%.2f m" % gap, color="k",
+             pad=0.18, text_side=+1.0, fontsize=6.5)
 
     # 图例式文字
     ax.text(0.0, -1.85, r"OBCA box $%.1f\times%.1f$ m ($Gy\leq g$)" % (CAR_L, CAR_W),
             ha="center", va="top", fontsize=6.5, color=C_EGO)
-    ax.text(-1.1, 0.45, r"ellipse $a=%.1f$, $b=%.1f$ m" % (ELL_A, ELL_B),
+    ax.text(-1.0, -0.6, r"ellipse $a=%.1f$, $b=%.1f$ m" % (ELL_A, ELL_B),
             ha="center", va="center", fontsize=6.5, color="#555555")
-    ax.text(-1.55, CIRC_R + 0.12, "two-circle, $r=%.2f$ m" % CIRC_R,
-            ha="center", va="bottom", fontsize=6.5, color=OI["grey"])
+    ax.text(-3.55, 2.2, "two-circle, $r=%.2f$ m" % CIRC_R,
+            ha="left", va="top", fontsize=6.5, color=OI["grey"])   # 2026-09-18: 移到左上角空白处
 
     ax.set_xlim(-3.7, 3.7)
     ax.set_ylim(-2.3, 2.3)
@@ -416,7 +411,7 @@ def panel_dual_separation(ax):
     ang_h = math.degrees(math.atan2(tng[1], tng[0]))
     if ang_h > 90 or ang_h < -90:
         ang_h += 180
-    lab_pos = m + 3.1 * tng + 0.18 * n
+    lab_pos = m + 3.1 * tng + 0.42 * n     # 2026-09-18: 离线更远，避免压线
     ax.text(lab_pos[0], lab_pos[1], "separating hyperplane", rotation=ang_h, rotation_mode="anchor",
             ha="center", va="center", fontsize=6.5, color=C_HYP)
 
@@ -436,10 +431,8 @@ def panel_dual_separation(ax):
             ha="center", va="center", fontsize=7, color=C_OBS, linespacing=1.25)
     ax.text(1.0, -0.6, r"$\mu_{i,k\mid t}\geq 0$", ha="center", va="center",
             fontsize=7, color=C_EGO)
-    ax.text(4.55, 1.55, r"$\lambda_{i,k\mid t}\geq 0$", ha="left", va="center",
-            fontsize=7, color=C_OBS)
-    ax.text(7.3, -1.35, r"$d_{\mathrm{safe}}=%.2f$ m, $0\leq s\leq %.2f$ m" % (D_SAFE_OBCA, S_MAX_SLACK),
-            ha="right", va="bottom", fontsize=6.5, color="#555555")
+    ax.text(7.45, 4.6, r"$\lambda_{i,k\mid t}\geq 0$", ha="right", va="center",
+            fontsize=7, color=C_OBS)   # 2026-09-18: 移到障碍右上外侧；d_safe/s 数值改写在正文
 
     ax.set_xlim(-2.9, 7.5)
     ax.set_ylim(-1.7, 4.9)
@@ -500,8 +493,8 @@ def panel_vertex_halfspace(ax):
     # ---- 两个高亮步 (k, k')：活跃面 + d_safe 偏移线 + 不可行侧阴影 + 自车顶点 ----
     #   (步号, z 标签, a 标签, 支撑线截取范围, 法向箭头基点坐标, a 标签位置, ha)
     highlights = [
-        (2, r"$z_{k}$", r"$a_{j^{*}(k)}$", (-3.3, 5.9), -0.2, (-0.45, 0.95), "right"),
-        (4, r"$z_{k'}$", r"$a_{j^{*}(k')}$", (2.4, 5.2), 3.6, (5.85, 3.72), "left"),
+        (2, r"$z_{k}$", r"$a_{j^{*}(k)}$", (-3.3, 5.9), -0.2, (-0.2, -0.2), "center"),
+        (4, r"$z_{k'}$", r"$a_{j^{*}(k')}$", (2.4, 5.2), 3.6, (8.2, 5.45), "left"),
     ]
     V_first = None
     for k, ztxt, atxt, (lo, hi), base_c, lab_xy, ha in highlights:
@@ -536,24 +529,15 @@ def panel_vertex_halfspace(ax):
     ang_l = math.degrees(math.atan2(-a_first[0], a_first[1]))   # 底边支撑线走向
     if ang_l > 90 or ang_l < -90:
         ang_l += 180
-    F_inf = line_pts(a_first, b_first, -2.1, -2.1)[0]
-    ax.text(F_inf[0] - 0.45 * a_first[0], F_inf[1] - 0.45 * a_first[1], "infeasible",
-            rotation=ang_l, rotation_mode="anchor", ha="center", va="center", fontsize=6.5, color=C_HYP,
-            bbox=dict(fc="white", ec="none", alpha=0.85, pad=0.6), zorder=6)
+    # 2026-09-18: 删除 "infeasible" 文字（阴影含义在正文说明），减少左端拥挤
     q0 = line_pts(a_first, b_first, -3.05, -3.05)[0]
     dim_line(ax, q0, q0 + D_SAFE_OBCA * a_first, offset=0.0, text="", color=C_HYP, pad=0.0, ext=False)
     ax.text(q0[0] + 0.35, q0[1] + D_SAFE_OBCA * a_first[1] - 0.12, r"$d_{\mathrm{safe}}$",
             ha="center", va="top", fontsize=6.5, color=C_HYP)
-    ax.text(V_first[3, 0] + 0.2, V_first[3, 1] - 0.1, r"$R(\psi_{\mathrm{ref},k})v_{q}+z_{k}$",
-            ha="left", va="center", fontsize=6.5, color=C_EGO)   # 顶点顺序 ++, -+, --, +-：索引 3 = 前右
-    ax.text(11.3, 6.2, r"$j^{*}(k)=\arg\max_{j}\,(a_{j}^{\top}z_{k}-b_{j})$",
-            ha="right", va="top", fontsize=6.5, color="k")
-    ax.text(11.3, -1.7,
-            r"$a_{j^{*}(k)}^{\top}\!\left(R(\psi_{\mathrm{ref},k})v_{q}+z_{k}\right)\ \geq\ b_{j^{*}(k)}+d_{\mathrm{safe}}$",
-            ha="right", va="center", fontsize=7, color="k")
+    # 2026-09-18: 删除顶点标签与两条公式文字（活跃面选择规则与线性化约束已在正文式中给出），避免遮挡
 
     ax.set_xlim(-3.5, 11.5)
-    ax.set_ylim(-2.3, 6.3)
+    ax.set_ylim(-2.0, 6.0)
     ax.set_xticks([-2, 0, 2, 4, 6, 8, 10])
     ax.set_yticks([-2, 0, 2, 4, 6])
     ax.set_xlabel("$x$ (m)")
