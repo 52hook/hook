@@ -29,7 +29,7 @@
 
   原则：
     - Fig.2 逐行复刻 scripts/x_v2x_agent.py 的参考线流水线（来源以 file:line 标注）：
-      主版本 fig2_bspline 严格模拟某一步（自车在环岛入口前 15 m，队列清理 5+0.5v，31 路点）；
+      主版本 fig2_bspline 严格模拟某一步（自车在环岛入口前 30 m，队列清理 5+0.5v，31 路点；2026-09-18 由 15 m 改为 30 m，避开出口接缝折角）；
       备选 fig2_bspline_int（路口左转）/ fig2_bspline_mul（多车道直道）；对照版本 fig2_bspline_full 整条路线一次性送入。
     - 契约缺键 / 形状不符一律记录到 CONTRACT_ISSUES 并如实打印，不做静默兜底。
     - 图内文字全英文；坐标一律为智能体使用的右手系 (x_rh = x, y_rh = -y)。
@@ -85,7 +85,7 @@ class Ctx:
     gripc_seeds: dict
     udmc_seeds: dict
     suffix: str = ""
-    fig2_back_m: float = 15.0          # 自车放在环岛入口前 15 m
+    fig2_back_m: float = 30.0          # 自车放在环岛入口前 30 m（2026-09-18: 15 -> 30，31 路点窗口不再含出口接缝的 1.4 m 之字折角）
     fig2_kappa_thr: float = 0.03       # 入口判定：dense 曲率首次 > 0.03 1/m
     fig2_window_v: float | None = None  # 队列清理阈值 5 + 0.5 v 所用车速；None → 场景目标车速
     fig2_step_m: float = 5.0           # 滚动窗步长
@@ -677,25 +677,7 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
     ax_a.tick_params(pad=1.5)
     panel_label(ax_a, "(a)", dx=-0.16)
 
-    # 插图：整条路线（灰）+ 本图处理段（朱红）+ 视窗框；放在离路径最远的角
-    ins = ax_a.inset_axes(_inset_bounds(ax_a, raw_xy) if window_mode else [0.70, 0.62, 0.29, 0.37])
-    draw_lane_ticks(ins, route["bg_wp"], color="#DADADA", lw=0.4, length=1.6, zorder=0)
-    ins.plot(full["cx0"], full["cy0"], color="#666666", lw=0.6, zorder=2)
-    ins.plot(cx, cy, color=OI["vermillion"], lw=1.0, zorder=3)
-    st_rh, go_rh = to_rh_xy(route["start"])[0], to_rh_xy(route["goal"])[0]
-    ins.plot(*st_rh, marker="o", ms=2.5, color=OI["green"], zorder=4, ls="none")
-    ins.plot(*go_rh, marker="s", ms=2.5, color=OI["purple"], zorder=4, ls="none")
-    ins.add_patch(Rectangle((xlo, ylo), xhi - xlo, yhi - ylo, fill=False, lw=0.6, ec=OI["black"], zorder=5))
-    m = 8.0
-    ins.set_xlim(min(full["cx0"].min(), xlo) - m, max(full["cx0"].max(), xhi) + m)
-    ins.set_ylim(min(full["cy0"].min(), ylo) - m, max(full["cy0"].max(), yhi) + m)
-    ins.set_aspect("equal", adjustable="box")
-    ins.set_xticks([])
-    ins.set_yticks([])
-    for sp_ in ins.spines.values():
-        sp_.set_visible(True)
-        sp_.set_linewidth(0.5)
-    ins.set_facecolor("white")
+    # 2026-09-18: 删除整条路线插图（用户要求，视觉冗余）
 
     beyond = {}
     if method_only:
@@ -850,7 +832,7 @@ def fig2_bspline_method(ctx: "Ctx"):
 
 
 def fig2_bspline(ctx: "Ctx"):
-    """主版本：环岛入口前 15 m 的单步 31 路点窗口。"""
+    """主版本：环岛入口前 30 m 的单步 31 路点窗口。"""
     route, full, win, stats = fig2_context(ctx, "roundabout")
     stats["beyond_range"] = _fig2_draw(route, win, full, ctx.stem("fig2_bspline"), True,
                                        "Roundabout entry, 31-waypoint window")
@@ -1732,7 +1714,7 @@ def main():
     ap.add_argument("--alt", choices=["auto", "force", "skip"], default="auto",
                     help="render *_alt figures for backup seeds: auto = if CAPTURE_BACKUP_DONE exists")
     ap.add_argument("--suffix", default="", help="stem suffix for this run (e.g. _alt)")
-    ap.add_argument("--fig2-back-m", type=float, default=15.0, help="fig2: ego distance before the roundabout entry (m)")
+    ap.add_argument("--fig2-back-m", type=float, default=30.0, help="fig2: ego distance before the roundabout entry (m)")
     ap.add_argument("--fig2-kappa-thr", type=float, default=0.03, help="fig2: entry = first dense |curvature| above this (1/m)")
     ap.add_argument("--fig2-window-v", type=float, default=None,
                     help="fig2: ego speed for the queue purge threshold 5 + 0.5 v (m/s); default = scenario target speed")
