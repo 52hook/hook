@@ -646,7 +646,7 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
 
     fig = plt.figure(figsize=(DOUBLE_COL_IN, 2.75))
     gs = fig.add_gridspec(1, 3, width_ratios=[1.42, 1.0, 1.0], wspace=0.48,
-                          left=0.05, right=0.985, bottom=0.235, top=0.905)
+                          left=0.05, right=0.985, bottom=0.16, top=0.905)   # 2026-09-18: 底部图例移入 (a) 后收窄下边距
     ax_a = fig.add_subplot(gs[0, 0])
     ax_b = fig.add_subplot(gs[0, 1])
     ax_c = fig.add_subplot(gs[0, 2])
@@ -752,7 +752,7 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
                     handlelength=1.3, columnspacing=0.6, borderaxespad=0.0, handletextpad=0.4, labelspacing=0.2)
         panel_label(ax_c, "(c)", dx=-0.27)
 
-    # ---- 整图底部图例（(a) 的元素）----
+    # ---- (a) 面板图例 ----
     handles = [
         Line2D([], [], marker="o", ms=2.6, mfc="#6E6E6E", mec="white", mew=0.3, ls="none", label="Route waypoints"),
         Line2D([], [], ls=(0, (1.0, 1.6)), color="#444444", lw=0.9, label="Raw course"),
@@ -762,8 +762,9 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
     ]
     if window_mode:
         handles.append(Line2D([], [], marker=(3, 0, 0), ms=5, color="k", ls="none", label="Ego"))
-    fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=6.5, handlelength=1.8,
-               columnspacing=1.1, bbox_to_anchor=(0.5, 0.01), frameon=False)
+    # 2026-09-18: 图例移入 (a) 面板右下角（用户要求），不再占用整图底部
+    ax_a.legend(handles=handles, loc="lower right", fontsize=5.6, handlelength=1.6, labelspacing=0.25,
+                borderaxespad=0.3, frameon=True, framealpha=0.92, edgecolor="none")
     savefig(fig, stem)
     plt.close(fig)
     return beyond

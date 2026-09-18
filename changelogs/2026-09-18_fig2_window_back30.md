@@ -22,3 +22,7 @@ roundabout（图 2 仅用该场景）。
 
 ## 备注
 论文正文与图注同步改为新窗口数字（tex 不入 git）。改前 PDF 备份于会话 scratchpad。
+
+## 补记（同日）图例移入 (a) 面板
+- `_fig2_draw`：整图底部 `fig.legend` 改为 `ax_a.legend(loc="lower right")`，字号 5.6，白底无边框；gridspec `bottom` 0.235 → 0.16。
+- 重出 `fig2_bspline_method.pdf`，图例位于 (a) 右下空白区，不遮挡路径；论文重编译 0 error。
