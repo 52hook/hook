@@ -4,8 +4,9 @@
   论文结果图 Fig.9 / Fig.10 出图脚本 (paper_figures/make_result_figures.py)
 ================================================================================
   Fig.9  stem = fig9_comparison   五方法对比（2 x 2）
-         (a) 车辆/行人碰撞率分组柱状图        (b) 行程时间小提琴图（对数轴）
-         (c) 横向 RMSE 箱线图（对数轴）        (d) 单步计算时间经验 CDF（对数轴）
+         (a) 车辆/行人碰撞率分组柱状图        (b) 成功率分组柱状图
+         (c) 成功 run 的通行时间分布小提琴图（对数轴; 2026-09-21 口径）
+         (d) 车道中心偏差箱线图（到达 run）
   Fig.10 stem = fig10_ablation    消融实验（2 x 2）
          (a) 五变体碰撞率分组柱状图            (b) 最小车间距箱线图（GRIPC vs w/o OBCA）
          (c) MPC 求解时间箱线图（GRIPC vs w/o QP-WS）
@@ -251,15 +252,15 @@ def fig9_panel_arrival(ax):
 
 
 def fig9_panel_b(ax):
-    """(c) 无碰撞 run (到达 + 停滞, 停滞按仿真时长计入) 的通行时间分布; 无此类 run 的格子 (FSM x Mixed) 不画。"""
+    """(c) 成功 run (到达且无车-车/车-人碰撞; 2026-09-21 口径) 的通行时间分布; 无成功 run 的格子 (FSM x Mixed) 不画。"""
     n = len(METHOD_ORDER)
-    print("\n[Fig.9(c)] travel time over collision-free runs, stalled runs counted with their logged duration (n):")
+    print("\n[Fig.9(c)] travel time over successful runs (arrived & collision-free) (n):")
     for j, s in enumerate(SCENARIO_ORDER):
         for i, m in enumerate(METHOD_ORDER):
             pos = SCEN_X[j] + (i - (n - 1) / 2.0) * SPACING_5
-            tt = cell_nocoll(m, s)["total_time"]
+            tt = cell_success(m, s)["total_time"]
             print(f"  {METHOD_LABELS[m]:9s} {SCENARIO_LABELS[s]:13s} n={tt.size:2d}" +
-                  (f" median={np.median(tt):6.1f} s" if tt.size else "  (no collision-free run)"))
+                  (f" median={np.median(tt):6.1f} s" if tt.size else "  (no successful run)"))
             if tt.size < 2:
                 continue
             log_violin(ax, tt, pos, WIDTH_5, METHOD_COLORS[m], alpha=0.75)
@@ -316,7 +317,7 @@ def make_fig9():
     fig, axes = plt.subplots(2, 2, figsize=(DOUBLE_COL_IN, FIG_H_IN))
     fig9_panel_a(axes[0, 0])          # (a) 碰撞率
     fig9_panel_arrival(axes[0, 1])    # (b) 成功率
-    fig9_panel_b(axes[1, 0])          # (c) 无碰撞 run 通行时间 (停滞按时长计入)
+    fig9_panel_b(axes[1, 0])          # (c) 成功 run 通行时间 (2026-09-21 口径)
     fig9_panel_c(axes[1, 1])          # (d) 车道中心偏差 (到达 run); 原耗时 ECDF 面板移除 (表 1 已含耗时列)
     for ax, lab in zip(axes.flat, "abcd"):
         panel_label(ax, f"({lab})")
