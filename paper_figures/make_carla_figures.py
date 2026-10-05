@@ -570,6 +570,46 @@ def rolling_stats(route: dict, v: float, step_m: float = 5.0) -> dict:
     return out
 
 
+# ============================================================
+# 分段统计：以 sigmoid 拐点曲率 kappa0 为界, 对应正文 §4.2 的两条设计目标
+#   低曲率段 —— 融合是否更平顺: 曲率沿弧长变化率 |dkappa/ds| 的 RMS
+#   高曲率段 —— 融合是否避免切角: 相对原始样条的最大横向偏离
+# 折返点及其前后各 2 个采样剔除（折返处梯度法曲率发散）
+# ============================================================
+def segment_stats(route: dict, v: float, step_m: float = 5.0, kappa0: float = ALPHA_BS_KAPPA0) -> dict:
+    dn = dense_frame(route)
+    keys = ("dk_raw", "dk_bs", "dk_bl", "dev_bs", "dev_bl")
+    acc = {seg: {k: [] for k in keys} for seg in ("lo", "hi")}
+    for s_e in np.arange(0.0, max(dn["s"][-1] - 10.0, step_m), step_m):
+        res = window_at(route, float(s_e), v)
+        if res is None or len(res["s"]) < 12:
+            continue
+        mtr = window_metrics(res)
+        keep = ~(np.convolve(mtr["fold"].astype(float), np.ones(5), mode="same") > 0)
+        k_raw = np.asarray(res["ck0"], dtype=float)
+        dk = {"raw": np.abs(np.diff(k_raw)) / D_DIST,
+              "bs": np.abs(np.diff(polyline_curvature(res["smooth"]))) / D_DIST,
+              "bl": np.abs(np.diff(np.asarray(res["ck"], dtype=float))) / D_DIST}
+        for seg, msk in (("lo", keep & (np.abs(k_raw) < kappa0)), ("hi", keep & (np.abs(k_raw) >= kappa0))):
+            mk = msk[1:] & msk[:-1]                       # 差分量两端点都在本段内
+            for name in ("raw", "bs", "bl"):
+                acc[seg][f"dk_{name}"].append(dk[name][mk])
+            acc[seg]["dev_bs"].append(mtr["dev_bs"][msk])
+            acc[seg]["dev_bl"].append(mtr["dev_bl"][msk])
+
+    def rms(a):
+        return float(np.sqrt(np.mean(a ** 2))) if len(a) else float("nan")
+
+    out = {}
+    for seg, d in acc.items():
+        p = {k: np.concatenate(v_) if v_ else np.zeros(0) for k, v_ in d.items()}
+        out[seg] = dict(n=int(len(p["dev_bl"])),
+                        dk_rms_raw=rms(p["dk_raw"]), dk_rms_bs=rms(p["dk_bs"]), dk_rms_bl=rms(p["dk_bl"]),
+                        dev_max_bs=float(p["dev_bs"].max()) if len(p["dev_bs"]) else float("nan"),
+                        dev_max_bl=float(p["dev_bl"].max()) if len(p["dev_bl"]) else float("nan"))
+    return out
+
+
 def stats_report(ctx: "Ctx") -> dict:
     """--stats：四场景滚动 31 路点窗口（每 step_m 一窗）的参考线质量统计，打印并存 JSON。"""
     report = {}
@@ -599,6 +639,13 @@ def stats_report(ctx: "Ctx") -> dict:
         print(f"   (iv) blend-vs-raw nearest-point dev RMS / max (m): {st['dev_rms']:.3f} / {st['dev_max']:.3f}  (frac > 0.10 m: {st['dev_frac_gt_010']:.3f}); "
               f"point-wise |blend-raw| RMS / max: {st['dev_pt_rms']:.3f} / {st['dev_pt_max']:.3f}; "
               f"B-spline-vs-raw lateral RMS / max: {st['bsp_dev_rms']:.3f} / {st['bsp_dev_max']:.3f}")
+        seg = segment_stats(r_sc, v_sc, ctx.fig2_step_m)
+        st["segments"] = seg
+        for name, tag in (("lo", f"|kappa_raw| < {ALPHA_BS_KAPPA0}"), ("hi", f"|kappa_raw| >= {ALPHA_BS_KAPPA0}")):
+            g = seg[name]
+            print(f"   (v-{name}) {tag}, n={g['n']}: |dkappa/ds| RMS raw / B-spline / blended "
+                  f"{g['dk_rms_raw']:.4f} / {g['dk_rms_bs']:.4f} / {g['dk_rms_bl']:.4f};  "
+                  f"max lateral dev B-spline / blended {g['dev_max_bs']:.2f} / {g['dev_max_bl']:.2f} m")
     import style as _style
     out_path = _style.PREVIEW_DIR / "fig2_stats.json"
     with open(out_path, "w", encoding="utf-8") as f:
@@ -695,14 +742,15 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
         ax_b.grid(True, axis="y")
         ax_b.legend(loc="lower right", bbox_to_anchor=(1.03, 0.995), fontsize=5.8, handlelength=1.3, borderaxespad=0.0)
         panel_label(ax_b, "(b)", dx=-0.27)
-        # ---------- (c) 融合线相对原始线的偏离与 0.35 m 位移上限 ----------
-        ax_c.plot(s, dev_lat, color=OI["vermillion"], lw=1.0, label="Lateral deviation")
-        ax_c.plot(s, res["dev_blend"], color=OI["vermillion"], lw=0.6, ls="--", label="Point-wise $|$blend $-$ raw$|$")
-        ax_c.axhline(BS_DEV_CAP, color="k", lw=0.7, ls=":", label="0.35 m cap")
-        ax_c.set_ylim(0, 0.45)
+        # ---------- (c) B 样条与融合线各自相对原始线的横向偏离（切角抑制） ----------
+        # 2026-10-05: 原 0.35 m cap 对比在本窗口不起作用, 改为直接展示融合对 B 样条切角的抑制
+        dev_bs_lat = polyline_nearest_dist(sm, raw_xy)
+        ax_c.plot(s, dev_bs_lat, color=OI["blue"], lw=0.8, label="B-spline (unblended)")
+        ax_c.plot(s, dev_lat, color=OI["vermillion"], lw=1.2, label="Blended reference")
+        ax_c.set_ylim(0, max(0.45, 1.15 * float(dev_bs_lat.max())))
         ax_c.set_xlim(0, s[-1])
         ax_c.set_xlabel("Arc length s (m)")
-        ax_c.set_ylabel("Deviation from raw course (m)")
+        ax_c.set_ylabel("Lateral deviation from raw course (m)")
         ax_c.grid(True, axis="y")
         ax_c.legend(loc="lower right", bbox_to_anchor=(1.03, 0.995), fontsize=5.8, handlelength=1.3, borderaxespad=0.0)
         panel_label(ax_c, "(c)", dx=-0.27)
