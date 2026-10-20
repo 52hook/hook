@@ -1144,13 +1144,111 @@ def add_scale_bar(ax, mpp: float, length_m: float, x0_frac=0.06, y0_frac=0.08,
 
 
 # ==============================================================================
-#  Fig.5  fig5_scenarios —— 四场景总览
+#  图 4 / 图 6 共用瓦片版式（2026-10-13 改版：横幅小格、格间留白、行标签竖排、无格框）
+#    参照 UDMC (T-ITS 2025) 图 5 等 CARLA 论文的惯例。
+#      - 图宽固定 DOUBLE_COL_IN；瓦片以英寸为单位经 fig.add_axes 精确摆放，图高由瓦片尺寸反推；
+#      - 裁剪框为整数像素且宽高比与瓦片严格相同（16:9 / 4:3），imshow 保持 aspect="equal"，不拉伸；
+#      - 保存时关闭 rcParams 的 tight bbox，PDF 页宽恰为 DOUBLE_COL_IN（与图 7 同口径）。
+# ------------------------------------------------------------------------------
+TILE_GAP_IN = 1.5 / 72.0     # 关键帧瓦片间距 1.5 pt（横纵相同）
+EGO_RING_M = 3.5             # 自车圆环半径 (m)
+
+
+def place_tiles(fig, n_rows: int, n_cols: int, tile_w: float, tile_h: float,
+                gap_w: float, gap_h: float, left: float, bottom: float) -> np.ndarray:
+    """按英寸摆放 n_rows×n_cols 无框瓦片坐标轴（第 0 行在最上），返回 object 数组 axes[r, c]。"""
+    W, H = fig.get_size_inches()
+    axes = np.empty((n_rows, n_cols), dtype=object)
+    for r in range(n_rows):
+        y = bottom + (n_rows - 1 - r) * (tile_h + gap_h)
+        for c in range(n_cols):
+            x = left + c * (tile_w + gap_w)
+            ax = fig.add_axes((x / W, y / H, tile_w / W, tile_h / H))
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for sp_ in ax.spines.values():
+                sp_.set_visible(False)
+            axes[r, c] = ax
+    return axes
+
+
+def fit_crop(pts: np.ndarray, margin_px: float, aspect: tuple, res: int, label: str):
+    """
+    包围盒 + 边距 → 较短边扩成 aspect=(aw, ah) → 平移进图内；仍放不下则等比缩边并 note_issue。
+    返回整数像素 (c0, c1, r0, r1, shifted)，宽高恰为 (aw·k, ah·k)，严格满足宽高比。
+    """
+    aw, ah = aspect
+    c0, c1 = pts[:, 0].min() - margin_px, pts[:, 0].max() + margin_px
+    r0, r1 = pts[:, 1].min() - margin_px, pts[:, 1].max() + margin_px
+    k = int(math.ceil(max((c1 - c0) / aw, (r1 - r0) / ah)))
+    k_max = min(res // aw, res // ah)
+    if k > k_max:
+        note_issue(f"{label}: crop {aw * k}x{ah * k} px exceeds image {res} px; "
+                   f"shrunk to {aw * k_max}x{ah * k_max} px (route margin reduced)")
+        k = k_max
+    w, h = aw * k, ah * k
+    cc, rc = 0.5 * (c0 + c1), 0.5 * (r0 + r1)
+    c0i, r0i = int(round(cc - w / 2)), int(round(rc - h / 2))
+    c0c, r0c = min(max(c0i, 0), res - w), min(max(r0i, 0), res - h)   # 超出原图 → 优先平移进图
+    return c0c, c0c + w, r0c, r0c + h, (c0c != c0i or r0c != r0i)
+
+
+def save_exact(fig, stem: str):
+    """以 standard bbox 保存（不做 tight 裁边），PDF 页面尺寸 = figsize。"""
+    with plt.rc_context({"savefig.bbox": "standard"}):
+        return savefig(fig, stem)
+
+
 # ==============================================================================
+#  Fig.5  fig5_scenarios —— 四场景总览（论文图 4；1×4 全宽条带，4:3 横幅瓦片）
+# ==============================================================================
+FIG5_ASPECT = (4, 3)         # 瓦片 / 裁剪框宽高比（横幅）
+FIG5_GAP_IN = 3.5 / 72.0     # 格间距 3.5 pt
+FIG5_MARGIN_M = 12.0         # 裁剪框在 路线 + 实际轨迹 + 起终点 (+ 行人路径端点) 包围盒外的边距 (m)
+FIG5_TRAJ_LW, FIG5_TRAJ_HALO = 1.0, 1.9       # 小图里轨迹线宽 / 白色描边宽 (pt)
+FIG5_MARK_KW = dict(ms=4.5, mec="white", mew=0.7, ls="none")
+
+
+def place_marker_label(ax, xy, text: str, avoid: np.ndarray, crop: tuple, tile_w_in: float,
+                       fontsize: float = 6.5, off_pt: float = 3.0):
+    """
+    起终点文字定位：在 右上 / 左上 / 右下 / 左下 四个偏移中，优先选文字框完全落在瓦片内、
+    其次压住 avoid 点（轨迹）最少的一个；同分按上述顺序。文字框按 0.55 em 平均字宽估算。
+    """
+    c0, c1, r0, r1 = crop
+    px_per_pt = (c1 - c0) / (tile_w_in * 72.0)
+    tw, th, off = 0.55 * fontsize * len(text) * px_per_pt, fontsize * px_per_pt, off_pt * px_per_pt
+    best = None
+    for sx, sy in ((1, -1), (-1, -1), (1, 1), (-1, 1)):        # 像素行向下：sy = -1 为标记上方
+        bx0 = xy[0] + off if sx > 0 else xy[0] - off - tw
+        by0 = xy[1] - off - th if sy < 0 else xy[1] + off
+        inside = bx0 >= c0 and bx0 + tw <= c1 and by0 >= r0 and by0 + th <= r1
+        hits = int(np.count_nonzero((avoid[:, 0] >= bx0) & (avoid[:, 0] <= bx0 + tw) &
+                                    (avoid[:, 1] >= by0) & (avoid[:, 1] <= by0 + th)))
+        score = (0 if inside else 1, hits)
+        if best is None or score < best[0]:
+            best = (score, sx, sy)
+    (_, hits), sx, sy = best
+    ax.annotate(text, xy, xytext=(sx * off_pt, -sy * off_pt), textcoords="offset points",
+                ha="left" if sx > 0 else "right", va="bottom" if sy < 0 else "top",
+                color="white", fontsize=fontsize, path_effects=TEXT_STROKE, zorder=7)
+    return ("upper" if sy < 0 else "lower") + ("-right" if sx > 0 else "-left"), hits
+
+
 def fig5_scenarios(ctx: Ctx):
-    fig, axes = plt.subplots(2, 2, figsize=(DOUBLE_COL_IN, 7.1))
-    fig.subplots_adjust(left=0.01, right=0.99, top=0.965, bottom=0.04, wspace=0.03, hspace=0.06)
+    # ------------------------------------------------------------------
+    #  版式：左右边距 0.01 in，上留标题带、下留单行图例带；图高由 4:3 瓦片反推
+    # ------------------------------------------------------------------
+    n = len(SCENARIO_ORDER)
+    left_in, right_in, top_in, bottom_in = 0.01, 0.01, 0.15, 0.17
+    tile_w = (DOUBLE_COL_IN - left_in - right_in - (n - 1) * FIG5_GAP_IN) / n
+    tile_h = tile_w * FIG5_ASPECT[1] / FIG5_ASPECT[0]
+    fig = plt.figure(figsize=(DOUBLE_COL_IN, top_in + tile_h + bottom_in))
+    axes = place_tiles(fig, 1, n, tile_w, tile_h, FIG5_GAP_IN, 0.0, left_in, bottom_in)[0]
+    traj_pe = [pe.Stroke(linewidth=FIG5_TRAJ_HALO, foreground="white"), pe.Normal()]
     info = {}
-    for ax, scen in zip(axes.ravel(), SCENARIO_ORDER):
+    for ax, scen in zip(axes, SCENARIO_ORDER):
+        ax.set_title(f"({'abcd'[SCENARIO_ORDER.index(scen)]}) {SCENARIO_LABELS[scen]}", fontsize=8, pad=2)
         tag = ctx.gripc(scen)
         route = load_route(scen)
         sc = load_sidecar(tag)
@@ -1164,74 +1262,70 @@ def fig5_scenarios(ctx: Ctx):
         if img.shape[0] != img.shape[1]:
             note_issue(f"{ov_path.name}: non-square image {img.shape}")
         cam_z, fov, cam_xy, mpp = overview_geometry(ov_meta, route, res_px)
-        rxy = route["route_xy"]
         exy = np.asarray(sc["ego"], dtype=float)[:, :2]      # 自车实际行驶轨迹（CARLA 系）
 
-        # 裁剪：包含整条路线与实际轨迹的正方形（含边距）
-        pix = pix_rotate_for_rh(world_to_pix(rxy, cam_xy, mpp, res_px), res_px)
-        epix = pix_rotate_for_rh(world_to_pix(exy, cam_xy, mpp, res_px), res_px)
-        allpix = np.vstack([pix, epix])
+        def to_disp(xy):
+            """CARLA 世界 (x, y) → 旋转到右手系显示后的像素 (col, row)。"""
+            return pix_rotate_for_rh(world_to_pix(xy, cam_xy, mpp, res_px), res_px)
+
+        # --------------------------------------------------------------
+        #  投影：路线 / 实际轨迹 / 起终点 / 行人路径（同一投影）
+        # --------------------------------------------------------------
+        pix, epix = to_disp(route["route_xy"]), to_disp(exy)
+        st, go = to_disp(route["start"])[0], to_disp(route["goal"])[0]
+        peds = []
+        if scen == "mixed_traffic" and len(route["ped_init"]) > 0:
+            peds = [(to_disp(p0)[0], to_disp(p1)[0]) for p0, p1 in zip(route["ped_init"], route["ped_dest"])]
+
+        # --------------------------------------------------------------
+        #  裁剪：包围盒 + 边距 → 扩成 4:3 → 平移进图（放不下才缩边并记录）
+        # --------------------------------------------------------------
+        allpix = np.vstack([pix, epix, st[None], go[None]] + [np.vstack(ab) for ab in peds])
+        c0, c1, r0, r1, shifted = fit_crop(allpix, FIG5_MARGIN_M / mpp, FIG5_ASPECT, res_px, f"fig5 {scen}")
         img_d = rotate_for_rh(img)
-        margin_px = 22.0 / mpp
-        c0, c1 = allpix[:, 0].min() - margin_px, allpix[:, 0].max() + margin_px
-        r0, r1 = allpix[:, 1].min() - margin_px, allpix[:, 1].max() + margin_px
-        side = max(c1 - c0, r1 - r0)
-        cc, rc = 0.5 * (c0 + c1), 0.5 * (r0 + r1)
-        c0, c1 = cc - side / 2, cc + side / 2
-        r0, r1 = rc - side / 2, rc + side / 2
-        if c0 < 0 or r0 < 0 or c1 > res_px or r1 > res_px:
-            note_issue(f"fig5 {scen}: route crop exceeds overview image "
-                       f"(cols {c0:.0f}-{c1:.0f}, rows {r0:.0f}-{r1:.0f}, res {res_px}); clamped")
-        c0i, r0i = int(max(0, math.floor(c0))), int(max(0, math.floor(r0)))
-        c1i, r1i = int(min(res_px, math.ceil(c1))), int(min(res_px, math.ceil(r1)))
-        ax.imshow(img_d[r0i:r1i, c0i:c1i], extent=(c0i, c1i, r1i, r0i), interpolation="lanczos")
-        ax.set_xlim(c0i, c1i)
-        ax.set_ylim(r1i, r0i)
-        info[scen] = dict(cam_z=cam_z, mpp=mpp, crop_px=(c0i, c1i, r0i, r1i), crop_m=side * mpp, overview=ov_src)
+        ax.imshow(img_d[r0:r1, c0:c1], extent=(c0, c1, r1, r0), interpolation="lanczos")
+        ax.set_xlim(c0, c1)
+        ax.set_ylim(r1, r0)
+        info[scen] = dict(cam_z=cam_z, mpp=mpp, crop_px=(c0, c1, r0, r1),
+                          crop_m=((c1 - c0) * mpp, (r1 - r0) * mpp), shifted_into_image=shifted, overview=ov_src)
         print(f"[fig5] {scen}: overview {ov_src}; Z={cam_z:.1f} m, {mpp:.3f} m/px; "
-              f"ego trajectory from {tag}: {len(exy)} rows, {float(np.asarray(sc['t'])[-1]):.1f} s")
+              f"ego trajectory from {tag}: {len(exy)} rows, {float(np.asarray(sc['t'])[-1]):.1f} s; "
+              f"crop {c1 - c0}x{r1 - r0} px ({(c1 - c0) * mpp:.0f}x{(r1 - r0) * mpp:.0f} m)"
+              f"{' shifted into image' if shifted else ''}")
 
-        # 自车实际行驶轨迹（GRIPC sidecar，同一投影；白色描边保证在深色路面 / 烘焙路线上可辨）
-        ax.plot(epix[:, 0], epix[:, 1], color=METHOD_COLORS["GRIPC"], lw=1.3, zorder=5, solid_capstyle="round",
-                solid_joinstyle="round", path_effects=[pe.Stroke(linewidth=2.4, foreground="white"), pe.Normal()])
+        # 自车实际行驶轨迹（GRIPC sidecar；白色描边保证在深色路面上可辨，小图线宽调细）
+        ax.plot(epix[:, 0], epix[:, 1], color=METHOD_COLORS["GRIPC"], lw=FIG5_TRAJ_LW, zorder=5,
+                solid_capstyle="round", solid_joinstyle="round", path_effects=traj_pe)
 
-        # 起终点（同一投影）
-        st = pix_rotate_for_rh(world_to_pix(route["start"], cam_xy, mpp, res_px), res_px)[0]
-        go = pix_rotate_for_rh(world_to_pix(route["goal"], cam_xy, mpp, res_px), res_px)[0]
-        ax.plot(*st, marker="o", ms=5, mfc=OI["green"], mec="white", mew=0.8, ls="none", zorder=6)
-        ax.plot(*go, marker="s", ms=5, mfc=OI["vermillion"], mec="white", mew=0.8, ls="none", zorder=6)
-        ax.annotate("Start", st, xytext=(4, 4), textcoords="offset points", color="white", fontsize=6.5,
-                    path_effects=TEXT_STROKE, zorder=7)
-        ax.annotate("Goal", go, xytext=(4, 4), textcoords="offset points", color="white", fontsize=6.5,
-                    path_effects=TEXT_STROKE, zorder=7)
+        # 起终点（文字自动避开瓦片边缘与轨迹）
+        ax.plot(*st, marker="o", mfc=OI["green"], zorder=6, **FIG5_MARK_KW)
+        ax.plot(*go, marker="s", mfc=OI["vermillion"], zorder=6, **FIG5_MARK_KW)
+        lab = {name: place_marker_label(ax, p, name, epix, (c0, c1, r0, r1), tile_w)
+               for name, p in (("Start", st), ("Goal", go))}
+        info[scen]["labels"] = lab
 
         # 行人路径（混合场景）
-        if scen == "mixed_traffic" and len(route["ped_init"]) > 0:
-            for p0, p1 in zip(route["ped_init"], route["ped_dest"]):
-                a = pix_rotate_for_rh(world_to_pix(p0, cam_xy, mpp, res_px), res_px)[0]
-                b = pix_rotate_for_rh(world_to_pix(p1, cam_xy, mpp, res_px), res_px)[0]
-                ax.add_patch(FancyArrowPatch(a, b, arrowstyle="-|>", mutation_scale=8,
-                                             color=OI["purple"], lw=1.3, zorder=7,
-                                             path_effects=[pe.Stroke(linewidth=2.6, foreground="white"), pe.Normal()]))
-            ax.text(0.98, 0.02, "Pedestrian paths", transform=ax.transAxes, ha="right", va="bottom",
+        for a, b in peds:
+            ax.add_patch(FancyArrowPatch(a, b, arrowstyle="-|>", mutation_scale=6.5,
+                                         color=OI["purple"], lw=1.0, zorder=7,
+                                         path_effects=[pe.Stroke(linewidth=2.0, foreground="white"), pe.Normal()]))
+        if peds:
+            ax.text(0.97, 0.03, "Pedestrian paths", transform=ax.transAxes, ha="right", va="bottom",
                     color=OI["purple"], fontsize=6.5, path_effects=[pe.withStroke(linewidth=1.5, foreground="white")])
 
         add_scale_bar(ax, mpp, 20.0)
-        ax.set_title(f"({'abcd'[SCENARIO_ORDER.index(scen)]}) {SCENARIO_LABELS[scen]}", fontsize=8, pad=3)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        for sp_ in ax.spines.values():
-            sp_.set_visible(False)
-    # 整图底部图例：实际轨迹 / 起点 / 终点（行人路径仍由 (d) 面板内文字标注）
+    # ------------------------------------------------------------------
+    #  整图底部单行图例：实际轨迹 / 起点 / 终点（行人路径由 (d) 面板内文字标注）
+    # ------------------------------------------------------------------
     handles = [
-        Line2D([], [], color=METHOD_COLORS["GRIPC"], lw=1.3, label="Ego trajectory (GRIPC)",
-               path_effects=[pe.Stroke(linewidth=2.4, foreground="white"), pe.Normal()]),
-        Line2D([], [], marker="o", ms=5, mfc=OI["green"], mec="white", mew=0.8, ls="none", label="Start"),
-        Line2D([], [], marker="s", ms=5, mfc=OI["vermillion"], mec="white", mew=0.8, ls="none", label="Goal"),
+        Line2D([], [], color=METHOD_COLORS["GRIPC"], lw=FIG5_TRAJ_LW, label="Ego trajectory (GRIPC)",
+               path_effects=traj_pe),
+        Line2D([], [], marker="o", mfc=OI["green"], label="Start", **FIG5_MARK_KW),
+        Line2D([], [], marker="s", mfc=OI["vermillion"], label="Goal", **FIG5_MARK_KW),
     ]
     fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=6.5, handlelength=1.9,
-               columnspacing=1.2, bbox_to_anchor=(0.5, 0.0), frameon=False)
-    savefig(fig, ctx.stem("fig5_scenarios"))
+               columnspacing=1.2, bbox_to_anchor=(0.5, 0.0), frameon=False, borderpad=0.2, borderaxespad=0.1)
+    save_exact(fig, ctx.stem("fig5_scenarios"))
     plt.close(fig)
     return info
 
@@ -1272,17 +1366,31 @@ def pick_keyframe_times(t: np.ndarray, v: np.ndarray, min_dist: np.ndarray, obs,
     return out, cand
 
 
-FIG6_CROP_PX = 600      # 关键帧裁剪边长 (px); cam_z 45 m/FOV 90 时 ≈ ±26 m
+# ------------------------------------------------------------------------------
+#  关键帧裁剪（2026-10-13 改版：600×600 正方 → 16:9 横幅 688×387 px）
+#    cam_z 45 m / FOV 90° / 1024 px 时 mpp ≈ 0.088 m/px → 约 60 m × 34 m。
+#    裁剪框默认以自车（原图中心）为中心；FIG6_VSHIFT 可按 (场景, 列) 沿竖直方向平移裁剪框，
+#    单位为瓦片高，负值 = 上移（多露出画面上方），|值| ≤ FIG6_VSHIFT_MAX；圆环始终画在自车真实像素位置。
+#    2026-10-13 实测所选 16 帧的参考线 / MPC 预测线距自车竖直 ≤ ~120 px（半高 193 px），故不偏移。
+# ------------------------------------------------------------------------------
+FIG6_CROP_W, FIG6_CROP_H = 688, 387     # 688 / 387 = 16 / 9（43 × (16, 9)）
+FIG6_VSHIFT: dict = {}                  # {(scenario, col): 竖直偏移 / 瓦片高}
+FIG6_VSHIFT_MAX = 0.25
 # 按场景固定关键帧时刻 (s)：表内场景直接用这些时刻（取最近可用帧），不走 pick_keyframe_times；其余场景不变
 FIG6_FIXED_TIMES = {"mixed_traffic": [1.9, 3.4, 7.1, 25.4]}
 
 
 def fig6_keyframes(ctx: Ctx):
-    left, right, top, bottom = 0.035, 0.995, 0.995, 0.005
-    cell_w = DOUBLE_COL_IN * (right - left) / 4.0
-    fig_h = 4.0 * cell_w / (top - bottom)
-    fig, axes = plt.subplots(4, 4, figsize=(DOUBLE_COL_IN, fig_h))
-    fig.subplots_adjust(left=left, right=right, top=top, bottom=bottom, wspace=0.0, hspace=0.0)
+    # ------------------------------------------------------------------
+    #  版式：左留 0.2 in 给竖排行标签；4 行 × 4 列 16:9 瓦片，间距 1.5 pt；图高由瓦片反推
+    # ------------------------------------------------------------------
+    n_rows, n_cols = len(SCENARIO_ORDER), 4
+    left_in, right_in, top_in, bottom_in = 0.20, 0.01, 0.01, 0.01
+    tile_w = (DOUBLE_COL_IN - left_in - right_in - (n_cols - 1) * TILE_GAP_IN) / n_cols
+    tile_h = tile_w * FIG6_CROP_H / FIG6_CROP_W
+    fig_h = top_in + n_rows * tile_h + (n_rows - 1) * TILE_GAP_IN + bottom_in
+    fig = plt.figure(figsize=(DOUBLE_COL_IN, fig_h))
+    axes = place_tiles(fig, n_rows, n_cols, tile_w, tile_h, TILE_GAP_IN, TILE_GAP_IN, left_in, bottom_in)
     chosen = {}
     for r, scen in enumerate(SCENARIO_ORDER):
         tag = ctx.gripc(scen)
@@ -1312,35 +1420,43 @@ def fig6_keyframes(ctx: Ctx):
             j = int(np.argmin(np.abs(ftimes - tk)))
             if abs(ftimes[j] - tk) > 0.5:
                 note_issue(f"fig6 {tag}: nearest frame to t={tk:.2f}s is {ftimes[j]:.2f}s (gap > 0.5 s)")
-            img = load_image(fpaths[j])
-            res_px = img.shape[0]
-            mpp = metres_per_pixel(cam_z, fov, res_px)
-            crop = min(FIG6_CROP_PX, res_px)          # 更紧的裁剪, 让自车与周车在栏宽下可辨
-            o = (res_px - crop) // 2
-            img_d = rotate_for_rh(img)[o:o + crop, o:o + crop]
-            ax.imshow(img_d, extent=(0, crop, crop, 0), interpolation="lanczos")
-            # 自车标记: BEV 相机每步置于自车正上方, 自车恒在画面中心 (滞后 1 步 ≤ 0.5 m)
-            _r_ego = 4.0 / mpp
-            ax.add_patch(plt.Circle((crop / 2.0, crop / 2.0), _r_ego, fill=False, ec="white", lw=1.4, zorder=6))
-            ax.add_patch(plt.Circle((crop / 2.0, crop / 2.0), _r_ego, fill=False, ec="black", lw=0.5, zorder=6, alpha=0.6))
-            ax.set_xlim(0, crop)
-            ax.set_ylim(crop, 0)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            for sp_ in ax.spines.values():
-                sp_.set_visible(False)
-            ax.text(0.03, 0.97, f"t = {ftimes[j]:.1f} s", transform=ax.transAxes, ha="left", va="top",
-                    fontsize=7.5, color="white",
-                    bbox=dict(boxstyle="round,pad=0.25", fc="black", ec="none", alpha=0.6))
+            img_d = rotate_for_rh(load_image(fpaths[j]))
+            res_h, res_w = img_d.shape[:2]
+            mpp = metres_per_pixel(cam_z, fov, img_d.shape[0])
+            cw, ch = FIG6_CROP_W, FIG6_CROP_H
+            if cw > res_w or ch > res_h:              # 帧比裁剪框小：等比缩小裁剪框（保持 16:9）
+                k = min(res_w // 16, res_h // 9)
+                note_issue(f"fig6 {tag}: frame {res_w}x{res_h} smaller than crop {cw}x{ch}; using {16 * k}x{9 * k}")
+                cw, ch = 16 * k, 9 * k
+            # ----------------------------------------------------------
+            #  裁剪框：以自车为中心（BEV 相机每步置于自车正上方，自车恒在原图中心，滞后 1 步 ≤ 0.5 m）；
+            #  仅 FIG6_VSHIFT 列出的格沿竖直方向偏移（≤ 25% 瓦片高）
+            # ----------------------------------------------------------
+            ego_c, ego_r = res_w / 2.0, res_h / 2.0
+            vshift = float(np.clip(FIG6_VSHIFT.get((scen, c), 0.0), -FIG6_VSHIFT_MAX, FIG6_VSHIFT_MAX))
+            ox = int(round(ego_c - cw / 2.0))
+            oy = int(min(max(round(ego_r - ch / 2.0 + vshift * ch), 0), res_h - ch))
+            ax.imshow(img_d[oy:oy + ch, ox:ox + cw], extent=(0, cw, ch, 0), interpolation="lanczos")
+            ax.set_xlim(0, cw)
+            ax.set_ylim(ch, 0)
+            # 自车圆环：画在自车在裁剪框内的真实像素位置；先白后黑，保证明暗路面均可辨
+            ring_xy, ring_r = (ego_c - ox, ego_r - oy), EGO_RING_M / mpp
+            ax.add_patch(plt.Circle(ring_xy, ring_r, fill=False, ec="white", lw=1.0, zorder=6))
+            ax.add_patch(plt.Circle(ring_xy, ring_r, fill=False, ec="black", lw=0.4, zorder=6, alpha=0.6))
+            ax.text(0.025, 0.95, f"t = {ftimes[j]:.1f} s", transform=ax.transAxes, ha="left", va="top",
+                    fontsize=6.5, color="white",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.55))
             if c == 0:
                 ax.text(-0.03, 0.5, SCENARIO_LABELS[scen], transform=ax.transAxes, rotation=90,
                         ha="right", va="center", fontsize=8)
             if r == 0 and c == 0:
-                add_scale_bar(ax, mpp, 10.0, x0_frac=0.06, y0_frac=0.07)
+                add_scale_bar(ax, mpp, 10.0, fontsize=6.5)
+            if vshift != 0.0:
+                print(f"[fig6] {tag} col {c}: crop shifted vertically by {vshift * ch:+.0f} px ({vshift:+.2f} tile)")
             chosen[scen].append(dict(target=round(tk, 2), frame_t=float(ftimes[j]), file=fpaths[j].name))
         print(f"[fig6] {tag}: times={source} candidates={[None if c is None else round(c, 2) for c in cand]} "
               f"chosen={[round(x, 2) for x in times]} frames={[c['frame_t'] for c in chosen[scen]]}")
-    savefig(fig, ctx.stem("fig6_keyframes"))
+    save_exact(fig, ctx.stem("fig6_keyframes"))
     plt.close(fig)
     return chosen
 

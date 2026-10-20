@@ -24,14 +24,7 @@
 
 **GRIPC**（Geometry-Rule Integrated Planning and Control）— 面向城市自动驾驶的几何-规则集成规划与控制框架，基于 CARLA 0.9.16，在 UDMC 基础上做四项改进。
 
-本人论文：`1.pdf`（PDF 定稿）、`new.docx`（Word 版本），均在根目录。原版 UDMC 代码在 `udmc_carla-main/`，对应论文为 `UDMC_Unified_Decision-Making_and_Control_Framework_for_Urban_Autonomous_Driving_With_Motion_Prediction_of_Traffic_Participants.pdf`（根目录）。OBCA 改进参考论文为 `TDR-OBCA_A_Reliable_Planner_for_Autonomous_Driving_in_Free-Space_Environment.pdf`（根目录）。
-
-### 四大改进
-
-1. **OBCA 多边形硬约束** — 替代椭圆近似（`utils/geometry_poly.py`）
-2. **对向车检测与让行** — 硬编码于 `scripts/x_v2x_agent.py:581-631`，无消融开关
-3. **IGPR 方差驱动 APF 权重** — 预测不确定性高时增大安全裕度（`IGPR_predict_sv_wps.py` + `scripts/x_v2x_agent.py:807-839`）
-4. **B-spline 全局参考线平滑** — QP 约束优化，C² 连续（`utils/global_bspline_smoother.py`）
+本人论文：cas-dc-template.tex。原版 UDMC 代码在 `udmc_carla-main/`，对应论文为 `UDMC_Unified_Decision-Making_and_Control_Framework_for_Urban_Autonomous_Driving_With_Motion_Prediction_of_Traffic_Participants.pdf`（根目录）。OBCA 改进参考论文为 `TDR-OBCA_A_Reliable_Planner_for_Autonomous_Driving_in_Free-Space_Environment.pdf`（根目录）。
 
 ### 消融开关
 
