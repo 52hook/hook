@@ -1073,63 +1073,65 @@ def make_fig3():
 #  Fig. 4 (P4): 第 4.4 & 4.5 节 碰撞几何与混合 QP 热启动 (2 x 2)
 # ==============================================================================
 def panel_ellipse_vs_box(ax):
-    """(a) 椭圆近似 vs OBCA 矩形：车角方向半径差（低估 0.70 m，无框大字号版）。"""
+    """(a) 椭圆近似 vs OBCA 矩形：车角方向半径差（低估 0.70 m，适配 1x4 横排比例）。"""
     ax.set_axis_off()
     hx, hy = CAR_L / 2.0, CAR_W / 2.0
     theta = math.atan2(hy, hx)
     r_ell = 1.0 / math.sqrt(math.cos(theta) ** 2 / ELL_A ** 2 + math.sin(theta) ** 2 / ELL_B ** 2)
     r_cor = math.hypot(hx, hy)
 
-    halo = [pe.withStroke(linewidth=2.5, foreground="white")]
+    halo = [pe.withStroke(linewidth=2.2, foreground="white")]
 
     # 1. 双圆近似（浅灰点线，置于底层）
     for sx in (+1.0, -1.0):
-        ax.add_patch(Circle((sx * CIRC_R, 0.0), CIRC_R, fc="none", ec="#94A3B8", ls=":", lw=1.10, zorder=1))
-        ax.plot([sx * CIRC_R], [0.0], marker="+", ms=5.0, mew=0.85, color="#94A3B8", zorder=1)
+        ax.add_patch(Circle((sx * CIRC_R, 0.0), CIRC_R, fc="none", ec="#94A3B8", ls=":", lw=1.0, zorder=1))
+        ax.plot([sx * CIRC_R], [0.0], marker="+", ms=4.2, mew=0.8, color="#94A3B8", zorder=1)
 
     # 2. 内嵌图 1 同款 12 边形 CAD 现代轿车轮廓
     _draw_cad_car(ax, (0.0, 0.0), 0.0, CAR_L, CAR_W, C_EGO, steer=0.0,
-                  alpha_face=0.13, alpha_edge=0.45, lw=0.80,
+                  alpha_face=0.13, alpha_edge=0.45, lw=0.75,
                   show_four_wheels=True, wheel_alpha=0.22, show_cabin=True, zorder=1.8)
 
     # 3. 内接椭圆近似（半透明灰蓝填充 + 清晰虚线边界）
     ax.add_patch(Ellipse((0, 0), 2 * ELL_A, 2 * ELL_B, fc=rgba("#CBD5E1", 0.42),
-                         ec="#475569", ls="--", lw=1.25, zorder=2.4))
+                         ec="#475569", ls="--", lw=1.15, zorder=2.4))
 
     # 4. 外层 4 边 OBCA 矩形包络框（粗实线）
     ax.add_patch(Polygon(rect_vertices((0, 0), 0.0, CAR_L, CAR_W), closed=True, fc="none",
-                         ec=C_EGO, lw=1.85, zorder=3.2, joinstyle="miter"))
+                         ec=C_EGO, lw=1.65, zorder=3.2, joinstyle="miter"))
 
-    # 5. 车角方向射线与 0.70 m 低估裕量尺寸标注（删去冗余的 1.76 m / 2.46 m 重复引线）
+    # 5. 车角方向射线与 0.70 m 低估裕量尺寸标注
     u = np.array([math.cos(theta), math.sin(theta)])
     p_ell, p_cor = r_ell * u, r_cor * u
-    ax.plot([0, 1.12 * r_cor * u[0]], [0, 1.12 * r_cor * u[1]], color="#111111", lw=0.95, zorder=4)
-    ax.plot([0], [0], marker="o", ms=3.8, color="#111111", zorder=5)
-    ax.plot(*p_ell, marker="o", ms=4.6, color="#475569", mec="white", mew=0.65, zorder=6)
-    ax.plot(*p_cor, marker="o", ms=4.6, color=C_EGO, mec="white", mew=0.65, zorder=6)
+    ax.plot([0, 1.12 * r_cor * u[0]], [0, 1.12 * r_cor * u[1]], color="#111111", lw=0.85, zorder=4)
+    ax.plot([0], [0], marker="o", ms=3.2, color="#111111", zorder=5)
+    ax.plot(*p_ell, marker="o", ms=3.8, color="#475569", mec="white", mew=0.55, zorder=6)
+    ax.plot(*p_cor, marker="o", ms=3.8, color=C_EGO, mec="white", mew=0.55, zorder=6)
 
-    dim_line(ax, p_ell, p_cor, offset=+0.48, text="0.70 m", color="#0F172A",
-             pad=0.34, text_side=+1.0, fontsize=9.0, lw=0.80)
+    dim_line(ax, p_ell, p_cor, offset=+0.52, text="0.70 m", color="#0F172A",
+             pad=0.36, text_side=+1.0, fontsize=7.2, lw=0.75)
 
-    # 6. 精简核心包络名称（全部放大至 8.8–9.2 pt）
-    ax.text(0.0, -1.28, r"OBCA box $\mathcal{E}$ ($Gy\leq g$)",
-            ha="center", va="top", fontsize=9.2, color=C_EGO, fontweight="bold", path_effects=halo)
-    p_ell_top = np.array([-0.85, ELL_B * math.sqrt(max(0.0, 1.0 - (-0.85 / ELL_A) ** 2))])
-    ax.annotate("Ellipse", xy=p_ell_top, xytext=(-0.85, 1.48),
-                ha="center", va="center", fontsize=9.0, color="#334155", fontweight="bold",
+    # 6. 核心包络名称（字号统一为 7.2–7.5 pt，与图 1、图 4 严格一致）
+    ax.text(0.0, -1.42, r"OBCA box $\mathcal{E}$ ($Gy\leq g$)",
+            ha="center", va="top", fontsize=7.4, color=C_EGO, path_effects=halo)
+    p_ell_top = np.array([-0.65, ELL_B * math.sqrt(max(0.0, 1.0 - (-0.65 / ELL_A) ** 2))])
+    ax.annotate("Ellipse", xy=p_ell_top, xytext=(-0.55, 1.82),
+                ha="center", va="center", fontsize=7.2, color="#334155",
                 path_effects=halo,
-                arrowprops=dict(arrowstyle="->", lw=0.75, color="#475569", shrinkA=0, shrinkB=2.5), zorder=7)
-    ax.text(-3.62, 1.70, "Two-circle",
-            ha="left", va="center", fontsize=8.8, color="#64748B", fontweight="bold", path_effects=halo)
+                arrowprops=dict(arrowstyle="->", lw=0.70, color="#475569", shrinkA=0, shrinkB=2.0), zorder=7)
+    ax.annotate("Two-circle", xy=(-CIRC_R - 0.85, 1.18), xytext=(-2.10, 2.15),
+                ha="center", va="center", fontsize=7.2, color="#64748B",
+                path_effects=halo,
+                arrowprops=dict(arrowstyle="->", lw=0.65, color="#94A3B8", shrinkA=0, shrinkB=2.0), zorder=7)
 
-    ax.set_xlim(-3.75, 3.70)
-    ax.set_ylim(-2.00, 2.00)
+    ax.set_xlim(-3.18, 3.30)
+    ax.set_ylim(-2.85, 2.85)
 
 
 def panel_dual_separation(ax):
-    """(b) 对偶多边形分离超平面与 d_safe - s_{i,k|t}（精简冗余不等式，全量放大字号，零压线）。"""
+    """(b) 对偶多边形分离超平面与 d_safe - s_{i,k|t}（适配 1x4 横排比例）。"""
     ax.set_axis_off()
-    halo = [pe.withStroke(linewidth=2.5, foreground="white")]
+    halo = [pe.withStroke(linewidth=2.2, foreground="white")]
 
     V_e = rect_vertices((0.0, 0.0), 0.0, CAR_L, CAR_W)
     yaw_o = math.radians(35.0)
@@ -1151,61 +1153,59 @@ def panel_dual_separation(ax):
     V_o = rect_vertices(tuple(c_o), yaw_o, CAR_L, CAR_W)
     dist, p_e, p_o = poly_min_dist(V_e, V_o)
 
-    # 内嵌图 1 同款 12 边形 CAD 轿车轮廓 + 外层 4 边 OBCA 矩形包络框
     _draw_cad_car(ax, (0.0, 0.0), 0.0, CAR_L, CAR_W, C_EGO, steer=0.0,
-                  alpha_face=0.15, alpha_edge=0.55, lw=0.80,
+                  alpha_face=0.15, alpha_edge=0.55, lw=0.75,
                   show_four_wheels=True, wheel_alpha=0.24, show_cabin=True, zorder=1.8)
     _draw_cad_car(ax, tuple(c_o), yaw_o, CAR_L, CAR_W, C_OBS, steer=0.0,
-                  alpha_face=0.15, alpha_edge=0.55, lw=0.80,
+                  alpha_face=0.15, alpha_edge=0.55, lw=0.75,
                   show_four_wheels=True, wheel_alpha=0.24, show_cabin=True, zorder=1.8)
-    ax.add_patch(Polygon(V_e, closed=True, fc=rgba(C_EGO, 0.04), ec=C_EGO, lw=1.65, zorder=2.4, joinstyle="miter"))
-    ax.add_patch(Polygon(V_o, closed=True, fc=rgba(C_OBS, 0.04), ec=C_OBS, lw=1.65, zorder=2.4, joinstyle="miter"))
+    ax.add_patch(Polygon(V_e, closed=True, fc=rgba(C_EGO, 0.04), ec=C_EGO, lw=1.50, zorder=2.4, joinstyle="miter"))
+    ax.add_patch(Polygon(V_o, closed=True, fc=rgba(C_OBS, 0.04), ec=C_OBS, lw=1.50, zorder=2.4, joinstyle="miter"))
 
     n = (p_o - p_e) / np.linalg.norm(p_o - p_e)
     tng = np.array([-n[1], n[0]])
     m = 0.5 * (p_e + p_o)
-    H1, H2 = m - 1.35 * tng, m + 3.25 * tng
-    ax.plot([H1[0], H2[0]], [H1[1], H2[1]], color=C_HYP, lw=1.60, zorder=4)
+    H1, H2 = m - 1.15 * tng, m + 3.15 * tng
+    ax.plot([H1[0], H2[0]], [H1[1], H2[1]], color=C_HYP, lw=1.45, zorder=4)
 
-    base = m + 1.55 * tng
+    base = m + 1.40 * tng
     tip = base - 1.05 * n
     ax.annotate("", xy=tip, xytext=base,
-                arrowprops=dict(arrowstyle="-|>", lw=1.25, color=C_HYP, mutation_scale=9.5), zorder=5)
-    ax.text(tip[0] - 0.12, tip[1] + 0.08, r"$A_{i,k\mid t}^{\top}\lambda_{i,k\mid t}$",
-            ha="right", va="center", fontsize=9.2, color=C_HYP, fontweight="bold",
+                arrowprops=dict(arrowstyle="-|>", lw=1.10, color=C_HYP, mutation_scale=8.0), zorder=5)
+    ax.text(tip[0] - 0.12, tip[1] + 0.12, r"$A_{i,k\mid t}^{\top}\lambda_{i,k\mid t}$",
+            ha="right", va="center", fontsize=7.3, color=C_HYP,
             path_effects=halo, zorder=6)
 
     ang_h = math.degrees(math.atan2(tng[1], tng[0]))
     if ang_h > 90 or ang_h < -90:
         ang_h += 180
-    lab_pos = m + 2.18 * tng + 0.38 * n
+    lab_pos = m + 2.32 * tng + 0.44 * n
     ax.text(lab_pos[0], lab_pos[1], "Separating hyperplane", rotation=ang_h, rotation_mode="anchor",
-            ha="center", va="center", fontsize=8.6, color=C_HYP, fontweight="bold", path_effects=halo)
+            ha="center", va="center", fontsize=6.8, color=C_HYP, path_effects=halo)
 
-    ax.plot([p_e[0], p_o[0]], [p_e[1], p_o[1]], color="#111111", lw=1.15, zorder=5)
-    ax.plot(*p_e, marker="o", ms=4.2, color=C_EGO, mec="white", mew=0.55, zorder=6)
-    ax.plot(*p_o, marker="o", ms=4.2, color=C_OBS, mec="white", mew=0.55, zorder=6)
+    ax.plot([p_e[0], p_o[0]], [p_e[1], p_o[1]], color="#111111", lw=1.05, zorder=5)
+    ax.plot(*p_e, marker="o", ms=3.5, color=C_EGO, mec="white", mew=0.5, zorder=6)
+    ax.plot(*p_o, marker="o", ms=3.5, color=C_OBS, mec="white", mew=0.5, zorder=6)
     ax.annotate(r"$d_{\mathrm{safe}}-s_{i,k\mid t}$",
-                xy=m, xytext=(4.15, -0.25), ha="left", va="center", fontsize=9.2,
-                color="#0F172A", fontweight="bold", path_effects=halo,
-                arrowprops=dict(arrowstyle="->", lw=0.75, color="#475569", shrinkA=0, shrinkB=2.5))
+                xy=m, xytext=(3.35, -0.95), ha="center", va="center", fontsize=7.3,
+                color="#0F172A", path_effects=halo,
+                arrowprops=dict(arrowstyle="->", lw=0.70, color="#475569", shrinkA=0, shrinkB=2.0))
 
-    # 车体内部合并标注集合符号与对偶变量（删去外部重复长公式）
     ax.text(0.0, 0.0, r"$\mathcal{E}\ (\mu_{i,k\mid t})$",
-            ha="center", va="center", fontsize=9.2, color=C_EGO, fontweight="bold",
-            bbox=white_box(pad=0.07, alpha=0.90), zorder=5)
+            ha="center", va="center", fontsize=7.2, color=C_EGO,
+            bbox=white_box(pad=0.05, alpha=0.88), zorder=5)
     ax.text(c_o[0], c_o[1], r"$\mathcal{O}_{i,k\mid t}\ (\lambda_{i,k\mid t})$", rotation=35.0,
-            ha="center", va="center", fontsize=9.0, color=C_OBS, fontweight="bold",
-            bbox=white_box(pad=0.07, alpha=0.90), zorder=5)
+            ha="center", va="center", fontsize=7.0, color=C_OBS,
+            bbox=white_box(pad=0.05, alpha=0.88), zorder=5)
 
-    ax.set_xlim(-2.60, 8.68)
-    ax.set_ylim(-1.15, 4.95)
+    ax.set_xlim(-2.55, 7.60)
+    ax.set_ylim(-2.25, 6.35)
 
 
 def panel_vertex_halfspace(ax):
-    """(c) QP 预规划的活跃边选择与顶点-半空间线性化（统一式 29 符号 v_q，全量放大字号）。"""
+    """(c) QP 预规划的活跃边选择与顶点-半空间线性化（适配 1x4 横排比例）。"""
     ax.set_axis_off()
-    halo = [pe.withStroke(linewidth=2.5, foreground="white")]
+    halo = [pe.withStroke(linewidth=2.2, foreground="white")]
 
     N = 5
     obs_c, obs_yaw = np.array([2.5, 3.65]), math.radians(8.0)
@@ -1213,15 +1213,15 @@ def panel_vertex_halfspace(ax):
     A_o, b_o = polygon_to_Ab(V_obs)
 
     _draw_cad_car(ax, tuple(obs_c), obs_yaw, CAR_L, CAR_W, C_OBS, steer=0.0,
-                  alpha_face=0.15, alpha_edge=0.55, lw=0.80,
+                  alpha_face=0.15, alpha_edge=0.55, lw=0.75,
                   show_four_wheels=True, wheel_alpha=0.24, show_cabin=True, zorder=1.8)
-    ax.add_patch(Polygon(V_obs, closed=True, fc=rgba(C_OBS, 0.05), ec=C_OBS, lw=1.65,
+    ax.add_patch(Polygon(V_obs, closed=True, fc=rgba(C_OBS, 0.05), ec=C_OBS, lw=1.50,
                          zorder=2.4, joinstyle="miter"))
     ax.text(obs_c[0], obs_c[1], r"$\mathcal{O}_{i\mid t}$", rotation=8.0,
-            ha="center", va="center", fontsize=9.4, color=C_OBS, fontweight="bold",
-            bbox=white_box(pad=0.08, alpha=0.92), zorder=6)
+            ha="center", va="center", fontsize=7.3, color=C_OBS,
+            bbox=white_box(pad=0.06, alpha=0.90), zorder=6)
 
-    P = np.array([[-2.4, -0.30], [2.0, 0.05], [7.2, 0.65], [9.5, 3.75]])
+    P = np.array([[-2.2, -0.30], [2.0, 0.05], [6.8, 0.65], [8.8, 3.55]])
 
     def bez(t):
         t = np.asarray(t, float)[:, None]
@@ -1238,163 +1238,162 @@ def panel_vertex_halfspace(ax):
     psi = np.arctan2(dz[:, 1], dz[:, 0])
     path = bez(np.linspace(0.0, 1.0, 160))
 
-    # 预规划参考轨迹（删去非必要的 \tilde{p}_0, \tilde{p}_{k+2}, \tilde{p}_N 标签）
-    ax.plot(path[:, 0], path[:, 1], ls="-", lw=1.05, color=rgba(C_EGO, 0.45), zorder=1.5)
-    ax.plot(zs[:, 0], zs[:, 1], marker="o", ls="none", ms=3.8, color=C_EGO, mec="white", mew=0.5, zorder=5)
+    ax.plot(path[:, 0], path[:, 1], ls="-", lw=0.95, color=rgba(C_EGO, 0.45), zorder=1.5)
+    ax.plot(zs[:, 0], zs[:, 1], marker="o", ls="none", ms=3.2, color=C_EGO, mec="white", mew=0.45, zorder=5)
 
     def line_pts(a, b, lo, hi):
         if abs(a[1]) >= abs(a[0]):
             return np.array([[x, (b - a[0] * x) / a[1]] for x in (lo, hi)])
         return np.array([[(b - a[1] * y) / a[0], y] for y in (lo, hi)])
 
-    # 聚焦展示第 k 步活跃半空间与 4 顶点约束
     k = 2
     _draw_cad_car(ax, tuple(zs[k]), psi[k], CAR_L, CAR_W, C_EGO, steer=0.10,
-                  alpha_face=0.15, alpha_edge=0.55, lw=0.80,
+                  alpha_face=0.15, alpha_edge=0.55, lw=0.75,
                   show_four_wheels=True, wheel_alpha=0.24, show_cabin=True, zorder=2.5)
     V_e = _draw_rect(ax, tuple(zs[k]), psi[k], C_EGO, alpha_edge=0.92, alpha_face=0.04,
-                     lw=1.50, ls="-", zorder=3)
-    ax.plot(V_e[:, 0], V_e[:, 1], marker="s", ls="none", ms=4.2, color=C_EGO, mec="white", mew=0.5, zorder=5.5)
-    ax.text(zs[k, 0] + 0.18, zs[k, 1] - 0.32, r"$\tilde{p}_{k}$", ha="left", va="top",
-            fontsize=9.4, color=C_EGO, fontweight="bold", bbox=white_box(pad=0.06, alpha=0.90), zorder=6)
+                     lw=1.35, ls="-", zorder=3)
+    ax.plot(V_e[:, 0], V_e[:, 1], marker="s", ls="none", ms=3.5, color=C_EGO, mec="white", mew=0.45, zorder=5.5)
+    ax.text(zs[k, 0] - 0.65, zs[k, 1] - 0.08, r"$\tilde{p}_{k}$", ha="center", va="center",
+            fontsize=7.3, color=C_EGO, bbox=white_box(pad=0.04, alpha=0.88), zorder=6)
 
-    # 淡化虚线展示后续步姿态演进（无文字标签干扰）
     k2 = 4
     _draw_cad_car(ax, tuple(zs[k2]), psi[k2], CAR_L, CAR_W, C_EGO, steer=0.08,
-                  alpha_face=0.08, alpha_edge=0.35, lw=0.60,
+                  alpha_face=0.08, alpha_edge=0.35, lw=0.55,
                   show_four_wheels=True, wheel_alpha=0.14, show_cabin=True, zorder=2.0)
     _draw_rect(ax, tuple(zs[k2]), psi[k2], C_EGO, alpha_edge=0.55, alpha_face=0.02,
-               lw=0.95, ls="--", zorder=2.2)
+               lw=0.85, ls="--", zorder=2.2)
 
-    # 绘制活跃边半空间与安全裕度带
     scores = A_o @ zs[k] - b_o
     j = int(np.argmax(scores))
     a, b = A_o[j], b_o[j]
-    F = line_pts(a, b, -2.5, 7.2)
+    F = line_pts(a, b, -2.3, 6.8)
     Sft = F + D_SAFE_OBCA * a
     band = np.array([Sft[0], Sft[1], F[1], F[0]])
     ax.add_patch(Polygon(band, closed=True, fc=rgba(C_HYP, 0.16), ec="none", zorder=1.8))
-    ax.plot(F[:, 0], F[:, 1], color=C_HYP, lw=1.55, ls="-", zorder=4)
-    ax.plot(Sft[:, 0], Sft[:, 1], color=C_HYP, lw=1.20, ls="--", zorder=4)
+    ax.plot(F[:, 0], F[:, 1], color=C_HYP, lw=1.40, ls="-", zorder=4)
+    ax.plot(Sft[:, 0], Sft[:, 1], color=C_HYP, lw=1.05, ls="--", zorder=4)
 
-    base = line_pts(a, b, -0.35, -0.35)[0]
-    tip = base + 0.95 * a
+    base = line_pts(a, b, -0.55, -0.55)[0]
+    tip = base + 1.05 * a
     ax.annotate("", xy=tip, xytext=base,
-                arrowprops=dict(arrowstyle="-|>", lw=1.25, color=C_HYP, mutation_scale=9.5), zorder=6)
-    ax.text(tip[0] - 0.10, tip[1] - 0.32, r"$a_{i\mid t,j^{*}(k)}$",
-            ha="center", va="top", fontsize=9.4, color=C_HYP, fontweight="bold",
+                arrowprops=dict(arrowstyle="-|>", lw=1.10, color=C_HYP, mutation_scale=8.0), zorder=6)
+    ax.text(tip[0] - 0.55, tip[1] - 0.28, r"$a_{i\mid t,j^{*}(k)}$",
+            ha="center", va="top", fontsize=7.3, color=C_HYP,
             path_effects=halo, zorder=7)
 
-    # 标注右下角顶点（与正文式 29 符号 v_q 严格一致）
     v_front_right = V_e[np.argmax(V_e[:, 0])]
     ax.annotate(r"Vertices $v_{q}$",
-                xy=v_front_right, xytext=(6.2, -1.05),
-                ha="center", va="center", fontsize=9.0, color=C_EGO, fontweight="bold",
+                xy=v_front_right, xytext=(5.9, -1.65),
+                ha="center", va="center", fontsize=7.2, color=C_EGO,
                 path_effects=halo,
-                arrowprops=dict(arrowstyle="->", lw=0.75, color=C_EGO, shrinkA=0, shrinkB=3), zorder=7)
+                arrowprops=dict(arrowstyle="->", lw=0.70, color=C_EGO, shrinkA=0, shrinkB=2.5), zorder=7)
 
-    q0 = line_pts(a, b, -1.75, -1.75)[0]
+    q0 = line_pts(a, b, -1.65, -1.65)[0]
     dim_line(ax, q0, q0 + D_SAFE_OBCA * a, offset=0.0, text="", color=C_HYP, pad=0.0, ext=False)
-    ax.text(q0[0] - 0.25, q0[1] + 0.42, r"$d_{\mathrm{safe}}$",
-            ha="center", va="bottom", fontsize=9.2, color=C_HYP, fontweight="bold",
+    ax.text(q0[0] - 0.20, q0[1] + 0.45, r"$d_{\mathrm{safe}}$",
+            ha="center", va="bottom", fontsize=7.3, color=C_HYP,
             path_effects=halo)
 
-    ax.set_xlim(-2.90, 10.42)
-    ax.set_ylim(-1.60, 5.60)
+    ax.set_xlim(-2.70, 9.50)
+    ax.set_ylim(-3.10, 7.60)
 
 
 def panel_hybrid_warmstart(ax):
-    """(d) 混合 QP-对偶热启动与 IPOPT 主 NLP 精化（修正未定义符号为 (\lambda,\mu)，全量放大字号）。"""
+    """(d) 混合 QP-对偶热启动与 IPOPT 主 NLP 精化（适配 1x4 横排比例）。"""
     ax.set_axis_off()
-    halo = [pe.withStroke(linewidth=2.5, foreground="white")]
+    halo = [pe.withStroke(linewidth=2.2, foreground="white")]
 
     obs_c, obs_yaw = np.array([3.3, 2.75]), math.radians(8.0)
     V_obs = rect_vertices(tuple(obs_c), obs_yaw, CAR_L, CAR_W)
     _draw_cad_car(ax, tuple(obs_c), obs_yaw, CAR_L, CAR_W, C_OBS, steer=0.0,
-                  alpha_face=0.15, alpha_edge=0.55, lw=0.80,
+                  alpha_face=0.15, alpha_edge=0.55, lw=0.75,
                   show_four_wheels=True, wheel_alpha=0.24, show_cabin=True, zorder=1.8)
-    ax.add_patch(Polygon(V_obs, closed=True, fc=rgba(C_OBS, 0.05), ec=C_OBS, lw=1.65,
+    ax.add_patch(Polygon(V_obs, closed=True, fc=rgba(C_OBS, 0.05), ec=C_OBS, lw=1.50,
                          zorder=2.4, joinstyle="miter"))
     ax.text(obs_c[0], obs_c[1], r"$\mathcal{O}_{i,k\mid t}$", rotation=8.0,
-            ha="center", va="center", fontsize=9.4, color=C_OBS, fontweight="bold",
-            bbox=white_box(pad=0.08, alpha=0.90), zorder=6)
+            ha="center", va="center", fontsize=7.2, color=C_OBS,
+            bbox=white_box(pad=0.05, alpha=0.88), zorder=6)
 
-    x_s = np.linspace(-2.6, 9.6, 7)
-    x_dense = np.linspace(-2.6, 9.6, 120)
+    x_s = np.linspace(-2.4, 9.0, 7)
+    x_dense = np.linspace(-2.4, 9.0, 120)
 
     # 1. 名义参考线 p_k^ref (灰点线)
     y_ref_d = 1.15 + 0.12 * x_dense
-    ax.plot(x_dense, y_ref_d, ls=":", lw=1.25, color="#64748B",
+    ax.plot(x_dense, y_ref_d, ls=":", lw=1.10, color="#64748B",
             label=r"Ref. $p_{k}^{\mathrm{ref}}$", zorder=2)
 
     # 2. LTV-QP 初值轨迹 \tilde{X}^{qp} (蓝虚线)
     y_qp_d = 0.60 + 0.10 * x_dense - 1.98 * np.exp(-((x_dense - 3.2) / 3.4) ** 2)
     y_qp_s = 0.60 + 0.10 * x_s - 1.98 * np.exp(-((x_s - 3.2) / 3.4) ** 2)
-    ax.plot(x_dense, y_qp_d, ls="--", lw=1.40, color=OI["blue"],
+    ax.plot(x_dense, y_qp_d, ls="--", lw=1.25, color=OI["blue"],
             label=r"QP $\tilde{\mathbf{X}}^{\mathrm{qp}}$", zorder=3)
-    ax.plot(x_s, y_qp_s, marker="s", ls="none", ms=3.5, color=OI["blue"], zorder=4)
+    ax.plot(x_s, y_qp_s, marker="s", ls="none", ms=3.0, color=OI["blue"], zorder=4)
 
     # 3. IPOPT 主 NLP 精化最优轨迹 X^* (朱红实线)
     y_nlp_d = 0.60 + 0.10 * x_dense - 1.30 * np.exp(-((x_dense - 3.3) / 3.1) ** 2)
     y_nlp_s = 0.60 + 0.10 * x_s - 1.30 * np.exp(-((x_s - 3.3) / 3.1) ** 2)
-    ax.plot(x_dense, y_nlp_d, ls="-", lw=1.75, color=C_EGO,
+    ax.plot(x_dense, y_nlp_d, ls="-", lw=1.55, color=C_EGO,
             label=r"NLP $\mathbf{X}^{*}$", zorder=5)
-    ax.plot(x_s, y_nlp_s, marker="o", ls="none", ms=3.8, color=C_EGO, mec="white", mew=0.5, zorder=6)
+    ax.plot(x_s, y_nlp_s, marker="o", ls="none", ms=3.2, color=C_EGO, mec="white", mew=0.45, zorder=6)
 
-    # 绘制 k=3 处的精化自车多边形包络 + 内嵌图 1 同款 12 边形 CAD 轿车模型
     k_show = 3
     ego_c = np.array([x_s[k_show], y_nlp_s[k_show]])
     ego_yaw = math.radians(4.0)
     _draw_cad_car(ax, tuple(ego_c), ego_yaw, CAR_L, CAR_W, C_EGO, steer=0.06,
-                  alpha_face=0.15, alpha_edge=0.55, lw=0.80,
+                  alpha_face=0.15, alpha_edge=0.55, lw=0.75,
                   show_four_wheels=True, wheel_alpha=0.24, show_cabin=True, zorder=3.6)
-    V_ego = _draw_rect(ax, tuple(ego_c), ego_yaw, C_EGO, alpha_edge=0.95, alpha_face=0.04, lw=1.55, zorder=4)
+    V_ego = _draw_rect(ax, tuple(ego_c), ego_yaw, C_EGO, alpha_edge=0.95, alpha_face=0.04, lw=1.40, zorder=4)
 
-    # 分离超平面仅在自车与障碍物局部间隙段绘制
     dist_eo, p_e, p_o = poly_min_dist(V_ego, V_obs)
     mid_gap = 0.5 * (p_e + p_o)
     tng_ref = np.array([math.cos(math.radians(8.0)), math.sin(math.radians(8.0))])
-    H_ref_1, H_ref_2 = mid_gap - 1.85 * tng_ref, mid_gap + 3.05 * tng_ref
-    ax.plot([H_ref_1[0], H_ref_2[0]], [H_ref_1[1], H_ref_2[1]], ls="-", lw=1.55, color=C_HYP, zorder=5)
+    H_ref_1, H_ref_2 = mid_gap - 1.80 * tng_ref, mid_gap + 3.25 * tng_ref
+    ax.plot([H_ref_1[0], H_ref_2[0]], [H_ref_1[1], H_ref_2[1]], ls="-", lw=1.40, color=C_HYP, zorder=5)
 
     tng_init = np.array([math.cos(math.radians(16.0)), math.sin(math.radians(16.0))])
-    H_ini_1, H_ini_2 = mid_gap - 1.85 * tng_init, mid_gap + 3.05 * tng_init
-    ax.plot([H_ini_1[0], H_ini_2[0]], [H_ini_1[1], H_ini_2[1]], ls="--", lw=1.25, color=rgba(C_HYP, 0.85), zorder=4)
+    H_ini_1, H_ini_2 = mid_gap - 1.80 * tng_init, mid_gap + 2.85 * tng_init
+    ax.plot([H_ini_1[0], H_ini_2[0]], [H_ini_1[1], H_ini_2[1]], ls="--", lw=1.10, color=rgba(C_HYP, 0.85), zorder=4)
 
-    # 阻尼对偶初值与精化对偶变量标注（统一为正文第 545 行的 (\lambda,\mu) 符号，字号放大至 8.8–9.0 pt）
     pt_ini_arrow = H_ini_1 + 0.25 * tng_init
     ax.annotate(r"Init $0.7(\lambda,\mu)_{t-1}$",
-                xy=pt_ini_arrow, xytext=(-2.65, -1.15),
-                ha="left", va="center", fontsize=8.8, color=C_HYP, fontweight="bold",
+                xy=pt_ini_arrow, xytext=(-2.45, -1.85),
+                ha="left", va="center", fontsize=7.0, color=C_HYP,
                 path_effects=halo,
-                arrowprops=dict(arrowstyle="->", lw=0.75, color=C_HYP, shrinkA=0, shrinkB=2.5), zorder=7)
+                arrowprops=dict(arrowstyle="->", lw=0.70, color=C_HYP, shrinkA=0, shrinkB=2.0), zorder=7)
 
     ax.annotate(r"Refined $(\lambda,\mu)^{*}$",
-                xy=H_ref_2 - 0.35 * tng_ref, xytext=(6.15, 3.25),
-                ha="left", va="center", fontsize=9.0, color=C_HYP, fontweight="bold",
+                xy=H_ref_2 - 0.08 * tng_ref, xytext=(6.65, 4.45),
+                ha="center", va="center", fontsize=7.0, color=C_HYP,
                 path_effects=halo,
-                arrowprops=dict(arrowstyle="->", lw=0.75, color=C_HYP, shrinkA=0, shrinkB=2.5), zorder=7)
+                arrowprops=dict(arrowstyle="->", lw=0.70, color=C_HYP, shrinkA=0, shrinkB=2.0), zorder=7)
 
-    # 顶部水平单行无框图例（字号放大至 8.6 pt）
-    ax.legend(loc="upper center", bbox_to_anchor=(0.50, 1.02), ncol=3, fontsize=8.6,
-              frameon=False, handlelength=1.5, columnspacing=1.1, handletextpad=0.4)
-    ax.set_xlim(-2.90, 10.42)
-    ax.set_ylim(-1.60, 5.60)
+    ax.legend(loc="upper left", bbox_to_anchor=(-0.02, 1.03), ncol=2, fontsize=6.4,
+              frameon=False, handlelength=1.3, columnspacing=0.6, handletextpad=0.3, labelspacing=0.2)
+    ax.set_xlim(-2.70, 9.85)
+    ax.set_ylim(-3.10, 7.60)
 
 
 def make_fig4():
-    fig, axes = plt.subplots(2, 2, figsize=(DOUBLE_COL_IN, 4.10))
-    fig.subplots_adjust(left=0.015, right=0.985, bottom=0.015, top=0.935, wspace=0.05, hspace=0.14)
+    fig, axes = plt.subplots(1, 4, figsize=(DOUBLE_COL_IN, 2.02))
+    fig.subplots_adjust(left=0.010, right=0.990, bottom=0.145, top=0.935, wspace=0.05)
     for ax in axes.flat:
         ax.set_aspect("equal", adjustable="box")
 
-    panel_ellipse_vs_box(axes[0, 0])
-    panel_dual_separation(axes[0, 1])
-    panel_vertex_halfspace(axes[1, 0])
-    panel_hybrid_warmstart(axes[1, 1])
+    panel_ellipse_vs_box(axes[0])
+    panel_dual_separation(axes[1])
+    panel_vertex_halfspace(axes[2])
+    panel_hybrid_warmstart(axes[3])
 
-    for ax, lab in zip(axes.flat, "abcd"):
-        panel_label(ax, "(%s)" % lab, dx=-0.02, dy=1.02)
+    subtitles = [
+        r"$\mathbf{(a)}$ Envelope comparison",
+        r"$\mathbf{(b)}$ Dual separating hyperplane",
+        r"$\mathbf{(c)}$ Active-edge QP linearization",
+        r"$\mathbf{(d)}$ Hybrid QP-dual warm start",
+    ]
+    for ax, st in zip(axes.flat, subtitles):
+        pos = ax.get_position()
+        fig.text(pos.x0 + 0.50 * pos.width, 0.035, st,
+                 ha="center", va="bottom", fontsize=7.5, color="#000000")
 
     savefig(fig, "fig4_geometry")
     plt.close(fig)

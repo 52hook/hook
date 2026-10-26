@@ -679,21 +679,23 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
 
     # ---- (a) 视窗 ----
     if window_mode:
-        xc, yc = 0.5 * (cx0.min() + cx0.max()), 0.5 * (cy0.min() + cy0.max())
-        half = 0.5 * max(70.0, max(np.ptp(cx0), np.ptp(cy0)) + 12.0)
+        ylo = float(cy0.min()) - 4.5
+        yhi = float(cy0.max()) + 4.5
+        span_y = yhi - ylo
+        xlo = float(cx0.min()) - 13.0
+        xhi = xlo + span_y * 1.02
     else:
         loop = np.abs(full["ck0"]) > 0.03
         if loop.sum() < 10:
             loop = np.ones_like(loop, dtype=bool)
         xc, yc = np.median(full["cx0"][loop]), np.median(full["cy0"][loop])
         half = 31.0
-    xlo, xhi, ylo, yhi = xc - half, xc + half, yc - half, yc + half
-    if not window_mode:
+        xlo, xhi, ylo, yhi = xc - half, xc + half, yc - half, yc + half
         xhi += 0.20 * (xhi - xlo)     # 右侧留白放插图
 
-    fig = plt.figure(figsize=(DOUBLE_COL_IN, 2.75))
-    gs = fig.add_gridspec(1, 3, width_ratios=[1.42, 1.0, 1.0], wspace=0.48,
-                          left=0.05, right=0.985, bottom=0.16, top=0.905)   # 2026-09-18: 底部图例移入 (a) 后收窄下边距
+    fig = plt.figure(figsize=(DOUBLE_COL_IN, 1.98))
+    gs = fig.add_gridspec(1, 3, width_ratios=[1.00, 1.13, 1.13], wspace=0.28,
+                          left=0.055, right=0.988, bottom=0.195, top=0.885)
     ax_a = fig.add_subplot(gs[0, 0])
     ax_b = fig.add_subplot(gs[0, 1])
     ax_c = fig.add_subplot(gs[0, 2])
@@ -703,7 +705,7 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
     ax_a.set_xlim(xlo, xhi)
     ax_a.set_ylim(ylo, yhi)
     ax_a.set_aspect("equal", adjustable="box")
-    ax_a.set_anchor("N")
+    ax_a.set_anchor("C")
     lw_corr = data_width_to_pt(ax_a, fig, 2 * LANE_HALF_WIDTH)
     ax_a.plot(cx0, cy0, color=OI["skyblue"], alpha=0.22, lw=lw_corr, solid_capstyle="round",
               solid_joinstyle="round", zorder=1)
@@ -711,18 +713,18 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
     ax_a.plot(cx, cy, color=OI["vermillion"], lw=1.7, zorder=5)
     ax_a.plot(cx0, cy0, ls=(0, (1.0, 1.6)), color="#444444", lw=0.9, zorder=6)     # 原始样条画最上层
     wp = res["wp_xy"]
-    ax_a.plot(wp[1:, 0], wp[1:, 1], marker="o", ms=2.4, mfc="#6E6E6E", mec="white", mew=0.3, ls="none", zorder=7)
+    ax_a.plot(wp[1:, 0], wp[1:, 1], marker="o", ms=2.2, mfc="#6E6E6E", mec="white", mew=0.3, ls="none", zorder=7)
     if window_mode:
         ego_xy, ego_yaw = res["ego_xy"], res["ego_yaw"]
         c_, s_ = math.cos(ego_yaw), math.sin(ego_yaw)
         box = np.array([[2.25, 1.0], [2.25, -1.0], [-2.25, -1.0], [-2.25, 1.0]]) @ np.array([[c_, s_], [-s_, c_]])
         ax_a.add_patch(plt.Polygon(box + ego_xy, closed=True, fc="white", ec="k", lw=0.8, zorder=8))
-        ax_a.plot(*ego_xy, marker=(3, 0, math.degrees(ego_yaw) - 90.0), ms=4.5, color="k", ls="none", zorder=9)
+        ax_a.plot(*ego_xy, marker=(3, 0, math.degrees(ego_yaw) - 90.0), ms=4.2, color="k", ls="none", zorder=9)
     ax_a.set_xlabel("x (m)")
     ax_a.set_ylabel("y (m)")
-    ax_a.set_title(title_a, fontsize=6.8, pad=2, loc="right")
+    ax_a.set_title(title_a, fontsize=6.4, pad=3.5, loc="right")
     ax_a.tick_params(pad=1.5)
-    panel_label(ax_a, "(a)", dx=-0.16)
+    panel_label(ax_a, "(a)", dx=-0.23)
 
     # 2026-09-18: 删除整条路线插图（用户要求，视觉冗余）
 
@@ -733,15 +735,15 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
         ax_b.plot(s, res["alpha_eff"], color=OI["blue"], lw=1.1, label=r"$\alpha_{\rm eff}$ after cap and averaging")
         ax_b.axhline(ALPHA_BS_MAX, color="k", lw=0.4, ls=":", alpha=0.6)
         ax_b.axhline(ALPHA_BS_MIN, color="k", lw=0.4, ls=":", alpha=0.6)
-        ax_b.text(s[0] + 1.0, ALPHA_BS_MAX + 0.012, r"$\alpha_{\max}$", ha="left", va="bottom", fontsize=6)
-        ax_b.text(s[-1] - 1.0, ALPHA_BS_MIN - 0.012, r"$\alpha_{\min}$", ha="right", va="top", fontsize=6)
+        ax_b.text(s[0] + 1.0, ALPHA_BS_MAX + 0.015, r"$\alpha_{\max}$", ha="left", va="bottom", fontsize=6)
+        ax_b.text(s[-1] - 1.0, ALPHA_BS_MIN - 0.015, r"$\alpha_{\min}$", ha="right", va="top", fontsize=6)
         ax_b.set_ylim(0, 0.6)
         ax_b.set_xlim(0, s[-1])
         ax_b.set_xlabel("Arc length s (m)")
         ax_b.set_ylabel(r"Blend weight $\alpha$")
         ax_b.grid(True, axis="y")
-        ax_b.legend(loc="lower right", bbox_to_anchor=(1.03, 0.995), fontsize=5.8, handlelength=1.3, borderaxespad=0.0)
-        panel_label(ax_b, "(b)", dx=-0.27)
+        ax_b.legend(loc="lower right", bbox_to_anchor=(1.02, 1.01), fontsize=5.8, handlelength=1.3, borderaxespad=0.0)
+        panel_label(ax_b, "(b)", dx=-0.22)
         # ---------- (c) B 样条与融合线各自相对原始线的横向偏离（切角抑制） ----------
         # 2026-10-05: 原 0.35 m cap 对比在本窗口不起作用, 改为直接展示融合对 B 样条切角的抑制
         dev_bs_lat = polyline_nearest_dist(sm, raw_xy)
@@ -750,10 +752,10 @@ def _fig2_draw(route: dict, res: dict, full: dict, stem: str, window_mode: bool,
         ax_c.set_ylim(0, max(0.45, 1.15 * float(dev_bs_lat.max())))
         ax_c.set_xlim(0, s[-1])
         ax_c.set_xlabel("Arc length s (m)")
-        ax_c.set_ylabel("Lateral deviation from raw course (m)")
+        ax_c.set_ylabel("Lateral deviation (m)")
         ax_c.grid(True, axis="y")
-        ax_c.legend(loc="lower right", bbox_to_anchor=(1.03, 0.995), fontsize=5.8, handlelength=1.3, borderaxespad=0.0)
-        panel_label(ax_c, "(c)", dx=-0.27)
+        ax_c.legend(loc="lower right", bbox_to_anchor=(1.02, 1.01), fontsize=5.8, handlelength=1.3, borderaxespad=0.0)
+        panel_label(ax_c, "(c)", dx=-0.22)
     else:
         # ---------- (b) 曲率：线性轴裁剪 ±0.4，越界段用上下边缘三角标记并在图例计数 ----------
         series = [("Raw course", ck0, "#555555", 0.8, 0.0), ("B-spline", ck_bsp, OI["blue"], 0.6, 0.06),
