@@ -759,19 +759,20 @@ def _f3_surf(ax, X, Y, Z, cap, gamma=0.85, rstride=3, cstride=3):
     )
 
 
-def _f3_style_3d(ax, xl, yl, xlim, ylim, zlim, zt, elev=30, azim=-58, aspect=(1.25, 1.0, 0.60), zoom=0.84):
+def _f3_style_3d(ax, xl, yl, xlim, ylim, zlim, zt, elev=30, azim=-58, aspect=(1.25, 1.0, 0.60), zoom=0.92):
     """标准 IEEE 科研 3D 坐标框样式：纯黑刻度与轴标、浅灰网格背板。"""
+    ax.patch.set_alpha(0.0)
     ax.view_init(elev=elev, azim=azim)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.set_zlim(*zlim)
     ax.set_box_aspect(aspect, zoom=zoom)
     ax.set_zticks(zt)
-    ax.set_xlabel(xl, fontsize=6.8, labelpad=-7.0, color=F3_DARK)
-    ax.set_ylabel(yl, fontsize=6.8, labelpad=-7.0, color=F3_DARK)
-    ax.tick_params(axis="x", labelsize=6.0, pad=-3.5, colors=F3_DARK)
-    ax.tick_params(axis="y", labelsize=6.0, pad=-3.5, colors=F3_DARK)
-    ax.tick_params(axis="z", labelsize=6.0, pad=-2.5, colors=F3_DARK)
+    ax.set_xlabel(xl, fontsize=6.9, labelpad=-6.5, color=F3_DARK)
+    ax.set_ylabel(yl, fontsize=6.9, labelpad=-6.5, color=F3_DARK)
+    ax.tick_params(axis="x", labelsize=6.1, pad=-3.2, colors=F3_DARK)
+    ax.tick_params(axis="y", labelsize=6.1, pad=-3.2, colors=F3_DARK)
+    ax.tick_params(axis="z", labelsize=6.1, pad=-2.2, colors=F3_DARK)
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
         axis.pane.set_facecolor((0.965, 0.968, 0.975, 1.0))
         axis.pane.set_edgecolor("#CBD5E1")
@@ -794,7 +795,7 @@ def _f3_ell_xy(cx, cy, a, b, yaw=0.0, n=220):
     )
 
 
-def _f3_lab(ax, xyz, text, dxy, fs=6.8, ha="center", va="center", arrow=True):
+def _f3_lab(ax, xyz, text, dxy, fs=6.9, ha="center", va="center", arrow=True):
     """标准顶刊纯黑正体数学标注 + 细黑单向箭头 ->（零白边光晕，零粗体彩字）。"""
     x2, y2, _ = proj3d.proj_transform(*xyz, ax.get_proj())
     arrowprops = (
@@ -870,22 +871,21 @@ def _f3_scene_single_point(S, D, k=0):
 
 def make_fig3():
     """生成第 4.3 节规则势场层 1x4 科学数值三维势场曲面图 (latex/figures/fig3_potential.pdf)。"""
-    fig = plt.figure(figsize=(DOUBLE_COL_IN, 1.98))
+    fig = plt.figure(figsize=(DOUBLE_COL_IN, 2.02))
     gs = fig.add_gridspec(
         1, 4,
-        width_ratios=[1.04, 1.06, 1.02, 1.15],
-        left=0.016,
-        right=0.916,
-        bottom=0.115,
-        top=0.985,
-        wspace=0.11,
+        width_ratios=[1.02, 1.08, 1.04, 1.15],
+        left=0.008,
+        right=0.935,
+        bottom=0.142,
+        top=0.988,
+        wspace=0.095,
     )
     axes = [fig.add_subplot(gs[i], projection="3d", computed_zorder=False) for i in range(4)]
 
     # ==========================================================================
     # (a) 车道保持与姿态一致性势场 phi_lane = d^2 + alpha_psi * (psi - psi_ref)^2 (式 27-29)
-    #     主曲面展示沿微弯 B-spline 参考线 r(s) 的基准二次势谷 (Delta psi = 0)，
-    #     上层深色稀疏网格面展示存在航向偏差 Delta psi = 12 deg 时的整体势能抬升 +alpha_psi*Delta psi^2
+    #     沿微弯 B-spline 参考线 r(s) 的二次势谷与两侧走廊边界 +d_L / -d_R
     # ==========================================================================
     ax = axes[0]
     R_ARC, L_ARC = 68.0, 22.0
@@ -898,23 +898,12 @@ def make_fig3():
     cap_a = 9.0
     _f3_surf(ax, X_a, Y_a, Z_a0, cap_a, gamma=0.88, rstride=3, cstride=3)
 
-    # 叠加航向偏差 Delta psi = 12 deg 时的抬升网格层，完整对应式 (29) 第二项
-    dpsi_demo = math.radians(12.0)
-    Z_a_psi = np.minimum(_phi_lane(DD, dpsi_demo), cap_a)
-    ax.plot_wireframe(
-        X_a, Y_a, Z_a_psi,
-        rstride=13, cstride=17,
-        color=(0.08, 0.10, 0.15, 0.45),
-        linewidth=0.35,
-        zorder=14,
-    )
-
     xr = R_ARC * np.sin(s1 / R_ARC)
     yr = R_ARC * (1.0 - np.cos(s1 / R_ARC))
     nx = -np.sin(s1 / R_ARC)
     ny = np.cos(s1 / R_ARC)
-    # 谷底 B 样条中心参考线 r(s) (d=0) 与两侧走廊边界 +-d_{L/R} = +-2.5 m
-    _f3_on_surf(ax, xr, yr, np.zeros_like(s1), cap_a, lift=0.015, color=F3_DARK, lw=0.80, ls="-.")
+    # 谷底 B 样条中心参考线 r(s) (d=0) 与两侧走廊边界 +d_L / -d_R = +-2.5 m
+    _f3_on_surf(ax, xr, yr, np.zeros_like(s1), cap_a, lift=0.015, color=F3_DARK, lw=0.85, ls="-.")
     for sg in (-1.0, 1.0):
         _f3_on_surf(
             ax,
@@ -924,12 +913,12 @@ def make_fig3():
             cap_a,
             lift=0.015,
             color=F3_DARK,
-            lw=0.75,
+            lw=0.80,
             ls="--",
         )
 
     _f3_style_3d(ax, "$x$ (m)", "$y$ (m)", (-0.5, 22.5), (-3.2, 6.8), (0.0, cap_a), [0, 4, 8],
-                 elev=36, azim=-154, aspect=(1.28, 1.05, 0.54), zoom=0.84)
+                 elev=36, azim=-154, aspect=(1.28, 1.05, 0.55), zoom=0.92)
     ax.set_xticks([0, 10, 20])
     ax.set_yticks([-2, 2, 6])
 
@@ -953,13 +942,21 @@ def make_fig3():
     Z_b_gripc = w_cf_gripc * raw_cf(S_b, L_b)
     _f3_surf(ax, S_b, L_b, Z_b_gripc, cap_b, gamma=0.82, rstride=3, cstride=3)
 
-    # 横截剖面 Delta_parallel = -4.2 m：实线 GRIPC (w_cf=1.5) vs 虚线 w/o IGPR (w_cf=1.0)
+    # 横截剖面 Delta_parallel = -4.15 m：实线 GRIPC (w_cf=1.5) vs 虚线 w/o IGPR (w_cf=1.0)
+    x_sec = -4.15
     ls_prof = np.linspace(-5.0, 5.0, 200)
-    xs_prof = np.full_like(ls_prof, -4.2)
-    _f3_on_surf(ax, xs_prof, ls_prof, w_cf_gripc * raw_cf(xs_prof, ls_prof), cap_b,
-                lift=0.018, color=F3_DARK, lw=1.05, ls="-")
-    _f3_on_surf(ax, xs_prof, ls_prof, 1.0 * raw_cf(xs_prof, ls_prof), cap_b,
-                lift=0.012, color=F3_DARK, lw=0.90, ls=":")
+    xs_prof = np.full_like(ls_prof, x_sec)
+    zg_prof = w_cf_gripc * raw_cf(xs_prof, ls_prof)
+    zn_prof = 1.0 * raw_cf(xs_prof, ls_prof)
+    _f3_on_surf(ax, xs_prof, ls_prof, zg_prof, cap_b, lift=0.018, color=F3_DARK, lw=1.10, ls="-")
+    _f3_on_surf(ax, xs_prof, ls_prof, zn_prof, cap_b, lift=0.012, color=F3_DARK, lw=0.95, ls="--")
+    # 在两条横截剖面之间绘制细腻垂向标尺连线，直观凸显 w_cf 缩放增益 Δz
+    for idx_t in range(25, 176, 15):
+        z_lo = min(float(zn_prof[idx_t]), cap_b) + 0.012 * cap_b
+        z_hi = min(float(zg_prof[idx_t]), cap_b) + 0.018 * cap_b
+        if z_hi - z_lo > 12.0:
+            ax.plot([x_sec, x_sec], [ls_prof[idx_t], ls_prof[idx_t]], [z_lo, z_hi],
+                    color=F3_DARK, lw=0.42, alpha=0.65, zorder=21)
 
     # 后方 TTC = T_thr = 6 s 过零激活起点 (d_lv = 18 m)
     th_ttc = np.linspace(math.pi - 0.25, math.pi + 0.25, 80)
@@ -967,16 +964,16 @@ def make_fig3():
                 lift=0.015, color=F3_DARK, lw=0.85, ls="--")
 
     _f3_style_3d(ax, "Long. (m)", "Lat. (m)", (-20.0, 6.0), (-5.0, 5.0), (0.0, cap_b), [0, 200, 400],
-                 elev=30, azim=-58, aspect=(1.42, 1.0, 0.62), zoom=0.84)
+                 elev=30, azim=-58, aspect=(1.42, 1.0, 0.62), zoom=0.90)
     ax.set_xticks([-20, -10, 0])
     ax.set_yticks([-4, 0, 4])
 
     # ==========================================================================
     # (c) 行人双有理长尾核 phi_ped 与前移膨胀椭圆 (式 37)
-    #     曲面上标注 q_j = 0.64 核心/长尾切换环、q_j = 1 前移标称椭圆与 +2 sigma_j 膨胀椭圆
+    #     收紧坐标域至 [-4.3, 4.3] x [-3.8, 4.9]，使势峰与三圈椭圆饱满舒展
     # ==========================================================================
     ax = axes[2]
-    X_c, Y_c = np.meshgrid(np.linspace(-6.8, 6.8, 168), np.linspace(-5.8, 7.2, 156))
+    X_c, Y_c = np.meshgrid(np.linspace(-4.3, 4.3, 156), np.linspace(-3.8, 4.9, 156))
     dlt, A_p, B_p = _ped_ellipse(FIG3_V_PED, PED_SIGMA_NOM)
     _, A_p2, B_p2 = _ped_ellipse(FIG3_V_PED, PED_SIGMA_ABRUPT_GAIN * PED_SIGMA_NOM)
     fped = lambda x, y: _phi_ped_point(_q_ellipse(x, y - dlt, B_p, A_p))
@@ -986,18 +983,18 @@ def make_fig3():
     # q_j = 0.64 主导切换环 (点线)、q_j = 1 标称前移椭圆 (实线) 与 2*sigma_j 突变膨胀椭圆 (虚线)
     ex064, ey064 = _f3_ell_xy(0.0, dlt, B_p * math.sqrt(0.64), A_p * math.sqrt(0.64))
     _f3_on_surf(ax, ex064, ey064, np.full_like(ex064, float(_phi_ped_point(0.64))), cap_c,
-                lift=0.015, color=F3_DARK, lw=0.75, ls=":")
+                lift=0.015, color=F3_DARK, lw=0.80, ls=":")
     ex1, ey1 = _f3_ell_xy(0.0, dlt, B_p, A_p)
     _f3_on_surf(ax, ex1, ey1, np.full_like(ex1, float(_phi_ped_point(1.0))), cap_c,
-                lift=0.015, color=F3_DARK, lw=0.90, ls="-")
+                lift=0.015, color=F3_DARK, lw=0.95, ls="-")
     ex2, ey2 = _f3_ell_xy(0.0, dlt, B_p2, A_p2)
     _f3_on_surf(ax, ex2, ey2, fped(ex2, ey2), cap_c,
-                lift=0.015, color=F3_DARK, lw=0.80, ls="--")
+                lift=0.015, color=F3_DARK, lw=0.85, ls="--")
 
-    _f3_style_3d(ax, "Long. (m)", "Lat. (m)", (-6.8, 6.8), (-5.8, 7.2), (0.0, cap_c), [0, 200, 400],
-                 elev=30, azim=-58, aspect=(1.05, 1.0, 0.64), zoom=0.84)
-    ax.set_xticks([-5, 0, 5])
-    ax.set_yticks([-5, 0, 5])
+    _f3_style_3d(ax, "Long. (m)", "Lat. (m)", (-4.3, 4.3), (-3.8, 4.9), (0.0, cap_c), [0, 200, 400],
+                 elev=30, azim=-58, aspect=(1.06, 1.0, 0.64), zoom=0.90)
+    ax.set_xticks([-4, 0, 4])
+    ax.set_yticks([-3, 0, 3])
 
     # ==========================================================================
     # (d) 城市多参与者三维复合规则势场 Phi_rule (式 26)
@@ -1014,11 +1011,11 @@ def make_fig3():
         xx = np.linspace(0.0, 40.0, 260)
         yy = np.full_like(xx, yv)
         _f3_on_surf(ax, xx, yy, _f3_scene_single_point(xx, yy), cap_d, lift=0.014,
-                    color=F3_DARK, lw=0.78, ls="--")
+                    color=F3_DARK, lw=0.80, ls="--")
 
     _f3_style_3d(ax, "Long. (m)", "Lat. (m)", (0.0, 40.0), (-7.0, 7.2), (0.0, cap_d), [0, 250, 500],
-                 elev=31, azim=-60, aspect=(1.46, 1.0, 0.58), zoom=0.78)
-    ax.set_ylabel("Lat. (m)", fontsize=6.5, labelpad=-6.0, color=F3_DARK)
+                 elev=31, azim=-60, aspect=(1.46, 1.0, 0.58), zoom=0.86)
+    ax.set_ylabel("Lat. (m)", fontsize=6.6, labelpad=-6.0, color=F3_DARK)
     ax.set_xticks([0, 20, 40])
     ax.set_yticks([-5, 0, 5])
 
@@ -1027,35 +1024,36 @@ def make_fig3():
     # ==========================================================================
     fig.canvas.draw()
 
-    # (a) 标注：左、中、右三处浅灰背板空白区，互不干扰
+    # (a) 标注：左走廊边界 +d_L、中心参考线 r(s)、右走廊边界 -d_R，对称清爽无重影
+    _f3_lab(axes[0], (xr[62] + D_CORRIDOR * nx[62], yr[62] + D_CORRIDOR * ny[62], D_CORRIDOR ** 2),
+            r"$+d_L$", (-13, 14))
+    _f3_lab(axes[0], (xr[108], yr[108], 0.1), r"$r(s)$", (-4, 21))
     _f3_lab(axes[0], (xr[86] - D_CORRIDOR * nx[86], yr[86] - D_CORRIDOR * ny[86], D_CORRIDOR ** 2),
-            r"$\pm d_{L/R}$", (12, 14))
-    _f3_lab(axes[0], (xr[108], yr[108], 0.1), r"$r(s)$", (-6, 22))
-    _f3_lab(axes[0], (xr[58] + 2.1 * nx[58], yr[58] + 2.1 * ny[58], float(_phi_lane(2.1, dpsi_demo))),
-            r"$+\alpha_\psi\Delta\psi^2$", (-18, 15))
+            r"$-d_R$", (12, 13))
 
-    # (b) 标注：左背板标 TTC=T_thr，中上背板标 w_cf=1.5，右上背板标 w_cf=1.0（零交叉）
-    z_g_pt = min(float(w_cf_gripc * raw_cf(-4.2, -0.6)), cap_b)
-    z_n_pt = min(float(1.0 * raw_cf(-4.2, 1.6)), cap_b)
-    _f3_lab(axes[1], (-18.0, 0.6, 0.0), r"$\mathrm{TTC}{=}T_{\mathrm{thr}}$", (-8, 15))
-    _f3_lab(axes[1], (-4.2, -0.6, z_g_pt), r"$w_{\mathrm{cf}}{=}1.5$", (-10, 16))
-    _f3_lab(axes[1], (-4.2, 1.6, z_n_pt), r"$w_{\mathrm{cf}}{=}1.0$", (16, 15))
+    # (b) 标注：左背板标 TTC=T_thr，中上背板标 w_cf=1.5，右前肩部空白处标 w_cf=1.0
+    z_g_pt = min(float(w_cf_gripc * raw_cf(x_sec, -0.35)), cap_b)
+    z_n_pt = min(float(1.0 * raw_cf(x_sec, 1.85)), cap_b)
+    _f3_lab(axes[1], (-18.0, 0.5, 0.0), r"$\mathrm{TTC}{=}T_{\mathrm{thr}}$", (-6, 15))
+    _f3_lab(axes[1], (x_sec, -0.35, z_g_pt), r"$w_{\mathrm{cf}}{=}1.5$", (-14, 15))
+    _f3_lab(axes[1], (x_sec, 1.85, z_n_pt), r"$w_{\mathrm{cf}}{=}1.0$", (21, -5))
 
     # (c) 标注：中上标 (1+q_j)^{-6}，左上标 (1+q_j)^{-2}，左下标 +2*sigma_j，右上标 (A_j^p, B_j^p)
-    _f3_lab(axes[2], (0.0, dlt, 445.0), r"$(1{+}q_j)^{-6}$", (8, 9))
-    _f3_lab(axes[2], (-1.3, dlt + 1.1, float(fped(-1.3, dlt + 1.1))), r"$(1{+}q_j)^{-2}$", (-20, 16))
-    _f3_lab(axes[2], (-B_p2, dlt - 1.2, float(fped(-B_p2, dlt - 1.2))), r"$+2\sigma_j$", (-18, 11))
-    _f3_lab(axes[2], (B_p * 0.78, dlt + A_p * 0.62, float(_phi_ped_point(1.0))),
-            r"$(A_j^{\mathrm{p}},B_j^{\mathrm{p}})$", (6, 17))
+    _f3_lab(axes[2], (0.0, dlt, 445.0), r"$(1{+}q_j)^{-6}$", (6, 8))
+    _f3_lab(axes[2], (-1.35, dlt + 1.0, float(fped(-1.35, dlt + 1.0))), r"$(1{+}q_j)^{-2}$", (-17, 15))
+    _f3_lab(axes[2], (-B_p2 * 0.88, dlt - A_p2 * 0.45, float(fped(-B_p2 * 0.88, dlt - A_p2 * 0.45))),
+            r"$+2\sigma_j$", (-14, 11))
+    _f3_lab(axes[2], (B_p * 0.80, dlt + A_p * 0.58, float(_phi_ped_point(1.0))),
+            r"$(A_j^{\mathrm{p}},B_j^{\mathrm{p}})$", (5, 14))
 
     # (d) 标注：Lead SV、Ped.、Opp. SV 与走廊边界 +-d_{L/R}
-    _f3_lab(axes[3], (sc["s_lv"], 0.0, cap_d), "Lead SV", (-6, 9))
-    _f3_lab(axes[3], (sc["ped"][0], sc["ped"][1] + dlt, cap_d), "Ped.", (8, 10))
-    _f3_lab(axes[3], (sc["opp"][0], sc["opp"][1], cap_d), "Opp. SV", (-8, 9))
+    _f3_lab(axes[3], (sc["s_lv"], 0.0, cap_d), "Lead SV", (-6, 8))
+    _f3_lab(axes[3], (sc["ped"][0], sc["ped"][1] + dlt, cap_d), "Ped.", (7, 9))
+    _f3_lab(axes[3], (sc["opp"][0], sc["opp"][1], cap_d), "Opp. SV", (-8, 8))
     _f3_lab(axes[3], (7.0, D_CORRIDOR, float(_f3_scene_single_point(7.0, D_CORRIDOR))),
-            r"$\pm d_{L/R}$", (-10, 13))
+            r"$\pm d_{L/R}$", (-10, 12))
 
-    # 底部四面板子标题
+    # 底部四面板子标题（紧贴 3D 视框底部）
     subtitles = [
         r"(a) $\phi_{\mathrm{lane}}$ along B-spline corridor",
         r"(b) $w_{\mathrm{cf}}\phi_{\mathrm{cf}}$ with IGPR weight",
@@ -1064,7 +1062,7 @@ def make_fig3():
     ]
     for i, title_str in enumerate(subtitles):
         bb = axes[i].get_position()
-        fig.text(0.5 * (bb.x0 + bb.x1), 0.018, title_str, ha="center", va="bottom",
+        fig.text(0.5 * (bb.x0 + bb.x1), 0.024, title_str, ha="center", va="bottom",
                  fontsize=7.6, color=F3_DARK)
 
     savefig(fig, "fig3_potential")
