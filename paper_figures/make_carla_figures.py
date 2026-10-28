@@ -1378,8 +1378,15 @@ def pick_keyframe_times(t: np.ndarray, v: np.ndarray, min_dist: np.ndarray, obs,
 FIG6_CROP_W, FIG6_CROP_H = 688, 387     # 688 / 387 = 16 / 9（43 × (16, 9)）
 FIG6_VSHIFT: dict = {}                  # {(scenario, col): 竖直偏移 / 瓦片高}
 FIG6_VSHIFT_MAX = 0.25
-# 按场景固定关键帧时刻 (s)：表内场景直接用这些时刻（取最近可用帧），不走 pick_keyframe_times；其余场景不变
-FIG6_FIXED_TIMES = {"mixed_traffic": [1.9, 3.4, 7.1, 25.4]}
+# 图 6 (论文图 7) 专用种子覆盖与固定关键帧时刻 (s)：交叉口选用多车密集交互的 seed 75，
+# 各场景关键帧覆盖起步/接近、冲突区交互、动态避让与驶离，且均展示 CARLA 原生渲染的红色 IGPR 预测条带
+FIG6_SEEDS = {"unsig_crossroad": 75}
+FIG6_FIXED_TIMES = {
+    "unsig_crossroad": [6.95, 8.45, 10.45, 13.45],
+    "roundabout": [5.45, 10.45, 14.45, 18.45],
+    "multilaneACC": [4.45, 6.45, 12.45, 18.45],
+    "mixed_traffic": [1.9, 3.4, 7.1, 25.4],
+}
 
 
 def fig6_keyframes(ctx: Ctx):
@@ -1395,7 +1402,8 @@ def fig6_keyframes(ctx: Ctx):
     axes = place_tiles(fig, n_rows, n_cols, tile_w, tile_h, TILE_GAP_IN, TILE_GAP_IN, left_in, bottom_in)
     chosen = {}
     for r, scen in enumerate(SCENARIO_ORDER):
-        tag = ctx.gripc(scen)
+        seed_override = FIG6_SEEDS.get(scen)
+        tag = f"GRIPC_{scen}_s{seed_override}" if (seed_override is not None and not ctx.suffix) else ctx.gripc(scen)
         sc = load_sidecar(tag)
         meta = sc["meta"]
         t = np.asarray(sc["t"], dtype=float)
